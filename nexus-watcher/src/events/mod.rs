@@ -272,17 +272,21 @@ mod tests {
             bytes::Bytes::from(vec![0u8; body]),
         )]);
         let body_inner = reqwest::Body::wrap_stream(stream);
-        reqwest::Response::from(
-            http::Response::builder()
-                .header("content-length", advertised.to_string())
-                .body(body_inner)
-                .unwrap(),
-        )
+        let mut res = http::Response::new(body_inner);
+        res.headers_mut().insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from(advertised),
+        );
+        res.into()
     }
 
     #[tokio::test]
     async fn fetch_capped_precheck_rejects_lying_high_cl() {
-        let err = fetch_capped(lying_high_cl(10, 10_000), 100)
+        let resp = lying_high_cl(10, 10_000);
+        // Verify the content-length header is actually preserved
+        let cl = resp.content_length();
+        assert!(matches!(cl, Some(10_000)), "content-length was not preserved, got {:?}", cl);
+        let err = fetch_capped(resp, 100)
             .await
             .unwrap_err();
         assert!(matches!(
