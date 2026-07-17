@@ -1,8 +1,4 @@
 use crate::{
-    media::{
-        processors::MediaProcessorError,
-        MediaGate,
-    },
     models::file::{FileDetails, FileUrls},
     types::DynError,
 };
@@ -17,10 +13,10 @@ use tokio::fs;
 use utoipa::ToSchema;
 
 mod concurrency;
-mod processors;
+pub mod processors;
 
 pub use concurrency::MediaGate;
-pub use processors;
+use processors::MediaProcessorError;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, ToSchema, Clone)]
 #[serde(rename_all = "lowercase")]

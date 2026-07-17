@@ -1,6 +1,6 @@
 use crate::{
     media::{FileVariant, VariantController},
-    models::error::{ModelError, ModelResult},
+    models::error::ModelResult,
 };
 use pubky_app_specs::PubkyAppBlob;
 use std::path::PathBuf;
