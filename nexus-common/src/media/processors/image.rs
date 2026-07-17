@@ -12,6 +12,16 @@ const SMALL_IMAGE_WIDTH: &str = "320";
 const FEED_IMAGE_WIDTH: &str = "720";
 const IMAGE_FORMAT: &str = "webp";
 
+// ImageMagick resource ceilings; these can later move to runtime config.
+// -limit flags are global and must appear before the input path.
+const LIMIT_MEMORY: &str = "256MiB"; // in-RAM pixel cache before spilling to map/disk
+const LIMIT_MAP: &str = "512MiB"; // mmap cache before spilling to disk
+const LIMIT_DISK: &str = "1GiB"; // hard ceiling on disk spill (exceed => abort)
+const LIMIT_AREA: &str = "128MB"; // per-image area over which IM caches to disk
+const LIMIT_WIDTH: &str = "8192"; // reject oversized source frames upfront
+const LIMIT_HEIGHT: &str = "8192";
+const LIMIT_TIME: &str = "20"; // seconds; abort runaway coalesce/resize
+
 pub struct ImageOptions {
     width: String,
     format: String,
@@ -73,7 +83,29 @@ impl VariantProcessor for ImageProcessor {
         };
 
         let child_output = Command::new("convert")
+            .arg("-limit")
+            .arg("memory")
+            .arg(LIMIT_MEMORY)
+            .arg("-limit")
+            .arg("map")
+            .arg(LIMIT_MAP)
+            .arg("-limit")
+            .arg("disk")
+            .arg(LIMIT_DISK)
+            .arg("-limit")
+            .arg("area")
+            .arg(LIMIT_AREA)
+            .arg("-limit")
+            .arg("width")
+            .arg(LIMIT_WIDTH)
+            .arg("-limit")
+            .arg("height")
+            .arg(LIMIT_HEIGHT)
+            .arg("-limit")
+            .arg("time")
+            .arg(LIMIT_TIME)
             .arg(origin_file_path)
+            .arg("-coalesce")
             .arg("-resize")
             .arg(format!("{}x", options.width))
             .arg("-auto-orient") // https://github.com/ImageMagick/ImageMagick/issues/6396
@@ -99,7 +131,7 @@ impl ImageProcessor {
         let child_output = Command::new("identify")
             .arg("-format")
             .arg("%m")
-            .arg(file_path)
+            .arg(format!("{file_path}[0]"))
             .output() // Automatically pipes stdout and stderr
             .await
             .map_err(MediaProcessorError::command_failed)?;
