@@ -54,21 +54,28 @@ impl Display for FileVariant {
     }
 }
 
-pub struct VariantController;
+#[derive(Clone)]
+pub struct VariantController {
+    gate: MediaGate,
+}
 
 impl VariantController {
+    pub fn new(gate: MediaGate) -> Self {
+        Self { gate }
+    }
+
     pub async fn create_file_variant(
+        &self,
         file: &FileDetails,
         variant: &FileVariant,
         file_path: PathBuf,
-        gate: &MediaGate,
     ) -> Result<String, MediaProcessorError> {
         match &file.content_type {
             content_type if content_type.starts_with("image/") => {
-                ImageProcessor::create_variant(file, variant, file_path, gate).await
+                ImageProcessor::create_variant(file, variant, file_path, &self.gate).await
             }
             content_type if content_type.starts_with("video/") => {
-                VideoProcessor::create_variant(file, variant, file_path, gate).await
+                VideoProcessor::create_variant(file, variant, file_path, &self.gate).await
             }
             _ => Err(MediaProcessorError::UnsupportedContentType(
                 file.content_type.clone(),

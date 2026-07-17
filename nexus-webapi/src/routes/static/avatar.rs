@@ -64,9 +64,8 @@ pub async fn user_avatar_handler(
     };
 
     // 5. ensure small variant is created
-    let gate = &app_state.media_gate;
     let small_variant_content_type =
-        Blob::get_by_id(&file_details, &FileVariant::Small, file_path.clone(), gate)
+        Blob::get_by_id(&file_details, &FileVariant::Small, file_path.clone(), &app_state.variant_controller)
             .await
             .inspect_err(|_| {
                 error!(

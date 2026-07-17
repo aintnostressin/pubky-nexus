@@ -15,7 +15,7 @@ use crate::routes::Path;
 use crate::routes::{r#static::PubkyServeDir, AppState};
 use crate::{Error, Result};
 use nexus_common::{
-    media::{FileVariant, MediaGate, VariantController},
+    media::{FileVariant, VariantController},
     models::{
         file::{Blob, FileDetails},
         traits::Collection,
@@ -96,8 +96,8 @@ pub async fn static_files_handler(
         )));
     }
 
-    let gate = &app_state.media_gate;
-    let (variant_served, file_variant_content_type) = match Blob::get_by_id(&file, &variant, file_path.clone(), gate).await {
+    let controller = &app_state.variant_controller;
+    let (variant_served, file_variant_content_type) = match Blob::get_by_id(&file, &variant, file_path.clone(), controller).await {
         Ok(content_type) => (variant.clone(), content_type),
         Err(ref e) if variant != FileVariant::Main && e.is_at_capacity() => {
             warn!(

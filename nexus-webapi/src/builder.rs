@@ -16,7 +16,8 @@ use nexus_common::file::ConfigLoader;
 use nexus_common::types::DynError;
 use nexus_common::utils::create_shutdown_rx;
 use nexus_common::Level;
-use nexus_common::{ApiConfig, MediaGate, StackManager};
+use nexus_common::media::{MediaGate, VariantController};
+use nexus_common::{ApiConfig, StackManager};
 use pubky::pkarr::{Keypair, PublicKey};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info};
@@ -176,10 +177,12 @@ impl NexusApi {
         enable_key_republisher: bool,
     ) -> Result<Self, DynError> {
         // Create all the routes of the API
-        let media_gate = MediaGate::new(ctx.api_config.stack.media.max_concurrency);
+        let variant_controller = VariantController::new(MediaGate::new(
+            ctx.api_config.stack.media.max_concurrency,
+        ));
         let state = routes::AppState {
             files_path: Arc::new(ctx.api_config.stack.files_path.clone()),
-            media_gate,
+            variant_controller,
         };
         let app_routes = routes::app_routes(state.clone());
         let router = routes::build_app(

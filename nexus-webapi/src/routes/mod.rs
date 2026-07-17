@@ -4,7 +4,7 @@ use axum::http::request::Parts;
 use axum::http::{Request, StatusCode};
 use axum::Json as AxumJson;
 use axum::Router;
-use nexus_common::media::MediaGate;
+use nexus_common::media::VariantController;
 use std::time::Duration;
 use std::{path::PathBuf, sync::Arc};
 use tower_http::compression::CompressionLayer;
@@ -75,7 +75,7 @@ where
 #[derive(Clone)]
 pub struct AppState {
     pub files_path: Arc<PathBuf>,
-    pub media_gate: MediaGate,
+    pub variant_controller: VariantController,
 }
 
 /// The application's routes: v0 API, static file serving, and OpenAPI/Swagger UI docs.
