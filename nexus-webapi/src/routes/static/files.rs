@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use tower_http::services::fs::ServeFileSystemResponseBody;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 use utoipa::OpenApi;
 
 use super::endpoints::STATIC_FILES_ROUTE;
@@ -15,7 +15,7 @@ use crate::routes::Path;
 use crate::routes::{r#static::PubkyServeDir, AppState};
 use crate::{Error, Result};
 use nexus_common::{
-    media::{FileVariant, VariantController},
+    media::{FileVariant, MediaGate, VariantController},
     models::{
         file::{Blob, FileDetails},
         traits::Collection,
@@ -96,17 +96,28 @@ pub async fn static_files_handler(
         )));
     }
 
-    let file_variant_content_type = Blob::get_by_id(&file, &variant, file_path.clone())
-        .await
-        .inspect_err(|_| {
-            error!("Error while processing file variant for variant: {variant} and file: {file_id}")
-        })?;
+    let gate = &app_state.media_gate;
+    let (variant_served, file_variant_content_type) = match Blob::get_by_id(&file, &variant, file_path.clone(), gate).await {
+        Ok(content_type) => (variant.clone(), content_type),
+        Err(ref e) if variant != FileVariant::Main && e.is_at_capacity() => {
+            warn!(
+                "Media processing at capacity for file: {file_id} variant: {variant}, falling back to main"
+            );
+            (FileVariant::Main, VariantController::get_content_type_for_variant(&file, &FileVariant::Main))
+        }
+        Err(e) => {
+            error!("Error while processing file variant for variant: {variant} and file: {file_id}");
+            return Err(e.into());
+        }
+    };
 
-    let request_uri = request.uri().clone();
+    // Build the disk path using the variant that is actually being served
+    // (may differ from the requested variant when falling back to main).
+    let serve_path = format!("/{}/{}/{}", owner_id, file_id, variant_served);
 
     let mut response = PubkyServeDir::try_call(
         request,
-        request_uri.path().replace("static/files", ""),
+        serve_path,
         file_variant_content_type,
         file_path.clone(),
     )

@@ -1,7 +1,7 @@
 use crate::{
     media::{
         processors::{ImageProcessor, VariantProcessor, VideoProcessor},
-        FileVariant, VariantController,
+        FileVariant, MediaGate, VariantController,
     },
     models::error::{ModelError, ModelResult},
 };
@@ -40,6 +40,7 @@ impl Blob {
         file: &FileDetails,
         variant: &FileVariant,
         file_path: PathBuf,
+        gate: &MediaGate,
     ) -> ModelResult<String> {
         let file_variant_exists =
             VariantController::check_variant_exists(file, variant.clone(), file_path.clone()).await;
@@ -49,7 +50,7 @@ impl Blob {
                 file, variant,
             ))
         } else {
-            Self::put_variant(file, variant, file_path)
+            Self::put_variant(file, variant, file_path, gate)
                 .await
                 .inspect_err(|e| {
                     tracing::error!("Creating variant failed for file: {file:?} with error: {e}")
@@ -61,15 +62,16 @@ impl Blob {
         file: &FileDetails,
         variant: &FileVariant,
         file_path: PathBuf,
+        gate: &MediaGate,
     ) -> ModelResult<String> {
         match &file.content_type {
             content_type if content_type.starts_with("image/") => {
-                ImageProcessor::create_variant(file, variant, file_path)
+                ImageProcessor::create_variant(file, variant, file_path, gate)
                     .await
                     .map_err(Into::into)
             }
             content_type if content_type.starts_with("video/") => {
-                VideoProcessor::create_variant(file, variant, file_path)
+                VideoProcessor::create_variant(file, variant, file_path, gate)
                     .await
                     .map_err(Into::into)
             }

@@ -4,6 +4,31 @@ use std::{fmt::Debug, path::PathBuf};
 
 use super::{file::validate_and_expand_path, Level, LOG_LEVEL};
 
+/// Media processing concurrency configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct MediaConfig {
+    /// Maximum number of concurrent media subprocesses (ImageMagick/ffmpeg).
+    /// Defaults to the number of available parallelism (CPU cores), minimum 4.
+    #[serde(default = "MediaConfig::default_max_concurrency")]
+    pub max_concurrency: usize,
+}
+
+impl MediaConfig {
+    fn default_max_concurrency() -> usize {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    }
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrency: Self::default_max_concurrency(),
+        }
+    }
+}
+
 fn deserialize_and_expand<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
 where
     D: Deserializer<'de>,
@@ -38,6 +63,8 @@ pub struct StackConfig {
     #[serde(default)]
     pub otlp: OtlpConfig,
     pub db: DatabaseConfig,
+    #[serde(default)]
+    pub media: MediaConfig,
 }
 
 /// Utility function
@@ -52,6 +79,7 @@ impl Default for StackConfig {
             files_path: get_files_dir_pathbuf(),
             otlp: OtlpConfig::default(),
             db: DatabaseConfig::default(),
+            media: MediaConfig::default(),
         }
     }
 }
