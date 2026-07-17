@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use tower_http::services::fs::ServeFileSystemResponseBody;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 use utoipa::OpenApi;
 
 use super::endpoints::STATIC_FILES_ROUTE;
@@ -96,17 +96,29 @@ pub async fn static_files_handler(
         )));
     }
 
-    let file_variant_content_type = Blob::get_by_id(&file, &variant, file_path.clone())
-        .await
-        .inspect_err(|_| {
-            error!("Error while processing file variant for variant: {variant} and file: {file_id}")
-        })?;
+    let (variant, file_variant_content_type) =
+        match Blob::get_by_id(&file, &variant, file_path.clone()).await {
+            Ok(ct) => (variant, ct),
+            Err(e) if variant != FileVariant::Main => {
+                warn!(
+                    "variant {variant} generation failed for {}/{}, serving main: {e}",
+                    file.owner_id, file.id
+                );
+                let variant = FileVariant::Main;
+                let content_type = VariantController::get_content_type_for_variant(&file, &variant);
+                (variant, content_type)
+            }
+            Err(e) => {
+                error!("Error while processing file variant for variant: {variant} and file: {file_id}");
+                return Err(e.into());
+            }
+        };
 
-    let request_uri = request.uri().clone();
+    let variant_path = format!("/{}/{}/{}", owner_id, file_id, variant);
 
     let mut response = PubkyServeDir::try_call(
         request,
-        request_uri.path().replace("static/files", ""),
+        variant_path,
         file_variant_content_type,
         file_path.clone(),
     )
