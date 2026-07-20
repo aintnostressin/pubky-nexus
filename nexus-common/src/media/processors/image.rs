@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use std::time::SystemTime;
+use tokio::fs;
 use tokio::process::Command;
 
 use crate::{
@@ -7,6 +9,17 @@ use crate::{
 };
 
 use super::{BaseProcessingOptions, VariantProcessor};
+
+/// Returns a unique suffix for temporary variant files.
+/// Includes process ID and nanosecond timestamp to avoid collisions between
+/// concurrent runs for the same variant.
+fn temp_suffix() -> String {
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}.{}", std::process::id(), ts)
+}
 
 const SMALL_IMAGE_WIDTH: &str = "320";
 const FEED_IMAGE_WIDTH: &str = "720";
@@ -77,9 +90,14 @@ impl VariantProcessor for ImageProcessor {
             .await?
             .to_lowercase();
 
+        // Write to a temporary path first so that check_variant_exists never
+        // observes a partial file. The suffix includes pid + timestamp to avoid
+        // collisions between concurrent runs for the same variant.
+        let temp_path = format!("{}.{}", output_file_path, temp_suffix());
+
         let output = match origin_file_format == options.format {
-            true => output_file_path.to_string(),
-            false => format!("{}:{}", options.format, output_file_path),
+            true => temp_path.clone(),
+            false => format!("{}:{}", options.format, &temp_path),
         };
 
         let child_output = Command::new("convert")
@@ -109,14 +127,21 @@ impl VariantProcessor for ImageProcessor {
             .arg("-resize")
             .arg(format!("{}x", options.width))
             .arg("-auto-orient") // https://github.com/ImageMagick/ImageMagick/issues/6396
-            .arg(output)
+            .arg(&output)
             .output() // Automatically pipes stdout and stderr
             .await
             .map_err(MediaProcessorError::command_failed)?;
 
         if child_output.status.success() {
+            // Atomic rename: the file at temp_path is now complete and visible
+            // to check_variant_exists only after this succeeds.
+            fs::rename(&temp_path, output_file_path)
+                .await
+                .map_err(MediaProcessorError::command_failed)?;
             Ok(String::from_utf8_lossy(&child_output.stdout).to_string())
         } else {
+            // Clean up temp file on failure so the partial variant is not left behind.
+            let _ = fs::remove_file(&temp_path).await;
             Err(MediaProcessorError::command_failed(format!(
                 "ImageMagick command failed: {}",
                 String::from_utf8_lossy(&child_output.stdout)

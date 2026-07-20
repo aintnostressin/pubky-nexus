@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use std::time::SystemTime;
+use tokio::fs;
 use tokio::process::Command;
 
 use crate::{
@@ -7,6 +9,17 @@ use crate::{
 };
 
 use super::{BaseProcessingOptions, VariantProcessor};
+
+/// Returns a unique suffix for temporary variant files.
+/// Includes process ID and nanosecond timestamp to avoid collisions between
+/// concurrent runs for the same variant.
+fn temp_suffix() -> String {
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}.{}", std::process::id(), ts)
+}
 
 pub struct VideoOptions {
     width: String,
@@ -55,9 +68,16 @@ impl VariantProcessor for VideoProcessor {
     ) -> Result<String, MediaProcessorError> {
         let origin_file_format = VideoProcessor::get_format(origin_file_path).await?;
 
-        let output = match origin_file_format == options.format {
-            true => output_file_path.to_string(),
-            false => format!("{}.{}", output_file_path, options.format),
+        // Write to a temporary path first so that check_variant_exists never
+        // observes a partial file. The suffix includes pid + timestamp to avoid
+        // collisions between concurrent runs for the same variant.
+        let temp_path = format!("{}.{}", output_file_path, temp_suffix());
+
+        // ffmpeg appends an extension when the source format differs from the target.
+        // Compute the actual output path ffmpeg will create from the temp base.
+        let actual_output = match origin_file_format == options.format {
+            true => temp_path.clone(),
+            false => format!("{}.{}", &temp_path, options.format),
         };
 
         let child_output = Command::new("ffmpeg")
@@ -67,14 +87,21 @@ impl VariantProcessor for VideoProcessor {
             .arg(format!("scale={}:-1", options.width))
             .arg("-c:a")
             .arg("copy")
-            .arg(output)
+            .arg(&actual_output)
             .output() // Automatically pipes stdout and stderr
             .await
             .map_err(MediaProcessorError::command_failed)?;
 
         if child_output.status.success() {
+            // Atomic rename: the file at actual_output is now complete and visible
+            // to check_variant_exists only after this succeeds.
+            fs::rename(&actual_output, output_file_path)
+                .await
+                .map_err(MediaProcessorError::command_failed)?;
             Ok(String::from_utf8_lossy(&child_output.stdout).to_string())
         } else {
+            // Clean up temp file on failure so the partial variant is not left behind.
+            let _ = fs::remove_file(&actual_output).await;
             Err(MediaProcessorError::command_failed(format!(
                 "FFmpeg command failed: {}",
                 String::from_utf8_lossy(&child_output.stderr)
