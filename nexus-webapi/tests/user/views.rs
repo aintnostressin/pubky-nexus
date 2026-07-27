@@ -171,6 +171,12 @@ async fn test_get_details() -> Result<()> {
     assert!(res["links"].is_array());
     assert!(res["indexed_at"].is_number());
 
+    // A live user must serialize deleted as a non-optional bool with value false.
+    assert_eq!(
+        res["deleted"], false,
+        "live user must report deleted: false"
+    );
+
     // Test non-existing user
     let user_id = "qca6wzjg4okp6g1hwr9g8hmx1po1jpoirjfau9ejsws1qz3t7iiy";
     invalid_get_request(
@@ -178,6 +184,37 @@ async fn test_get_details() -> Result<()> {
         StatusCode::NOT_FOUND,
     )
     .await?;
+
+    Ok(())
+}
+
+/// Assert that the `deleted` field appears on both the `/details` and `/user` (view)
+/// responses and is serialized as a plain bool.
+#[tokio_shared_rt::test(shared)]
+async fn test_deleted_flag_in_details_and_view() -> Result<()> {
+    let user_id = "4snwyct86m383rsduhw5xgcxpw7c63j3pq8x4ycqikxgik8y64ro";
+
+    // /v0/user/{id}/details
+    let details = get_request(&format!("/v0/user/{user_id}/details")).await?;
+    assert!(
+        details["deleted"].is_boolean(),
+        "details response must serialize deleted as a boolean"
+    );
+    assert_eq!(
+        details["deleted"], false,
+        "live user must report deleted: false"
+    );
+
+    // /v0/user/{id} (UserView embeds UserDetails)
+    let view = get_request(&format!("/v0/user/{user_id}")).await?;
+    assert!(
+        view["details"]["deleted"].is_boolean(),
+        "view response must serialize deleted as a boolean"
+    );
+    assert_eq!(
+        view["details"]["deleted"], false,
+        "live user must report deleted: false in view response"
+    );
 
     Ok(())
 }
