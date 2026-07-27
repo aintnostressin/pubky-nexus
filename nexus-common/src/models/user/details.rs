@@ -45,15 +45,8 @@ pub struct UserDetails {
     pub status: Option<String>,
     pub image: Option<String>,
     pub indexed_at: i64,
-    #[serde(
-        deserialize_with = "deserialize_user_deleted",
-        default = "default_false"
-    )]
+    #[serde(deserialize_with = "deserialize_user_deleted", default)]
     pub deleted: bool,
-}
-
-fn default_false() -> bool {
-    false
 }
 
 fn deserialize_user_links<'de, D>(
