@@ -12,23 +12,11 @@ async fn test_homeserver_post_repost_without_post_parent() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let post_author_user_kp = Keypair::random();
-    let post_author = PubkyAppUser {
-        bio: Some("test_homeserver_post_repost_without_post_parent".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostRepostFail:PostAuthor".to_string(),
-        status: None,
-    };
+    let post_author = PubkyAppUser::new("Watcher:PostRepostFail:PostAuthor".to_string(), Some("test_homeserver_post_repost_without_post_parent".to_string()), None, None, None);
     let post_author_id = test.create_user(&post_author_user_kp, &post_author).await?;
 
     let post_repost_author_kp = Keypair::random();
-    let repost_author = PubkyAppUser {
-        bio: Some("test_homeserver_post_repost_without_post_parent".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostRepostFail:RepostAuthor".to_string(),
-        status: None,
-    };
+    let repost_author = PubkyAppUser::new("Watcher:PostRepostFail:RepostAuthor".to_string(), Some("test_homeserver_post_repost_without_post_parent".to_string()), None, None, None);
     let repost_author_id = test
         .create_user(&post_repost_author_kp, &repost_author)
         .await?;

@@ -17,13 +17,7 @@ async fn test_resource_tag_internal_known_delegates_to_post() -> Result<()> {
 
     // Create user + post
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_internal_known_delegation".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:ResourceTag:InternalKnown".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:ResourceTag:InternalKnown".to_string(), Some("test_internal_known_delegation".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     let post = PubkyAppPost {

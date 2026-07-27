@@ -23,24 +23,12 @@ async fn test_follow_put_idempotent() -> Result<()> {
 
     // Create follower
     let follower_kp = Keypair::random();
-    let follower_user = PubkyAppUser {
-        bio: Some("test_follow_put_idempotent".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:IdempotentPut:Follower".to_string(),
-        status: None,
-    };
+    let follower_user = PubkyAppUser::new("Watcher:IdempotentPut:Follower".to_string(), Some("test_follow_put_idempotent".to_string()), None, None, None);
     let follower_id = test.create_user(&follower_kp, &follower_user).await?;
 
     // Create followee
     let followee_kp = Keypair::random();
-    let followee_user = PubkyAppUser {
-        bio: Some("test_follow_put_idempotent".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:IdempotentPut:Followee".to_string(),
-        status: None,
-    };
+    let followee_user = PubkyAppUser::new("Watcher:IdempotentPut:Followee".to_string(), Some("test_follow_put_idempotent".to_string()), None, None, None);
     let followee_id = test.create_user(&followee_kp, &followee_user).await?;
 
     // First follow (normal flow through event processing)
@@ -128,24 +116,12 @@ async fn test_follow_put_recovers_missing_indexes() -> Result<()> {
 
     // Create follower
     let follower_kp = Keypair::random();
-    let follower_user = PubkyAppUser {
-        bio: Some("test_follow_put_recovers_missing_indexes".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:RecoverPut:Follower".to_string(),
-        status: None,
-    };
+    let follower_user = PubkyAppUser::new("Watcher:RecoverPut:Follower".to_string(), Some("test_follow_put_recovers_missing_indexes".to_string()), None, None, None);
     let follower_id = test.create_user(&follower_kp, &follower_user).await?;
 
     // Create followee
     let followee_kp = Keypair::random();
-    let followee_user = PubkyAppUser {
-        bio: Some("test_follow_put_recovers_missing_indexes".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:RecoverPut:Followee".to_string(),
-        status: None,
-    };
+    let followee_user = PubkyAppUser::new("Watcher:RecoverPut:Followee".to_string(), Some("test_follow_put_recovers_missing_indexes".to_string()), None, None, None);
     let followee_id = test.create_user(&followee_kp, &followee_user).await?;
 
     // Normal follow (graph + indexes + counters all complete)

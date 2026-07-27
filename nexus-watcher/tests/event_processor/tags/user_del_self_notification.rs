@@ -12,13 +12,7 @@ async fn test_homeserver_self_untag_profile_no_notification() -> Result<()> {
     // Create a single user who will tag and untag their own profile
     let user_kp = Keypair::random();
 
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_self_untag_profile_no_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:SelfUntagProfileNotification:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:SelfUntagProfileNotification:User".to_string(), Some("test_homeserver_self_untag_profile_no_notification".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // User tags their own profile

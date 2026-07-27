@@ -19,13 +19,7 @@ async fn test_homeserver_put_follow() -> Result<()> {
     // Create first user (follower)
     let follower_kp = Keypair::random();
 
-    let follower_user = PubkyAppUser {
-        bio: Some("test_homeserver_raw_follow".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Follow:Follower".to_string(),
-        status: None,
-    };
+    let follower_user = PubkyAppUser::new("Watcher:Follow:Follower".to_string(), Some("test_homeserver_raw_follow".to_string()), None, None, None);
     let follower_id = test
         .create_user(&follower_kp, &follower_user)
         .await
@@ -33,13 +27,7 @@ async fn test_homeserver_put_follow() -> Result<()> {
 
     // Create second user (followee)
     let followee_kp = Keypair::random();
-    let followee_user = PubkyAppUser {
-        bio: Some("test_homeserver_raw_follow".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Follow:Followee".to_string(),
-        status: None,
-    };
+    let followee_user = PubkyAppUser::new("Watcher:Follow:Followee".to_string(), Some("test_homeserver_raw_follow".to_string()), None, None, None);
     let followee_id = test
         .create_user(&followee_kp, &followee_user)
         .await

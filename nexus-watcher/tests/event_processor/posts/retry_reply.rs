@@ -11,13 +11,7 @@ async fn test_homeserver_post_reply_cannot_index() -> Result<()> {
 
     let user_kp = Keypair::random();
 
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_post_reply".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:IndexFail:PostReply:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:IndexFail:PostReply:User".to_string(), Some("test_homeserver_post_reply".to_string()), None, None, None);
 
     let user_id = test.create_user(&user_kp, &user).await?;
 

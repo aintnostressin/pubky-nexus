@@ -24,13 +24,7 @@ async fn test_resource_tag_multi_user_dedup() -> Result<()> {
 
     // User 1 tags from /pub/mapky/tags/
     let user1_kp = Keypair::random();
-    let user1 = PubkyAppUser {
-        bio: Some("dedup_user_1".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Dedup:User1".to_string(),
-        status: None,
-    };
+    let user1 = PubkyAppUser::new("Watcher:Dedup:User1".to_string(), Some("dedup_user_1".to_string()), None, None, None);
     let _user1_id = test.create_user(&user1_kp, &user1).await?;
 
     let tag1 = PubkyAppTag {
@@ -44,13 +38,7 @@ async fn test_resource_tag_multi_user_dedup() -> Result<()> {
 
     // User 2 tags same URI, same label from /pub/eventky/tags/
     let user2_kp = Keypair::random();
-    let user2 = PubkyAppUser {
-        bio: Some("dedup_user_2".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Dedup:User2".to_string(),
-        status: None,
-    };
+    let user2 = PubkyAppUser::new("Watcher:Dedup:User2".to_string(), Some("dedup_user_2".to_string()), None, None, None);
     let _user2_id = test.create_user(&user2_kp, &user2).await?;
 
     let tag2 = PubkyAppTag {

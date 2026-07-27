@@ -13,24 +13,12 @@ async fn test_homeserver_post_tag_event_to_queue() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let tagger_kp = Keypair::random();
-    let tagger_user = PubkyAppUser {
-        bio: Some("test_homeserver_user_tag_event_to_queue".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Retry:Post:CannotTag:Tagger:Sync".to_string(),
-        status: None,
-    };
+    let tagger_user = PubkyAppUser::new("Watcher:Retry:Post:CannotTag:Tagger:Sync".to_string(), Some("test_homeserver_user_tag_event_to_queue".to_string()), None, None, None);
     let tagger_user_id = test.create_user(&tagger_kp, &tagger_user).await?;
 
     // Create a key but it would not be synchronised in nexus
     let author_kp = Keypair::random();
-    let author = PubkyAppUser {
-        bio: Some("test_homeserver_user_tag_event_to_queue".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Retry:Post:CannotTag:Author:Sync".to_string(),
-        status: None,
-    };
+    let author = PubkyAppUser::new("Watcher:Retry:Post:CannotTag:Author:Sync".to_string(), Some("test_homeserver_user_tag_event_to_queue".to_string()), None, None, None);
     let author_id = test.create_user(&author_kp, &author).await?;
 
     // => Create user tag

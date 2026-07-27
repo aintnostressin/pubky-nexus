@@ -19,13 +19,7 @@ async fn test_homeserver_post_reply() -> Result<()> {
 
     let user_kp = Keypair::random();
 
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_post_reply".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostReply:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostReply:User".to_string(), Some("test_homeserver_post_reply".to_string()), None, None, None);
 
     let user_id = test.create_user(&user_kp, &user).await?;
 
@@ -210,13 +204,7 @@ async fn test_postcounts_get_by_id_does_not_leak_reply_into_engagement_on_cache_
 {
     let mut test = WatcherTest::setup(None).await?;
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_postcounts_get_by_id_cache_miss".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostCountsCacheMiss:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostCountsCacheMiss:User".to_string(), Some("test_postcounts_get_by_id_cache_miss".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Parent post (kind=Short) — used only as a reply target.

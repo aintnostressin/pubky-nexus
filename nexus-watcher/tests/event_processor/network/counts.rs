@@ -48,13 +48,7 @@ async fn test_large_network_scenario_counts() -> Result<()> {
     for i in 0..NUM_USERS {
         let keypair = Keypair::random();
         let user_name = format!("User{i}");
-        let user = PubkyAppUser {
-            bio: Some(format!("{user_name}'s bio")),
-            image: None,
-            links: None,
-            name: user_name.clone(),
-            status: None,
-        };
+        let user = PubkyAppUser::new(user_name.clone(), Some(format!("{user_name}'s bio")), None, None, None);
         let user_id = test.create_user(&keypair, &user).await?;
         user_kps_and_ids.push((keypair, user_id.clone()));
         user_names.push(user_name);

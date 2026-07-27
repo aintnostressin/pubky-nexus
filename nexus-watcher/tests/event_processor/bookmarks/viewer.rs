@@ -13,13 +13,7 @@ async fn test_homeserver_viewer_bookmark() -> Result<()> {
 
     // Step 1: Create a user
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_viewer_bookmark".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:ViewerBookmark:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:ViewerBookmark:User".to_string(), Some("test_homeserver_viewer_bookmark".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Step 2: Create a post under that user
@@ -36,13 +30,7 @@ async fn test_homeserver_viewer_bookmark() -> Result<()> {
     // Step 3: Add a bookmark to the post. Before create a new user
     let viewer_kp = Keypair::random();
 
-    let viewer_user = PubkyAppUser {
-        bio: Some("test_homeserver_viewer_bookmark".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:ViewerBookmark:Viewer".to_string(),
-        status: None,
-    };
+    let viewer_user = PubkyAppUser::new("Watcher:ViewerBookmark:Viewer".to_string(), Some("test_homeserver_viewer_bookmark".to_string()), None, None, None);
     let viewer_id = test.create_user(&viewer_kp, &viewer_user).await?;
 
     let bookmark = PubkyAppBookmark {

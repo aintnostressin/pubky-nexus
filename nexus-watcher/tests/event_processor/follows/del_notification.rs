@@ -15,25 +15,13 @@ async fn test_homeserver_unfollow_notification() -> Result<()> {
     // Step 1: Create first user (follower)
     let follower_kp = Keypair::random();
 
-    let follower_user = PubkyAppUser {
-        bio: Some("test_homeserver_unfollow_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:UnfollowNotification:Follower".to_string(),
-        status: None,
-    };
+    let follower_user = PubkyAppUser::new("Watcher:UnfollowNotification:Follower".to_string(), Some("test_homeserver_unfollow_notification".to_string()), None, None, None);
     let follower_id = test.create_user(&follower_kp, &follower_user).await?;
 
     // Step 2: Create second user (followee)
     let followee_kp = Keypair::random();
 
-    let followee_user = PubkyAppUser {
-        bio: Some("test_homeserver_unfollow_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:UnfollowNotification:Followee".to_string(),
-        status: None,
-    };
+    let followee_user = PubkyAppUser::new("Watcher:UnfollowNotification:Followee".to_string(), Some("test_homeserver_unfollow_notification".to_string()), None, None, None);
     let followee_id = test.create_user(&followee_kp, &followee_user).await?;
 
     // Step 3: Follower follows the followee

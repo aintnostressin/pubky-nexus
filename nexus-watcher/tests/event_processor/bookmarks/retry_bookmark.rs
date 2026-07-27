@@ -14,13 +14,7 @@ async fn test_homeserver_bookmark_cannot_index() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_bookmark_cannot_index".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:IndexFail:Bookmark:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:IndexFail:Bookmark:User".to_string(), Some("test_homeserver_bookmark_cannot_index".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Use a placeholder parent post ID to intentionally avoid resolving it in the graph database

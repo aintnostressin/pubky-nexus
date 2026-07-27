@@ -34,13 +34,7 @@ async fn test_tag_post_on_unknown_homeserver() -> Result<()> {
 
     let tagger_author_kp = Keypair::random();
 
-    let tagger_user = PubkyAppUser {
-        bio: Some("test_tag_post_on_unknown_homeserver".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:UserIngestion:Tagger:User".to_string(),
-        status: None,
-    };
+    let tagger_user = PubkyAppUser::new("Watcher:UserIngestion:Tagger:User".to_string(), Some("test_tag_post_on_unknown_homeserver".to_string()), None, None, None);
     test.create_user(&tagger_author_kp, &tagger_user).await?;
 
     let tag = PubkyAppTag {
@@ -70,13 +64,7 @@ async fn test_tag_user_on_unknown_homeserver() -> Result<()> {
 
     let tagger_author_kp = Keypair::random();
 
-    let tagger_user = PubkyAppUser {
-        bio: Some("test_tag_user_on_unknown_homeserver".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:UserIngestion:Tagger:User".to_string(),
-        status: None,
-    };
+    let tagger_user = PubkyAppUser::new("Watcher:UserIngestion:Tagger:User".to_string(), Some("test_tag_user_on_unknown_homeserver".to_string()), None, None, None);
     test.create_user(&tagger_author_kp, &tagger_user).await?;
 
     let tagged_user_uri = user_uri_builder(tagged_user_author_id.clone());

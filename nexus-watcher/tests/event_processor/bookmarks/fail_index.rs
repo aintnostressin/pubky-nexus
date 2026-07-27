@@ -15,13 +15,7 @@ async fn test_homeserver_bookmark_without_user() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let author_kp = Keypair::random();
-    let author = PubkyAppUser {
-        bio: Some("test_homeserver_bookmark_without_user".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Bookmark:User:Sync".to_string(),
-        status: None,
-    };
+    let author = PubkyAppUser::new("Watcher:Bookmark:User:Sync".to_string(), Some("test_homeserver_bookmark_without_user".to_string()), None, None, None);
     let author_id = test.create_user(&author_kp, &author).await?;
 
     let post = PubkyAppPost {

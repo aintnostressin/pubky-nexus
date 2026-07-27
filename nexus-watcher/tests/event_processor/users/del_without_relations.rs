@@ -13,13 +13,7 @@ async fn test_delete_user_without_relationships() -> Result<()> {
     // Create a new user without any relationships
     let user_kp = Keypair::random();
     let username = "Watcher:UserDel:User";
-    let user = PubkyAppUser {
-        bio: Some("test_delete_user_with_relationships".to_string()),
-        image: None,
-        links: None,
-        name: username.to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new(username.to_string(), Some("test_delete_user_with_relationships".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Sanity check: user appears in both search indexes after creation

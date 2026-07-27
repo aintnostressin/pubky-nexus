@@ -21,24 +21,12 @@ async fn test_bookmark_del_retry_no_double_decrement() -> Result<()> {
 
     // Create post author
     let author_kp = Keypair::random();
-    let author = PubkyAppUser {
-        bio: Some("test_bookmark_del_retry_no_double_decrement".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Bookmark:DelRetry:Author".to_string(),
-        status: None,
-    };
+    let author = PubkyAppUser::new("Watcher:Bookmark:DelRetry:Author".to_string(), Some("test_bookmark_del_retry_no_double_decrement".to_string()), None, None, None);
     let author_id = test.create_user(&author_kp, &author).await?;
 
     // Create bookmark owner (different user)
     let bookmarker_kp = Keypair::random();
-    let bookmarker = PubkyAppUser {
-        bio: Some("test_bookmark_del_retry_no_double_decrement".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Bookmark:DelRetry:Bookmarker".to_string(),
-        status: None,
-    };
+    let bookmarker = PubkyAppUser::new("Watcher:Bookmark:DelRetry:Bookmarker".to_string(), Some("test_bookmark_del_retry_no_double_decrement".to_string()), None, None, None);
     let bookmarker_id = test.create_user(&bookmarker_kp, &bookmarker).await?;
 
     let post = PubkyAppPost {
@@ -113,24 +101,12 @@ async fn test_bookmark_del_replay_after_success_skips() -> Result<()> {
 
     // Create post author
     let author_kp = Keypair::random();
-    let author = PubkyAppUser {
-        bio: Some("test_bookmark_del_replay_after_success_skips".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Bookmark:DelReplay:Author".to_string(),
-        status: None,
-    };
+    let author = PubkyAppUser::new("Watcher:Bookmark:DelReplay:Author".to_string(), Some("test_bookmark_del_replay_after_success_skips".to_string()), None, None, None);
     let author_id = test.create_user(&author_kp, &author).await?;
 
     // Create bookmark owner (different user)
     let bookmarker_kp = Keypair::random();
-    let bookmarker = PubkyAppUser {
-        bio: Some("test_bookmark_del_replay_after_success_skips".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Bookmark:DelReplay:Bookmarker".to_string(),
-        status: None,
-    };
+    let bookmarker = PubkyAppUser::new("Watcher:Bookmark:DelReplay:Bookmarker".to_string(), Some("test_bookmark_del_replay_after_success_skips".to_string()), None, None, None);
     let bookmarker_id = test.create_user(&bookmarker_kp, &bookmarker).await?;
 
     let post = PubkyAppPost {

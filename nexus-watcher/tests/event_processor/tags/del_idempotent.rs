@@ -23,23 +23,11 @@ async fn test_tag_post_del_retry_no_double_decrement() -> Result<()> {
 
     // Create users + post through the watcher (no TAGGED edges)
     let tagger_kp = Keypair::random();
-    let tagger = PubkyAppUser {
-        bio: Some("test_tag_post_del_retry_no_double_decrement".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:TagDelRetry:Tagger".to_string(),
-        status: None,
-    };
+    let tagger = PubkyAppUser::new("Watcher:TagDelRetry:Tagger".to_string(), Some("test_tag_post_del_retry_no_double_decrement".to_string()), None, None, None);
     let tagger_id = test.create_user(&tagger_kp, &tagger).await?;
 
     let author_kp = Keypair::random();
-    let author = PubkyAppUser {
-        bio: Some("test_tag_post_del_retry_no_double_decrement".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:TagDelRetry:Author".to_string(),
-        status: None,
-    };
+    let author = PubkyAppUser::new("Watcher:TagDelRetry:Author".to_string(), Some("test_tag_post_del_retry_no_double_decrement".to_string()), None, None, None);
     let author_id = test.create_user(&author_kp, &author).await?;
 
     let post = PubkyAppPost {
@@ -109,23 +97,11 @@ async fn test_tag_post_del_replay_after_success_skips() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let tagger_kp = Keypair::random();
-    let tagger = PubkyAppUser {
-        bio: Some("test_tag_post_del_replay_after_success_skips".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:TagDelReplay:Tagger".to_string(),
-        status: None,
-    };
+    let tagger = PubkyAppUser::new("Watcher:TagDelReplay:Tagger".to_string(), Some("test_tag_post_del_replay_after_success_skips".to_string()), None, None, None);
     let tagger_id = test.create_user(&tagger_kp, &tagger).await?;
 
     let author_kp = Keypair::random();
-    let author = PubkyAppUser {
-        bio: Some("test_tag_post_del_replay_after_success_skips".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:TagDelReplay:Author".to_string(),
-        status: None,
-    };
+    let author = PubkyAppUser::new("Watcher:TagDelReplay:Author".to_string(), Some("test_tag_post_del_replay_after_success_skips".to_string()), None, None, None);
     let author_id = test.create_user(&author_kp, &author).await?;
 
     let post = PubkyAppPost {

@@ -15,13 +15,7 @@ async fn test_user_view_batch_retrieval() -> Result<()> {
     for i in 0..5 {
         let user_kp = Keypair::random();
 
-        let user = PubkyAppUser {
-            bio: Some(format!("test_batch_retrieval_user_{}", i)),
-            image: None,
-            links: None,
-            name: format!("Watcher:BatchRetrieval:User{}", i),
-            status: Some(format!("User status {}", i)),
-        };
+        let user = PubkyAppUser::new(format!("Watcher:BatchRetrieval:User{}", i), Some(format!("test_batch_retrieval_user_{}", i)), None, None, Some(format!("User status {}", i)));
 
         let user_id = test.create_user(&user_kp, &user).await?;
         user_ids.push(user_id);

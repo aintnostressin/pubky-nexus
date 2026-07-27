@@ -13,25 +13,13 @@ async fn test_homeserver_sequential_follow() -> Result<()> {
     // Create followee
     let followee_kp = Keypair::random();
 
-    let followee_user = PubkyAppUser {
-        bio: Some("test_homeserver_sequential_follow".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:FollowChain:Followee".to_string(),
-        status: None,
-    };
+    let followee_user = PubkyAppUser::new("Watcher:FollowChain:Followee".to_string(), Some("test_homeserver_sequential_follow".to_string()), None, None, None);
 
     let followee_id = test.create_user(&followee_kp, &followee_user).await?;
 
     // Create Bob user
     let bob_kp = Keypair::random();
-    let bob_user = PubkyAppUser {
-        bio: Some("test_homeserver_sequential_follow".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:FollowChain:Bob".to_string(),
-        status: None,
-    };
+    let bob_user = PubkyAppUser::new("Watcher:FollowChain:Bob".to_string(), Some("test_homeserver_sequential_follow".to_string()), None, None, None);
     let bob_id = test.create_user(&bob_kp, &bob_user).await?;
 
     // Follow followee
@@ -49,13 +37,7 @@ async fn test_homeserver_sequential_follow() -> Result<()> {
 
     // Create Alice user
     let alice_kp = Keypair::random();
-    let alice_user = PubkyAppUser {
-        bio: Some("test_homeserver_sequential_follow".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:FollowChain:Alice".to_string(),
-        status: None,
-    };
+    let alice_user = PubkyAppUser::new("Watcher:FollowChain:Alice".to_string(), Some("test_homeserver_sequential_follow".to_string()), None, None, None);
     let alice_id = test.create_user(&alice_kp, &alice_user).await?;
 
     // Follow followee
@@ -73,13 +55,7 @@ async fn test_homeserver_sequential_follow() -> Result<()> {
 
     // Create Carla user
     let carla_kp = Keypair::random();
-    let carla_user = PubkyAppUser {
-        bio: Some("test_homeserver_sequential_follow".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:FollowChain:Carla".to_string(),
-        status: None,
-    };
+    let carla_user = PubkyAppUser::new("Watcher:FollowChain:Carla".to_string(), Some("test_homeserver_sequential_follow".to_string()), None, None, None);
     let carla_id = test.create_user(&carla_kp, &carla_user).await?;
 
     // Follow followee
@@ -97,13 +73,7 @@ async fn test_homeserver_sequential_follow() -> Result<()> {
 
     // Create Danonino user
     let danonino_kp = Keypair::random();
-    let danonino_user = PubkyAppUser {
-        bio: Some("test_homeserver_sequential_follow".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:FollowChain:Danonino".to_string(),
-        status: None,
-    };
+    let danonino_user = PubkyAppUser::new("Watcher:FollowChain:Danonino".to_string(), Some("test_homeserver_sequential_follow".to_string()), None, None, None);
     let danonino_id = test.create_user(&danonino_kp, &danonino_user).await?;
 
     // Follow followee
@@ -158,13 +128,7 @@ async fn test_homeserver_sequential_follow() -> Result<()> {
 
     // Create Enzo user
     let enzo_kp = Keypair::random();
-    let enzo_user = PubkyAppUser {
-        bio: Some("test_homeserver_sequential_follow".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:FollowChain:Enzo".to_string(),
-        status: None,
-    };
+    let enzo_user = PubkyAppUser::new("Watcher:FollowChain:Enzo".to_string(), Some("test_homeserver_sequential_follow".to_string()), None, None, None);
     let enzo_id = test.create_user(&enzo_kp, &enzo_user).await?;
 
     // Follow Enzo

@@ -19,19 +19,19 @@ async fn test_homeserver_user_put_event() -> Result<()> {
 
     let user_kp = Keypair::random();
 
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_user_event".to_string()),
-        image: Some(file_uri_builder(
+    let user = PubkyAppUser::new(
+        "Watcher:UserEvent:User".to_string(),
+        Some("test_homeserver_user_event".to_string()),
+        Some(file_uri_builder(
             "4snwyct86m383rsduhw5xgcxpw7c63j3pq8x4ycqikxgik8y64ro".into(),
             "003286NSMY490".into(),
         )),
-        links: Some(vec![PubkyAppUserLink {
+        Some(vec![PubkyAppUserLink {
             title: "User Event".to_string(),
             url: "pubky://watcher.nexus".to_string(),
         }]),
-        name: "Watcher:UserEvent:User".to_string(),
-        status: Some("Running Nexus Watcher".to_string()),
-    };
+        Some("Running Nexus Watcher".to_string()),
+    );
     // Uncapped: the shared event log is append-only and unbounded.
     let (_, events_in_redis_before) = EventLine::get_from_index(None, usize::MAX).await.unwrap();
 

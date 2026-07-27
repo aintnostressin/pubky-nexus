@@ -15,23 +15,11 @@ async fn test_kind_only_edit_refreshes_notification_post_kind() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let author_kp = Keypair::random();
-    let author = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Watcher:KindEditRefresh:Author".to_string(),
-        status: None,
-    };
+    let author = PubkyAppUser::new("Watcher:KindEditRefresh:Author".to_string(), None, None, None, None);
     let author_id = test.create_user(&author_kp, &author).await?;
 
     let tagger_kp = Keypair::random();
-    let tagger = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Watcher:KindEditRefresh:Tagger".to_string(),
-        status: None,
-    };
+    let tagger = PubkyAppUser::new("Watcher:KindEditRefresh:Tagger".to_string(), None, None, None, None);
     test.create_user(&tagger_kp, &tagger).await?;
 
     // Edit Short -> Long with identical content, so only the kind changes.

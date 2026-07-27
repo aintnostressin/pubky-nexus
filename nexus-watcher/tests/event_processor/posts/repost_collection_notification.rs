@@ -13,13 +13,7 @@ async fn test_repost_collection_notification() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let alice_kp = Keypair::random();
-    let alice = PubkyAppUser {
-        bio: Some("test_repost_collection_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:RepostCollectionNotification:Alice".to_string(),
-        status: None,
-    };
+    let alice = PubkyAppUser::new("Watcher:RepostCollectionNotification:Alice".to_string(), Some("test_repost_collection_notification".to_string()), None, None, None);
     let alice_id = test.create_user(&alice_kp, &alice).await?;
 
     // Alice creates a collection
@@ -28,13 +22,7 @@ async fn test_repost_collection_notification() -> Result<()> {
     let embed_absolute_uri = post_uri_builder(alice_id.clone(), alice_post_id.clone());
 
     let bob_kp = Keypair::random();
-    let bob = PubkyAppUser {
-        bio: Some("test_repost_collection_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:RepostCollectionNotification:Bob".to_string(),
-        status: None,
-    };
+    let bob = PubkyAppUser::new("Watcher:RepostCollectionNotification:Bob".to_string(), Some("test_repost_collection_notification".to_string()), None, None, None);
     let bob_id = test.create_user(&bob_kp, &bob).await?;
 
     // embed.kind lies (Short) though the target is a Collection: the indexed kind wins.

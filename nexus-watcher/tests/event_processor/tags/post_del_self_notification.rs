@@ -12,13 +12,7 @@ async fn test_homeserver_self_untag_post_no_notification() -> Result<()> {
     // Create a single user who will be both author and tagger
     let user_kp = Keypair::random();
 
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_self_untag_post_no_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:SelfUntagPostNotification:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:SelfUntagPostNotification:User".to_string(), Some("test_homeserver_self_untag_post_no_notification".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // User creates a post

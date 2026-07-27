@@ -7,13 +7,7 @@ use pubky_app_specs::{PubkyAppUser, PubkyId};
 
 /// Helper: create a PubkyAppUser with a given name.
 fn make_test_user(name: &str) -> PubkyAppUser {
-    PubkyAppUser {
-        bio: Some(format!("bio-{name}")),
-        image: None,
-        links: None,
-        name: name.to_string(),
-        status: None,
-    }
+    PubkyAppUser::new(name.to_string(), Some(format!("bio-{name}")), None, None, None)
 }
 
 /// Helper: create an orphan homeserver (no users) in the graph, return its PubkyId.

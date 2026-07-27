@@ -21,13 +21,7 @@ async fn test_homeserver_post_repost() -> Result<()> {
 
     let user_kp = Keypair::random();
 
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_post_repost".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostRepost:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostRepost:User".to_string(), Some("test_homeserver_post_repost".to_string()), None, None, None);
 
     let user_id = test.create_user(&user_kp, &user).await?;
 

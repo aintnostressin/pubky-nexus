@@ -33,13 +33,7 @@ async fn test_homeserver_multi_user_posts_tags() -> Result<()> {
     for index in 0..4 {
         let keypair = Keypair::random();
 
-        let tagger = PubkyAppUser {
-            bio: Some("test_homeserver_multi_user_post".to_string()),
-            image: None,
-            links: None,
-            name: format!("Watcher:MultiUserPost:User{index}"),
-            status: None,
-        };
+        let tagger = PubkyAppUser::new(format!("Watcher:MultiUserPost:User{index}"), Some("test_homeserver_multi_user_post".to_string()), None, None, None);
         let user_id = test.create_user(&keypair, &tagger).await?;
         user_kps_and_ids.push((keypair, user_id));
     }

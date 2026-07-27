@@ -19,24 +19,12 @@ async fn test_homeserver_unfollow() -> Result<()> {
     // Create first user (follower)
     let follower_kp = Keypair::random();
 
-    let follower_user = PubkyAppUser {
-        bio: Some("test_homeserver_unfollow".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Unfollow:Follower".to_string(),
-        status: None,
-    };
+    let follower_user = PubkyAppUser::new("Watcher:Unfollow:Follower".to_string(), Some("test_homeserver_unfollow".to_string()), None, None, None);
     let follower_id = test.create_user(&follower_kp, &follower_user).await?;
 
     // Create second user (followee)
     let followee_kp = Keypair::random();
-    let followee_user = PubkyAppUser {
-        bio: Some("test_homeserver_unfollow".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Unfollow:Followee".to_string(),
-        status: None,
-    };
+    let followee_user = PubkyAppUser::new("Watcher:Unfollow:Followee".to_string(), Some("test_homeserver_unfollow".to_string()), None, None, None);
     let followee_id = test
         .create_user(&followee_kp, &followee_user)
         .await

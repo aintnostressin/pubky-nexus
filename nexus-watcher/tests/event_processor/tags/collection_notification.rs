@@ -15,24 +15,12 @@ async fn test_tag_untag_collection_notification() -> Result<()> {
 
     // Create first user (collection author)
     let author_kp = Keypair::random();
-    let author_user = PubkyAppUser {
-        bio: Some("test_tag_untag_collection_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:TagCollectionNotification:Author".to_string(),
-        status: None,
-    };
+    let author_user = PubkyAppUser::new("Watcher:TagCollectionNotification:Author".to_string(), Some("test_tag_untag_collection_notification".to_string()), None, None, None);
     let author_id = test.create_user(&author_kp, &author_user).await?;
 
     // Create second user (tagger)
     let tagger_kp = Keypair::random();
-    let tagger_user = PubkyAppUser {
-        bio: Some("test_tag_untag_collection_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:TagCollectionNotification:Tagger".to_string(),
-        status: None,
-    };
+    let tagger_user = PubkyAppUser::new("Watcher:TagCollectionNotification:Tagger".to_string(), Some("test_tag_untag_collection_notification".to_string()), None, None, None);
     let tagger_id = test.create_user(&tagger_kp, &tagger_user).await?;
 
     // Author creates a collection
@@ -144,23 +132,11 @@ async fn test_tag_article_notification_reports_long() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let author_kp = Keypair::random();
-    let author_user = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Watcher:TagArticleNotification:Author".to_string(),
-        status: None,
-    };
+    let author_user = PubkyAppUser::new("Watcher:TagArticleNotification:Author".to_string(), None, None, None, None);
     let author_id = test.create_user(&author_kp, &author_user).await?;
 
     let tagger_kp = Keypair::random();
-    let tagger_user = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Watcher:TagArticleNotification:Tagger".to_string(),
-        status: None,
-    };
+    let tagger_user = PubkyAppUser::new("Watcher:TagArticleNotification:Tagger".to_string(), None, None, None, None);
     test.create_user(&tagger_kp, &tagger_user).await?;
 
     // Author writes a Long article

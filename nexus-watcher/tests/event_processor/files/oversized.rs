@@ -32,13 +32,7 @@ async fn test_small_file_written_to_disk() -> Result<()> {
     let mut test = WatcherTest::setup(Some(TINY_MAX_FILE_SIZE)).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Test User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Test User".to_string(), None, None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     let blob = create_small_blob();
@@ -92,13 +86,7 @@ async fn test_rejected_file_not_written_to_disk() -> Result<()> {
     let mut test = WatcherTest::setup(Some(TINY_MAX_FILE_SIZE)).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Test User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Test User".to_string(), None, None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Create an oversized blob on the homeserver
@@ -151,13 +139,7 @@ async fn test_ingestion_continues_after_rejection() -> Result<()> {
     let mut test = WatcherTest::setup(Some(TINY_MAX_FILE_SIZE)).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Test User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Test User".to_string(), None, None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // 1) Create an oversized file event

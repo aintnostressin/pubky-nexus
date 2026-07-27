@@ -13,13 +13,7 @@ async fn test_delete_post_with_relationships() -> Result<()> {
 
     // Create a new user
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("Test user for post deletion".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostDelete:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostDelete:User".to_string(), Some("Test user for post deletion".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Create a post without any relationships

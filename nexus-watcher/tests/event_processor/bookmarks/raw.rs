@@ -17,13 +17,7 @@ async fn test_homeserver_bookmark() -> Result<()> {
 
     // Step 1: Create a user
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_bookmark".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Bookmark:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:Bookmark:User".to_string(), Some("test_homeserver_bookmark".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
     // Uncapped: the shared event log is append-only and unbounded.
     let (_, events_in_redis_before) = EventLine::get_from_index(None, usize::MAX).await.unwrap();

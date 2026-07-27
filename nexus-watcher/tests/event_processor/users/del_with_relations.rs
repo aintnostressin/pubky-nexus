@@ -17,13 +17,7 @@ async fn test_delete_user_with_relationships() -> Result<()> {
 
     // Create a new user
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_delete_user_with_relationships".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:UserDeleteWith:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:UserDeleteWith:User".to_string(), Some("test_delete_user_with_relationships".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Create a post to establish a relationship
@@ -108,13 +102,7 @@ async fn test_delete_user_with_relationships() -> Result<()> {
 
     // Create a User with image and links
     let user_with_kp = Keypair::random();
-    let mut user_with = PubkyAppUser {
-        bio: Some("test_delete_user_with_relationships".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:UserDeleteWith:UserWith".to_string(),
-        status: None,
-    };
+    let mut user_with = PubkyAppUser::new("Watcher:UserDeleteWith:UserWith".to_string(), Some("test_delete_user_with_relationships".to_string()), None, None, None);
     let user_with_id = test.create_user(&user_with_kp, &user_with).await?;
 
     // Add image to the user
@@ -137,16 +125,16 @@ async fn test_delete_user_with_relationships() -> Result<()> {
 
     let (_file_id, file_path) = test.create_file(&user_with_kp, &file).await?;
 
-    user_with = PubkyAppUser {
-        bio: Some("test_delete_user_with_relationships".to_string()),
-        image: Some(file_path.to_string()),
-        links: Some(vec![PubkyAppUserLink {
+    user_with = PubkyAppUser::new(
+        "Watcher:UserDeleteWith:UserWith".to_string(),
+        Some("test_delete_user_with_relationships".to_string()),
+        Some(file_path.to_string()),
+        Some(vec![PubkyAppUserLink {
             title: "Heaven".to_string(),
             url: "pubky://rest.now".to_string(),
         }]),
-        name: "Watcher:UserDeleteWith:UserWith".to_string(),
-        status: Some("Zombie soon".to_string()),
-    };
+        Some("Zombie soon".to_string()),
+    );
     let _ = test.create_profile(&user_with_kp, &user_with).await?;
 
     // Create a post to establish a relationship
@@ -248,13 +236,7 @@ async fn test_delete_recommended_user() -> Result<()> {
 
     let fn_create_user =
         async |test: &mut WatcherTest, keypair: &Keypair, name: &str| -> Result<String> {
-            let user = PubkyAppUser {
-                bio: Some("test_delete_user_with_relationships".to_string()),
-                image: None,
-                links: None,
-                name: format!("Watcher:UserDeleteWith:User:{name}"),
-                status: None,
-            };
+            let user = PubkyAppUser::new(format!("Watcher:UserDeleteWith:User:{name}"), Some("test_delete_user_with_relationships".to_string()), None, None, None);
             test.create_user(keypair, &user).await
         };
 

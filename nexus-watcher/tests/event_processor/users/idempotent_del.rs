@@ -16,13 +16,7 @@ async fn test_user_del_idempotent() -> Result<()> {
 
     // Create a user with no relationships
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_user_del_idempotent".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:IdempotentDel:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:IdempotentDel:User".to_string(), Some("test_user_del_idempotent".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Delete through event processor (normal flow — everything succeeds)
@@ -74,13 +68,7 @@ async fn test_user_del_graph_last_recovery() -> Result<()> {
     // Create a user with no relationships
     let user_kp = Keypair::random();
     let username = "Watcher:GraphLastRecovery:User";
-    let user = PubkyAppUser {
-        bio: Some("test_user_del_graph_last_recovery".to_string()),
-        image: None,
-        links: None,
-        name: username.to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new(username.to_string(), Some("test_user_del_graph_last_recovery".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Sanity: verify everything is set up

@@ -13,37 +13,19 @@ async fn test_homeserver_mentions_notifications() -> Result<()> {
 
     // Create first user (author)
     let author_kp = Keypair::random();
-    let author_user = PubkyAppUser {
-        bio: Some("test_homeserver_mentions_notifications".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:MentionsNotification:Author".to_string(),
-        status: None,
-    };
+    let author_user = PubkyAppUser::new("Watcher:MentionsNotification:Author".to_string(), Some("test_homeserver_mentions_notifications".to_string()), None, None, None);
     let author_user_id = test.create_user(&author_kp, &author_user).await?;
 
     // Create second user (mention 1)
     let mentioned_user_1_kp = Keypair::random();
-    let mentioned_user_1 = PubkyAppUser {
-        bio: Some("test_homeserver_mentions".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:MentionsNotification:MentionedUser1".to_string(),
-        status: None,
-    };
+    let mentioned_user_1 = PubkyAppUser::new("Watcher:MentionsNotification:MentionedUser1".to_string(), Some("test_homeserver_mentions".to_string()), None, None, None);
     let mentioned_user_1_id = test
         .create_user(&mentioned_user_1_kp, &mentioned_user_1)
         .await?;
 
     // Create third user (mention 2)
     let mentioned_user_2_kp = Keypair::random();
-    let mentioned_user_2 = PubkyAppUser {
-        bio: Some("test_homeserver_mentions".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:MentionsNotification:MentionedUser2".to_string(),
-        status: None,
-    };
+    let mentioned_user_2 = PubkyAppUser::new("Watcher:MentionsNotification:MentionedUser2".to_string(), Some("test_homeserver_mentions".to_string()), None, None, None);
     let mentioned_user_2_id = test
         .create_user(&mentioned_user_2_kp, &mentioned_user_2)
         .await?;

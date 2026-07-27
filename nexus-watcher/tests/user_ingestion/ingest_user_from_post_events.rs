@@ -32,13 +32,7 @@ async fn test_reply_to_post_on_unknown_homeserver() -> Result<()> {
     let parent_post_absolute_uri =
         post_uri_builder(parent_author_id.clone(), parent_post_id.clone());
 
-    let reply_author = PubkyAppUser {
-        bio: Some("test_reply_to_post_on_unknown_homeserver_reply".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:ReplyUserIngest:Reply:User".to_string(),
-        status: None,
-    };
+    let reply_author = PubkyAppUser::new("Watcher:ReplyUserIngest:Reply:User".to_string(), Some("test_reply_to_post_on_unknown_homeserver_reply".to_string()), None, None, None);
     let reply_author_kp = Keypair::random();
     let _reply_author_id = test.create_user(&reply_author_kp, &reply_author).await?;
 
@@ -83,13 +77,7 @@ async fn test_repost_of_post_on_unknown_homeserver() -> Result<()> {
     let original_post_id = original_post.create_id();
     let original_post_uri = post_uri_builder(original_author_id.clone(), original_post_id.clone());
 
-    let repost_author = PubkyAppUser {
-        bio: Some("test_repost_of_post_on_unknown_homeserver_repost".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:RepostUserIngest:Repost:User".to_string(),
-        status: None,
-    };
+    let repost_author = PubkyAppUser::new("Watcher:RepostUserIngest:Repost:User".to_string(), Some("test_repost_of_post_on_unknown_homeserver_repost".to_string()), None, None, None);
     let repost_author_kp = Keypair::random();
     let _repost_author_id = test.create_user(&repost_author_kp, &repost_author).await?;
 
@@ -134,13 +122,7 @@ async fn test_post_and_mention_users_on_unknown_homeserver() -> Result<()> {
     test.register_user_in_hs(&user_2_kp, &user_2_hs_pk).await?;
     test.register_user_in_hs(&user_3_kp, &user_3_hs_pk).await?;
 
-    let post_author = PubkyAppUser {
-        bio: Some("test_post_and_mention_users_on_unknown_homeserver".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:MentionUserIngest:User".to_string(),
-        status: None,
-    };
+    let post_author = PubkyAppUser::new("Watcher:MentionUserIngest:User".to_string(), Some("test_post_and_mention_users_on_unknown_homeserver".to_string()), None, None, None);
     let post_author_kp = Keypair::random();
     let _post_author_id = test.create_user(&post_author_kp, &post_author).await?;
 
@@ -209,13 +191,7 @@ async fn test_collection_ingests_each_item_author() -> Result<()> {
     let item2_uri = post_uri_builder(item2_id.clone(), item2_post_id.clone());
 
     // The Collection author is a regular (Nexus-known) user.
-    let curator = PubkyAppUser {
-        bio: Some("test_collection_ingests_each_item_author".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:CollectionIngest:Curator".to_string(),
-        status: None,
-    };
+    let curator = PubkyAppUser::new("Watcher:CollectionIngest:Curator".to_string(), Some("test_collection_ingests_each_item_author".to_string()), None, None, None);
     let curator_kp = Keypair::random();
     let _curator_id = test.create_user(&curator_kp, &curator).await?;
 

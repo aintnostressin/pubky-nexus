@@ -1,14 +1,14 @@
 use crate::event_processor::mentions::utils::find_post_mentions;
 use crate::event_processor::posts::utils::{
     assert_notification_count, check_member_post_replies, check_member_total_engagement_user_posts,
-    find_post_counts, pubky_id, short_post, short_reply, short_repost, test_user,
+    find_post_counts, pubky_id, short_post, short_reply, short_repost,
 };
 use crate::event_processor::users::utils::find_user_counts;
 use crate::event_processor::utils::watcher::WatcherTest;
 use anyhow::Result;
 use nexus_common::db::RedisOps;
 use nexus_common::models::post::{PostCounts, PostDetails, PostRelationships};
-use nexus_common::utils::test_utils::default_ingestor_tests;
+use nexus_common::utils::test_utils::{default_ingestor_tests, test_user};
 use nexus_watcher::events::handlers;
 use pubky::Keypair;
 use pubky_app_specs::post_uri_builder;
