@@ -19,11 +19,11 @@ use tracing::info;
 ///   through `Option<bool>`, which is already correct.
 ///
 /// # Idempotency
-/// Safe to re-run. The `WHERE u.deleted IS NULL` predicate drains on each pass (the `SET`
-/// writes `deleted`, so the predicate becomes false). A post-rollout re-run additionally
-/// re-catches users tombstoned by pre-cutover code during the deploy window
-/// (old `create_user` left `deleted` at whatever the migration wrote while still setting
-/// the sentinel name).
+/// Safe to re-run. The `WHERE` predicate is falsified by the `SET` in the same query, so
+/// each pass drains. Its second disjunct (`u.name = '[DELETED]' AND u.deleted = false`) is
+/// what makes a post-rollout re-run useful: it re-catches users tombstoned by pre-cutover
+/// code during the deploy window, where old `create_user` set the sentinel name while
+/// leaving `deleted` at whatever the migration had written.
 pub struct UserDeletedFlag1780617600;
 
 #[async_trait]
