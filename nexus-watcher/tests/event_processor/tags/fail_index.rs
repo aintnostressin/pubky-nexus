@@ -15,26 +15,14 @@ async fn test_homeserver_tag_cannot_add_while_index() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let tagged_keypair = Keypair::random();
-    let tagged_user = PubkyAppUser {
-        bio: Some("test_homeserver_tag_user_not_found".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:CannotTag:Tagged:Sync".to_string(),
-        status: None,
-    };
+    let tagged_user = PubkyAppUser::new("Watcher:CannotTag:Tagged:Sync".to_string(), Some("test_homeserver_tag_user_not_found".to_string()), None, None, None);
     let tagged_user_id = test.create_user(&tagged_keypair, &tagged_user).await?;
 
     // Switch OFF event processing — shadow_user signs up on the homeserver but is not indexed
     test = test.remove_event_processing().await;
 
     let shadow_user_kp = Keypair::random();
-    let shadow_user = PubkyAppUser {
-        bio: Some("test_homeserver_tag_user_not_found".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:CannotTag:Tagger:Sync".to_string(),
-        status: None,
-    };
+    let shadow_user = PubkyAppUser::new("Watcher:CannotTag:Tagger:Sync".to_string(), Some("test_homeserver_tag_user_not_found".to_string()), None, None, None);
     let shadow_user_id = test.create_user(&shadow_user_kp, &shadow_user).await?;
 
     // => User tag: shadow_user tags tagged_user's profile

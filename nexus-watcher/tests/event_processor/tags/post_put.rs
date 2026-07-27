@@ -25,13 +25,7 @@ async fn test_homeserver_put_tag_post() -> Result<()> {
     // Step 1: Create a user
     let user_kp = Keypair::random();
 
-    let tagger = PubkyAppUser {
-        bio: Some("test_homeserver_put_tag_post".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PutTagPost:User".to_string(),
-        status: None,
-    };
+    let tagger = PubkyAppUser::new("Watcher:PutTagPost:User".to_string(), Some("test_homeserver_put_tag_post".to_string()), None, None, None);
     let tagger_user_id = test.create_user(&user_kp, &tagger).await?;
 
     // Step 2: Create a post under that user
@@ -167,13 +161,7 @@ async fn test_homeserver_put_tag_post_unique_count() -> Result<()> {
 
     // Create a user
     let tagger_kp = Keypair::random();
-    let tagger = PubkyAppUser {
-        bio: Some("test_homeserver_put_tag_post_unique_count".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PutUniqueTag:Post".to_string(),
-        status: None,
-    };
+    let tagger = PubkyAppUser::new("Watcher:PutUniqueTag:Post".to_string(), Some("test_homeserver_put_tag_post_unique_count".to_string()), None, None, None);
     let tagger_user_id = test.create_user(&tagger_kp, &tagger).await?;
 
     // Create a post under that user
@@ -232,13 +220,7 @@ async fn test_homeserver_put_tag_user_unique_count() -> Result<()> {
 
     // Create a user
     let tagger_kp = Keypair::random();
-    let tagger = PubkyAppUser {
-        bio: Some("test_homeserver_put_user_post_unique_count".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PutUniqueTag:User".to_string(),
-        status: None,
-    };
+    let tagger = PubkyAppUser::new("Watcher:PutUniqueTag:User".to_string(), Some("test_homeserver_put_user_post_unique_count".to_string()), None, None, None);
     let tagger_user_id = test.create_user(&tagger_kp, &tagger).await?;
 
     let label = "tag-237";

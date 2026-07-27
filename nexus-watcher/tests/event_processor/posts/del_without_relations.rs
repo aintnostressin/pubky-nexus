@@ -25,13 +25,7 @@ async fn test_delete_post_without_relationships() -> Result<()> {
 
     // Create a new user
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_delete_post_without_relationships".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostDelete:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostDelete:User".to_string(), Some("test_delete_post_without_relationships".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Create a post without any relationships
@@ -131,13 +125,7 @@ async fn test_delete_post_that_reposted() -> Result<()> {
 
     // Create a new user
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_delete_post_that_reposted".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostDeleteReposted:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostDeleteReposted:User".to_string(), Some("test_delete_post_that_reposted".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Create a post without any relationships
@@ -264,13 +252,7 @@ async fn test_delete_post_that_replied() -> Result<()> {
 
     // Create a new user
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_delete_post_that_replied".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostDeleteReplied:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostDeleteReplied:User".to_string(), Some("test_delete_post_that_replied".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Create a post without any relationships

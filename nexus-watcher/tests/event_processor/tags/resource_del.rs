@@ -17,13 +17,7 @@ async fn test_homeserver_del_resource_tag() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_del_resource_tag".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:ResourceTag:Del".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:ResourceTag:Del".to_string(), Some("test_del_resource_tag".to_string()), None, None, None);
     let _user_id = test.create_user(&user_kp, &user).await?;
 
     let target_uri = "https://example.com/to-be-deleted";
@@ -86,13 +80,7 @@ async fn test_homeserver_resource_tag_put_del_reput() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_resource_tag_reput".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:ResourceTag:RePut".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:ResourceTag:RePut".to_string(), Some("test_resource_tag_reput".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     let target_uri = "https://example.com/reput-test";

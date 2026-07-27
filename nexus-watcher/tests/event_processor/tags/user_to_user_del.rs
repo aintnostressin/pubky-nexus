@@ -17,24 +17,12 @@ async fn test_homeserver_del_tag_to_another_user() -> Result<()> {
     // Step 1: Create the users
     let tagged_kp = Keypair::random();
 
-    let tagged_user = PubkyAppUser {
-        bio: Some("test_homeserver_del_tag_to_another_user".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:DelTagToAnother:TaggedUser".to_string(),
-        status: None,
-    };
+    let tagged_user = PubkyAppUser::new("Watcher:DelTagToAnother:TaggedUser".to_string(), Some("test_homeserver_del_tag_to_another_user".to_string()), None, None, None);
     let tagged_user_id = test.create_user(&tagged_kp, &tagged_user).await?;
 
     let tagger_kp = Keypair::random();
 
-    let tagger_user = PubkyAppUser {
-        bio: Some("test_homeserver_del_tag_to_another_user".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:DelTagToAnother:TaggerUser".to_string(),
-        status: None,
-    };
+    let tagger_user = PubkyAppUser::new("Watcher:DelTagToAnother:TaggerUser".to_string(), Some("test_homeserver_del_tag_to_another_user".to_string()), None, None, None);
     let tagger_user_id = test.create_user(&tagger_kp, &tagger_user).await?;
 
     // Step 2: Add a tag to the user

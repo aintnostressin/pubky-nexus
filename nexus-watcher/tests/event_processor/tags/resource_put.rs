@@ -19,13 +19,7 @@ async fn test_homeserver_put_resource_tag_external_uri() -> Result<()> {
 
     // Create a tagger user
     let user_kp = Keypair::random();
-    let tagger = PubkyAppUser {
-        bio: Some("test_resource_tag_external".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:ResourceTag:External".to_string(),
-        status: None,
-    };
+    let tagger = PubkyAppUser::new("Watcher:ResourceTag:External".to_string(), Some("test_resource_tag_external".to_string()), None, None, None);
     let tagger_user_id = test.create_user(&user_kp, &tagger).await?;
 
     // Create a tag targeting an external URL
@@ -138,13 +132,7 @@ async fn test_homeserver_put_resource_tag_internal_unknown() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_resource_tag_internal_unknown".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:ResourceTag:InternalUnknown".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:ResourceTag:InternalUnknown".to_string(), Some("test_resource_tag_internal_unknown".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Tag a pubky URI that's NOT pubky.app (eventky event)

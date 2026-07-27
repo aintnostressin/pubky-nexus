@@ -10,13 +10,7 @@ async fn test_homeserver_post_reply_without_post_parent() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let author_user_kp = Keypair::random();
-    let author = PubkyAppUser {
-        bio: Some("test_homeserver_post_reply_without_post_parent".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostReplyFail:Author".to_string(),
-        status: None,
-    };
+    let author = PubkyAppUser::new("Watcher:PostReplyFail:Author".to_string(), Some("test_homeserver_post_reply_without_post_parent".to_string()), None, None, None);
     let author_id = test.create_user(&author_user_kp, &author).await?;
 
     // Switch OFF the event processor to simulate the pending events to index

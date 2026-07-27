@@ -16,13 +16,7 @@ async fn test_homeserver_follow_cannot_index() -> Result<()> {
     test.register_user(&followee_keypair).await?;
 
     let follower_kp = Keypair::random();
-    let follower_user = PubkyAppUser {
-        bio: Some("test_homeserver_follow_cannot_index".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:IndexFail:Follower".to_string(),
-        status: None,
-    };
+    let follower_user = PubkyAppUser::new("Watcher:IndexFail:Follower".to_string(), Some("test_homeserver_follow_cannot_index".to_string()), None, None, None);
     let follower_id = test.create_user(&follower_kp, &follower_user).await?;
 
     let _follow_path = test.create_follow(&follower_kp, &followee_id).await?;

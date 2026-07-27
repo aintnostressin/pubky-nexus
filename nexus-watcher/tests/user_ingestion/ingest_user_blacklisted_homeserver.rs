@@ -83,13 +83,7 @@ async fn test_follow_of_user_on_blacklisted_homeserver_is_dropped() -> Result<()
     test.register_user_in_hs(&followee_kp, &hs_pk).await?;
 
     let follower_kp = Keypair::random();
-    let follower_user = PubkyAppUser {
-        bio: Some("test_follow_of_user_on_blacklisted_homeserver".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:UserIngestion:FollowBlacklisted".to_string(),
-        status: None,
-    };
+    let follower_user = PubkyAppUser::new("Watcher:UserIngestion:FollowBlacklisted".to_string(), Some("test_follow_of_user_on_blacklisted_homeserver".to_string()), None, None, None);
     test.create_user(&follower_kp, &follower_user).await?;
 
     let ingestor = UserIngestor::new([PubkyId::from(hs_pk.clone())]);

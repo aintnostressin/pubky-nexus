@@ -5,9 +5,10 @@ use anyhow::Result;
 use chrono::Utc;
 use pubky::{recovery_file, Keypair, ResourcePath};
 use pubky_app_specs::traits::HashId;
-use pubky_app_specs::{post_uri_builder, tag_uri_builder, PubkyAppPost, PubkyAppTag, PubkyAppUser};
+use pubky_app_specs::{post_uri_builder, tag_uri_builder, PubkyAppPost, PubkyAppTag};
 use tokio::fs;
 
+use nexus_common::utils::test_utils::test_user;
 const MODERATION_LABEL: &str = "label_to_moderate";
 
 #[tokio_shared_rt::test(shared)]
@@ -282,12 +283,4 @@ async fn moderate_tag(
     };
     let tag_path = tag.hs_path();
     test.put(moderator_kp, &tag_path, tag).await
-}
-
-fn test_user(name: &str, bio: &str) -> PubkyAppUser {
-    PubkyAppUser {
-        bio: Some(bio.to_string()),
-        name: name.to_string(),
-        ..Default::default()
-    }
 }

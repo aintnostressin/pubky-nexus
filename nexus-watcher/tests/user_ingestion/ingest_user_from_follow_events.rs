@@ -17,13 +17,7 @@ async fn test_follow_on_unknown_homeserver() -> Result<()> {
         .await?;
 
     let follower_kp = Keypair::random();
-    let follower_user = PubkyAppUser {
-        bio: Some("test_follow_on_unknown_homeserver".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:UserIngestion:Follow".to_string(),
-        status: None,
-    };
+    let follower_user = PubkyAppUser::new("Watcher:UserIngestion:Follow".to_string(), Some("test_follow_on_unknown_homeserver".to_string()), None, None, None);
     let _follower_id = test.create_user(&follower_kp, &follower_user).await?;
 
     test.create_follow(&follower_kp, &followee_id).await?;

@@ -10,26 +10,14 @@ async fn test_homeserver_follow_cannot_complete() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let follower_kp = Keypair::random();
-    let follower = PubkyAppUser {
-        bio: Some("test_homeserver_follow_cannot_complete".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:CannotFollow:Follower:Sync".to_string(),
-        status: None,
-    };
+    let follower = PubkyAppUser::new("Watcher:CannotFollow:Follower:Sync".to_string(), Some("test_homeserver_follow_cannot_complete".to_string()), None, None, None);
     let follower_id = test.create_user(&follower_kp, &follower).await?;
 
     // Switch OFF event processing — followee signs up but is not indexed
     test = test.remove_event_processing().await;
 
     let followee_kp = Keypair::random();
-    let followee = PubkyAppUser {
-        bio: Some("test_homeserver_follow_cannot_complete".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:CannotFollow:Followee:Unsync".to_string(),
-        status: None,
-    };
+    let followee = PubkyAppUser::new("Watcher:CannotFollow:Followee:Unsync".to_string(), Some("test_homeserver_follow_cannot_complete".to_string()), None, None, None);
     let shadow_followee_id = test.create_user(&followee_kp, &followee).await?;
 
     let _follow_path = test

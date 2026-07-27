@@ -14,13 +14,7 @@ async fn test_homeserver_post_repost_notification() -> Result<()> {
 
     let alice_kp = Keypair::random();
 
-    let alice = PubkyAppUser {
-        bio: Some("test_homeserver_post_repost_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostRepostNotification:Alice".to_string(),
-        status: None,
-    };
+    let alice = PubkyAppUser::new("Watcher:PostRepostNotification:Alice".to_string(), Some("test_homeserver_post_repost_notification".to_string()), None, None, None);
 
     let alice_id = test.create_user(&alice_kp, &alice).await?;
 
@@ -64,13 +58,7 @@ async fn test_homeserver_post_repost_notification() -> Result<()> {
     // Create new user to test the notication
     let bob_kp = Keypair::random();
 
-    let bob = PubkyAppUser {
-        bio: Some("test_homeserver_post_repost_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostRepostNotification:Bob".to_string(),
-        status: None,
-    };
+    let bob = PubkyAppUser::new("Watcher:PostRepostNotification:Bob".to_string(), Some("test_homeserver_post_repost_notification".to_string()), None, None, None);
 
     let bob_id = test.create_user(&bob_kp, &bob).await?;
 

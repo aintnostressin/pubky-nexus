@@ -16,24 +16,12 @@ async fn test_delete_bookmarked_post_notification() -> Result<()> {
 
     // Create User A who makes the original post
     let user_a_kp = Keypair::random();
-    let user_a = PubkyAppUser {
-        bio: Some("User A bio".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:BookmarkedPostDeleteNotification:UserA".to_string(),
-        status: None,
-    };
+    let user_a = PubkyAppUser::new("Watcher:BookmarkedPostDeleteNotification:UserA".to_string(), Some("User A bio".to_string()), None, None, None);
     let user_a_id = test.create_user(&user_a_kp, &user_a).await?;
 
     // Create User B who bookmarks User A's post
     let user_b_kp = Keypair::random();
-    let user_b = PubkyAppUser {
-        bio: Some("User B bio".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:BookmarkedPostDeleteNotification:UserB".to_string(),
-        status: None,
-    };
+    let user_b = PubkyAppUser::new("Watcher:BookmarkedPostDeleteNotification:UserB".to_string(), Some("User B bio".to_string()), None, None, None);
     let user_b_id = test.create_user(&user_b_kp, &user_b).await?;
 
     // User A creates a post

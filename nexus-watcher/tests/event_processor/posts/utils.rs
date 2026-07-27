@@ -11,7 +11,7 @@ use nexus_common::{
     },
 };
 use pubky_app_specs::{
-    post_uri_builder, PubkyAppPost, PubkyAppPostEmbed, PubkyAppPostKind, PubkyAppUser, PubkyId,
+    post_uri_builder, PubkyAppPost, PubkyAppPostEmbed, PubkyAppPostKind,  PubkyId,
 };
 
 pub async fn find_post_counts(user_id: &str, post_id: &str) -> PostCounts {
@@ -202,17 +202,6 @@ pub fn short_repost(content: impl Into<String>, parent_uri: String) -> PubkyAppP
             uri: parent_uri,
         }),
         ..short_post(content)
-    }
-}
-
-/// Build a `PubkyAppUser` for tests with the given display name and bio.
-pub fn test_user(name: impl Into<String>, bio: impl Into<String>) -> PubkyAppUser {
-    PubkyAppUser {
-        bio: Some(bio.into()),
-        image: None,
-        links: None,
-        name: name.into(),
-        status: None,
     }
 }
 

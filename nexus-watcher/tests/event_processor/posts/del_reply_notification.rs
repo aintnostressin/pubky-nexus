@@ -13,24 +13,12 @@ async fn test_delete_post_that_replied_notification() -> Result<()> {
 
     // Create a user who posts
     let poster_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("Test user for post deletion".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostDeleteNotification:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostDeleteNotification:User".to_string(), Some("Test user for post deletion".to_string()), None, None, None);
     let poster_id = test.create_user(&poster_kp, &user).await?;
 
     // Create a user who posts
     let replier_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("Test user for post deletion".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostDeleteNotification:UserReplier".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostDeleteNotification:UserReplier".to_string(), Some("Test user for post deletion".to_string()), None, None, None);
     let replier_id = test.create_user(&replier_kp, &user).await?;
 
     // Create a post without any relationships

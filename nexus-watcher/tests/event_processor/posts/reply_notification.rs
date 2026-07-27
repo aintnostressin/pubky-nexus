@@ -12,13 +12,7 @@ async fn test_homeserver_post_reply_notification() -> Result<()> {
 
     let alice_kp = Keypair::random();
 
-    let alice = PubkyAppUser {
-        bio: Some("test_homeserver_post_reply_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostReplyNotification:Alice".to_string(),
-        status: None,
-    };
+    let alice = PubkyAppUser::new("Watcher:PostReplyNotification:Alice".to_string(), Some("test_homeserver_post_reply_notification".to_string()), None, None, None);
 
     let alice_id = test.create_user(&alice_kp, &alice).await?;
 
@@ -59,13 +53,7 @@ async fn test_homeserver_post_reply_notification() -> Result<()> {
     // Create new user to test the notication
     let bob_kp = Keypair::random();
 
-    let bob = PubkyAppUser {
-        bio: Some("test_homeserver_post_reply_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostReplyNotification:Bob".to_string(),
-        status: None,
-    };
+    let bob = PubkyAppUser::new("Watcher:PostReplyNotification:Bob".to_string(), Some("test_homeserver_post_reply_notification".to_string()), None, None, None);
 
     let bob_id = test.create_user(&bob_kp, &bob).await?;
 

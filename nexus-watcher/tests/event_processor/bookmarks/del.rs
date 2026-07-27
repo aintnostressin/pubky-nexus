@@ -14,23 +14,11 @@ async fn test_homeserver_unbookmark() -> Result<()> {
 
     // Step 1: Create a user
     let bookmarker_kp = Keypair::random();
-    let bookmarker = PubkyAppUser {
-        bio: Some("test_homeserver_unbookmark".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Unbookmark:Bookmarker".to_string(),
-        status: None,
-    };
+    let bookmarker = PubkyAppUser::new("Watcher:Unbookmark:Bookmarker".to_string(), Some("test_homeserver_unbookmark".to_string()), None, None, None);
     let bookmarker_id = test.create_user(&bookmarker_kp, &bookmarker).await?;
 
     let author_kp = Keypair::random();
-    let author = PubkyAppUser {
-        bio: Some("test_homeserver_unbookmark".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:Unbookmark:Author".to_string(),
-        status: None,
-    };
+    let author = PubkyAppUser::new("Watcher:Unbookmark:Author".to_string(), Some("test_homeserver_unbookmark".to_string()), None, None, None);
     let author_id = test.create_user(&author_kp, &author).await?;
 
     // Step 2: Create a post under that user

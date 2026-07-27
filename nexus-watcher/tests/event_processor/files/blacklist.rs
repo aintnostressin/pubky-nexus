@@ -20,13 +20,7 @@ async fn setup_user_with_blob(
     test: &mut WatcherTest,
 ) -> Result<(PubkyId, PubkyAppFile, String, String)> {
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Test User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Test User".to_string(), None, None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     let blob = PubkyAppBlob::new("Hello World!".as_bytes().to_vec());

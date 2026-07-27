@@ -18,26 +18,14 @@ async fn test_homeserver_tag_post_notification() -> Result<()> {
     // Create first user (post author)
     let author_kp = Keypair::random();
 
-    let author_user = PubkyAppUser {
-        bio: Some("test_homeserver_tag_post_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:TagPostNotification:Author".to_string(),
-        status: None,
-    };
+    let author_user = PubkyAppUser::new("Watcher:TagPostNotification:Author".to_string(), Some("test_homeserver_tag_post_notification".to_string()), None, None, None);
 
     let author_id = test.create_user(&author_kp, &author_user).await?;
 
     // Create second user (tagger)
     let tagger_kp = Keypair::random();
 
-    let tagger_user = PubkyAppUser {
-        bio: Some("test_homeserver_tag_post_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:TagPostNotification:Tagger".to_string(),
-        status: None,
-    };
+    let tagger_user = PubkyAppUser::new("Watcher:TagPostNotification:Tagger".to_string(), Some("test_homeserver_tag_post_notification".to_string()), None, None, None);
     let tagger_id = test.create_user(&tagger_kp, &tagger_user).await?;
 
     // Author creates a post

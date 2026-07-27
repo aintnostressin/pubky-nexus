@@ -17,13 +17,7 @@ async fn test_homeserver_put_tag_user_self() -> Result<()> {
     // Step 1: Create a user
     let user_kp = Keypair::random();
 
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_put_tag_user_self".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PutTagSelf:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PutTagSelf:User".to_string(), Some("test_homeserver_put_tag_user_self".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     // Step 2: Add a tag to the user

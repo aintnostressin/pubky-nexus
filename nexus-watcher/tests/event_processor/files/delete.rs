@@ -17,13 +17,7 @@ async fn test_delete_pubkyapp_file() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Test User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Test User".to_string(), None, None, None, None);
 
     let user_id = test.create_user(&user_kp, &user).await?;
 
@@ -93,13 +87,7 @@ async fn test_delete_pubkyapp_file_is_idempotent() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Test User Idempotent Delete".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Test User Idempotent Delete".to_string(), None, None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     let blob_data = "Idempotent delete test".to_string();

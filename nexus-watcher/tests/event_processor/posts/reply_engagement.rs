@@ -15,13 +15,7 @@ async fn test_homeserver_reply_engagement_control() -> Result<()> {
 
     let user_kp = Keypair::random();
 
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_reply_repost".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:ReplyEng:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:ReplyEng:User".to_string(), Some("test_homeserver_reply_repost".to_string()), None, None, None);
 
     let author_id = test.create_user(&user_kp, &user).await?;
 
@@ -125,13 +119,7 @@ async fn test_homeserver_reply_engagement_control() -> Result<()> {
 
     let tagger_kp = Keypair::random();
 
-    let tagger = PubkyAppUser {
-        bio: Some("test_homeserver_reply_engagement_control".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:ReplyEngagement:Tagger".to_string(),
-        status: None,
-    };
+    let tagger = PubkyAppUser::new("Watcher:ReplyEngagement:Tagger".to_string(), Some("test_homeserver_reply_engagement_control".to_string()), None, None, None);
     let _tagger_user_id = test.create_user(&tagger_kp, &tagger).await?;
     let label = "ignore_score";
 

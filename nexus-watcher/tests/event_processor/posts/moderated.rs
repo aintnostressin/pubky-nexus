@@ -16,13 +16,7 @@ async fn test_moderated_post_lifecycle() -> Result<()> {
 
     // 1. User signup and writes a post
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_post_to_moderate".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostModerate:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostModerate:User".to_string(), Some("test_homeserver_post_to_moderate".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     let post = PubkyAppPost {

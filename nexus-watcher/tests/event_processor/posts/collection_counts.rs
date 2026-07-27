@@ -41,13 +41,7 @@ async fn test_collection_post_increments_collections_not_replies() -> Result<()>
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Watcher:CollectionCounts:Put".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:CollectionCounts:Put".to_string(), None, None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     let (_short_id, short_path) = test.create_post(&user_kp, &short_post("plain")).await?;
@@ -82,13 +76,7 @@ async fn test_delete_collection_decrements_collections() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Watcher:CollectionCounts:Del".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:CollectionCounts:Del".to_string(), None, None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     let (_col_id, col_path) = test
@@ -117,13 +105,7 @@ async fn test_editing_post_kind_moves_collections_counter() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Watcher:CollectionCounts:Edit".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:CollectionCounts:Edit".to_string(), None, None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     let (_id, path) = test.create_post(&user_kp, &short_post("draft")).await?;
@@ -164,13 +146,7 @@ async fn test_soft_deleting_a_bookmarked_collection_decrements_collections_once(
     let mut test = WatcherTest::setup(None).await?;
 
     let author_kp = Keypair::random();
-    let author = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Watcher:CollectionCounts:SoftDelAuthor".to_string(),
-        status: None,
-    };
+    let author = PubkyAppUser::new("Watcher:CollectionCounts:SoftDelAuthor".to_string(), None, None, None, None);
     let author_id = test.create_user(&author_kp, &author).await?;
     let (col_id, col_path) = test
         .create_post(&author_kp, &collection_post("Curated"))
@@ -180,13 +156,7 @@ async fn test_soft_deleting_a_bookmarked_collection_decrements_collections_once(
     // A follower bookmarks it, so deleting the collection soft-deletes (keeps the
     // node) instead of hard-deleting.
     let follower_kp = Keypair::random();
-    let follower = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Watcher:CollectionCounts:Follower".to_string(),
-        status: None,
-    };
+    let follower = PubkyAppUser::new("Watcher:CollectionCounts:Follower".to_string(), None, None, None, None);
     let _follower_id = test.create_user(&follower_kp, &follower).await?;
     bookmark_post(&mut test, &follower_kp, &author_id, &col_id).await?;
 
@@ -214,13 +184,7 @@ async fn test_bookmarking_a_collection_is_excluded_from_bookmarks() -> Result<()
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: None,
-        image: None,
-        links: None,
-        name: "Watcher:CollectionCounts:Bookmark".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:CollectionCounts:Bookmark".to_string(), None, None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     let (short_id, _short_path) = test.create_post(&user_kp, &short_post("plain")).await?;

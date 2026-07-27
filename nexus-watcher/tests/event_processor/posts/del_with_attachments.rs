@@ -15,13 +15,7 @@ async fn test_homeserver_del_post_with_attachments() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_del_post_with_attachments".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:DelWithAttachmentEvent:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:DelWithAttachmentEvent:User".to_string(), Some("test_homeserver_del_post_with_attachments".to_string()), None, None, None);
 
     let user_id = test.create_user(&user_kp, &user).await?;
 

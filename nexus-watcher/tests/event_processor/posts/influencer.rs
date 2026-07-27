@@ -14,13 +14,7 @@ async fn test_homeserver_post_influencer() -> Result<()> {
 
     let alice_user_kp = Keypair::random();
 
-    let alice_user = PubkyAppUser {
-        bio: Some("test_homeserver_post_influencer".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostInfluencer:Alice".to_string(),
-        status: None,
-    };
+    let alice_user = PubkyAppUser::new("Watcher:PostInfluencer:Alice".to_string(), Some("test_homeserver_post_influencer".to_string()), None, None, None);
     let alice_id = test.create_user(&alice_user_kp, &alice_user).await?;
 
     // Alice creates a new post
@@ -44,13 +38,7 @@ async fn test_homeserver_post_influencer() -> Result<()> {
     // Create new user
     let bob_user_kp = Keypair::random();
 
-    let bob_user = PubkyAppUser {
-        bio: Some("test_homeserver_post_influencer".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostInfluencer:Bob".to_string(),
-        status: None,
-    };
+    let bob_user = PubkyAppUser::new("Watcher:PostInfluencer:Bob".to_string(), Some("test_homeserver_post_influencer".to_string()), None, None, None);
     let bob_id = test.create_user(&bob_user_kp, &bob_user).await?;
 
     // Follow Alice

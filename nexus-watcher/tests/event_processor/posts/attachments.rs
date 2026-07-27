@@ -14,13 +14,7 @@ async fn test_homeserver_post_attachments() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_post_event".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostEvent:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostEvent:User".to_string(), Some("test_homeserver_post_event".to_string()), None, None, None);
 
     let user_id = test.create_user(&user_kp, &user).await?;
 
@@ -74,13 +68,7 @@ async fn test_homeserver_post_attachment_only_edits() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_post_attachment_only_edits".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostAttachmentOnlyEdits:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostAttachmentOnlyEdits:User".to_string(), Some("test_homeserver_post_attachment_only_edits".to_string()), None, None, None);
 
     let user_id = test.create_user(&user_kp, &user).await?;
 

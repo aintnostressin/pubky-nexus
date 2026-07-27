@@ -15,25 +15,13 @@ async fn test_homeserver_untag_user_notification() -> Result<()> {
     // Create the first user (tagged user)
     let tagged_kp = Keypair::random();
 
-    let tagged_user = PubkyAppUser {
-        bio: Some("test_homeserver_untag_user_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:UntagUserNotification:TaggedUser".to_string(),
-        status: None,
-    };
+    let tagged_user = PubkyAppUser::new("Watcher:UntagUserNotification:TaggedUser".to_string(), Some("test_homeserver_untag_user_notification".to_string()), None, None, None);
     let tagged_user_id = test.create_user(&tagged_kp, &tagged_user).await?;
 
     // Create the second user (tagger)
     let tagger_kp = Keypair::random();
 
-    let tagger_user = PubkyAppUser {
-        bio: Some("test_homeserver_untag_user_notification".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:UntagUserNotification:TaggerUser".to_string(),
-        status: None,
-    };
+    let tagger_user = PubkyAppUser::new("Watcher:UntagUserNotification:TaggerUser".to_string(), Some("test_homeserver_untag_user_notification".to_string()), None, None, None);
     let tagger_user_id = test.create_user(&tagger_kp, &tagger_user).await?;
 
     // Tagger adds a tag to the profile of the tagged user

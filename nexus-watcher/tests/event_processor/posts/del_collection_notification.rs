@@ -19,24 +19,12 @@ async fn test_delete_bookmarked_collection_notification() -> Result<()> {
 
     // Create User A who makes the original collection
     let user_a_kp = Keypair::random();
-    let user_a = PubkyAppUser {
-        bio: Some("User A bio".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:CollectionDeleteNotification:UserA".to_string(),
-        status: None,
-    };
+    let user_a = PubkyAppUser::new("Watcher:CollectionDeleteNotification:UserA".to_string(), Some("User A bio".to_string()), None, None, None);
     let user_a_id = test.create_user(&user_a_kp, &user_a).await?;
 
     // Create User B who bookmarks User A's collection
     let user_b_kp = Keypair::random();
-    let user_b = PubkyAppUser {
-        bio: Some("User B bio".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:CollectionDeleteNotification:UserB".to_string(),
-        status: None,
-    };
+    let user_b = PubkyAppUser::new("Watcher:CollectionDeleteNotification:UserB".to_string(), Some("User B bio".to_string()), None, None, None);
     let user_b_id = test.create_user(&user_b_kp, &user_b).await?;
 
     // User A creates a collection

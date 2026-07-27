@@ -17,13 +17,7 @@ async fn test_homeserver_post_lock_roundtrip() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
-    let user = PubkyAppUser {
-        bio: Some("test_post_lock".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostLock:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:PostLock:User".to_string(), Some("test_post_lock".to_string()), None, None, None);
     let user_id = test.create_user(&user_kp, &user).await?;
 
     let lock_url = "pubky://lockserver.example/pub/pubky.app/locks/abc".to_string();
@@ -79,24 +73,12 @@ async fn test_lock_only_edit_sends_no_notification() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let author_kp = Keypair::random();
-    let author = PubkyAppUser {
-        bio: Some("author".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostLockNotif:Author".to_string(),
-        status: None,
-    };
+    let author = PubkyAppUser::new("Watcher:PostLockNotif:Author".to_string(), Some("author".to_string()), None, None, None);
     let author_id = test.create_user(&author_kp, &author).await?;
 
     // A tagger is an interactor who receives `changed_post` notifications.
     let tagger_kp = Keypair::random();
-    let tagger = PubkyAppUser {
-        bio: Some("tagger".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:PostLockNotif:Tagger".to_string(),
-        status: None,
-    };
+    let tagger = PubkyAppUser::new("Watcher:PostLockNotif:Tagger".to_string(), Some("tagger".to_string()), None, None, None);
     let tagger_id = test.create_user(&tagger_kp, &tagger).await?;
 
     let mut post = PubkyAppPost {

@@ -16,13 +16,7 @@ async fn test_moderated_user_lifecycle() -> Result<()> {
 
     // 1. Create the target user
     let user_kp = Keypair::random();
-    let target = PubkyAppUser {
-        name: "Watcher:UserModerate:Target".to_string(),
-        bio: Some("to be moderated".to_string()),
-        image: None,
-        links: None,
-        status: None,
-    };
+    let target = PubkyAppUser::new("Watcher:UserModerate:Target".to_string(), Some("to be moderated".to_string()), None, None, None);
     let target_id = test.create_user(&user_kp, &target).await?;
 
     // 2. Confirm the user exists
@@ -50,13 +44,7 @@ async fn test_moderated_user_lifecycle() -> Result<()> {
     assert!(details.is_err());
 
     // 6. Confirm the user profile can be re-creating by pushing a new profile.json
-    let new_profile = PubkyAppUser {
-        name: "Watcher:UserModerate:Target".to_string(),
-        bio: Some("i am back, will behave".to_string()),
-        image: None,
-        links: None,
-        status: None,
-    };
+    let new_profile = PubkyAppUser::new("Watcher:UserModerate:Target".to_string(), Some("i am back, will behave".to_string()), None, None, None);
     let profile_path = PubkyAppUser::hs_path();
     test.put(&user_kp, &profile_path, new_profile).await?;
 

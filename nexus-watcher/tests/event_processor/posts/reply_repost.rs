@@ -13,13 +13,7 @@ async fn test_homeserver_reply_repost() -> Result<()> {
 
     let user_kp = Keypair::random();
 
-    let user = PubkyAppUser {
-        bio: Some("test_homeserver_reply_repost".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:ReplyRepost:User".to_string(),
-        status: None,
-    };
+    let user = PubkyAppUser::new("Watcher:ReplyRepost:User".to_string(), Some("test_homeserver_reply_repost".to_string()), None, None, None);
 
     let user_id = test.create_user(&user_kp, &user).await?;
 

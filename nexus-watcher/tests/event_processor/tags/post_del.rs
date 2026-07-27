@@ -20,26 +20,14 @@ async fn test_homeserver_del_tag_post() -> Result<()> {
     // Step 1: Create a user
     let tagger_kp = Keypair::random();
 
-    let tagger = PubkyAppUser {
-        bio: Some("test_homeserver_tag_post".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:DelTagPost:User".to_string(),
-        status: None,
-    };
+    let tagger = PubkyAppUser::new("Watcher:DelTagPost:User".to_string(), Some("test_homeserver_tag_post".to_string()), None, None, None);
     let tagger_user_id = test.create_user(&tagger_kp, &tagger).await?;
 
     // Step 1: Create a user
     let author_kp = Keypair::random();
 
     // Step 2: Create a post with a new author
-    let author = PubkyAppUser {
-        bio: Some("test_homeserver_tag_post".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:DelTagPost:User".to_string(),
-        status: None,
-    };
+    let author = PubkyAppUser::new("Watcher:DelTagPost:User".to_string(), Some("test_homeserver_tag_post".to_string()), None, None, None);
     let author_user_id = test.create_user(&author_kp, &author).await?;
 
     let post = PubkyAppPost {

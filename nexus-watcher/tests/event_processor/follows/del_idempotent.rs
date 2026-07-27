@@ -22,24 +22,12 @@ async fn test_follow_del_idempotent() -> Result<()> {
 
     // Create follower
     let follower_kp = Keypair::random();
-    let follower_user = PubkyAppUser {
-        bio: Some("test_follow_del_idempotent".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:IdempotentDel:Follower".to_string(),
-        status: None,
-    };
+    let follower_user = PubkyAppUser::new("Watcher:IdempotentDel:Follower".to_string(), Some("test_follow_del_idempotent".to_string()), None, None, None);
     let follower_id = test.create_user(&follower_kp, &follower_user).await?;
 
     // Create followee
     let followee_kp = Keypair::random();
-    let followee_user = PubkyAppUser {
-        bio: Some("test_follow_del_idempotent".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:IdempotentDel:Followee".to_string(),
-        status: None,
-    };
+    let followee_user = PubkyAppUser::new("Watcher:IdempotentDel:Followee".to_string(), Some("test_follow_del_idempotent".to_string()), None, None, None);
     let followee_id = test.create_user(&followee_kp, &followee_user).await?;
 
     // Create follow and then unfollow (normal flow)
@@ -120,24 +108,12 @@ async fn test_follow_del_recovers_stale_indexes() -> Result<()> {
 
     // Create follower
     let follower_kp = Keypair::random();
-    let follower_user = PubkyAppUser {
-        bio: Some("test_follow_del_recovers_stale_indexes".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:RecoverDel:Follower".to_string(),
-        status: None,
-    };
+    let follower_user = PubkyAppUser::new("Watcher:RecoverDel:Follower".to_string(), Some("test_follow_del_recovers_stale_indexes".to_string()), None, None, None);
     let follower_id = test.create_user(&follower_kp, &follower_user).await?;
 
     // Create followee
     let followee_kp = Keypair::random();
-    let followee_user = PubkyAppUser {
-        bio: Some("test_follow_del_recovers_stale_indexes".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:RecoverDel:Followee".to_string(),
-        status: None,
-    };
+    let followee_user = PubkyAppUser::new("Watcher:RecoverDel:Followee".to_string(), Some("test_follow_del_recovers_stale_indexes".to_string()), None, None, None);
     let followee_id = test.create_user(&followee_kp, &followee_user).await?;
 
     // Create follow and then unfollow (normal flow — everything completes)
@@ -219,24 +195,12 @@ async fn test_follow_del_friends_idempotent() -> Result<()> {
 
     // Create user A
     let a_kp = Keypair::random();
-    let a_user = PubkyAppUser {
-        bio: Some("test_follow_del_friends_idempotent".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:FriendsDel:A".to_string(),
-        status: None,
-    };
+    let a_user = PubkyAppUser::new("Watcher:FriendsDel:A".to_string(), Some("test_follow_del_friends_idempotent".to_string()), None, None, None);
     let a_id = test.create_user(&a_kp, &a_user).await?;
 
     // Create user B
     let b_kp = Keypair::random();
-    let b_user = PubkyAppUser {
-        bio: Some("test_follow_del_friends_idempotent".to_string()),
-        image: None,
-        links: None,
-        name: "Watcher:FriendsDel:B".to_string(),
-        status: None,
-    };
+    let b_user = PubkyAppUser::new("Watcher:FriendsDel:B".to_string(), Some("test_follow_del_friends_idempotent".to_string()), None, None, None);
     let b_id = test.create_user(&b_kp, &b_user).await?;
 
     // Mutual follow: A→B and B→A (makes them friends)
