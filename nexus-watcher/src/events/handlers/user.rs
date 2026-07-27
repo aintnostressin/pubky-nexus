@@ -6,7 +6,7 @@ use nexus_common::db::{
 };
 use nexus_common::models::{
     traits::Collection,
-    user::{UserCounts, UserDetails, UserSearch, USER_DELETED_SENTINEL},
+    user::{UserCounts, UserDetails, UserSearch},
 };
 use pubky_app_specs::{PubkyAppUser, PubkyId};
 use tracing::debug;
@@ -56,10 +56,9 @@ pub async fn del(user_id: PubkyId) -> Result<(), EventProcessorError> {
     // 1. Graph query to check if there is any edge at all to this user.
     let query = user_is_safe_to_delete(&user_id);
 
-    // 2. If there is no relationships (OperationOutcome::CreatedOrDeleted), delete from graph and redis.
-    // 3. But if there is any relationship (OperationOutcome::Updated), then we simply update the user with empty profile
-    // and keyword username [DELETED].
-    // A deleted user is a user whose profile is empty and has username `"[DELETED]"`
+    // 2. If there are no relationships (OperationOutcome::CreatedOrDeleted), delete from graph and redis.
+    // 3. If there are relationships (OperationOutcome::Updated), set the deleted flag on the graph node
+    // and invalidate the Redis cache. The stored profile is left untouched; clients decide what to render.
     match execute_graph_operation(query).await? {
         OperationOutcome::CreatedOrDeleted => {
             // 1. UserSearch reads UserDetails — must run before UserDetails Redis is removed
@@ -81,15 +80,16 @@ pub async fn del(user_id: PubkyId) -> Result<(), EventProcessorError> {
             exec_single_row(queries::del::delete_user(&user_id)).await?;
         }
         OperationOutcome::Updated => {
-            let deleted_user = PubkyAppUser {
-                name: USER_DELETED_SENTINEL.to_string(),
-                bio: None,
-                status: None,
-                links: None,
-                image: None,
-            };
+            // Graph-first: set the deleted flag before invalidating the cache.
+            // Collection::get_by_ids repopulates the cache from the graph on a miss,
+            // so invalidating before the graph write would let a concurrent read cache
+            // `deleted: false` again — and nothing would invalidate it a second time.
+            exec_single_row(queries::put::mark_user_deleted(&user_id)).await?;
 
-            sync_put(deleted_user, user_id).await?;
+            // Invalidate cached UserDetails JSON so subsequent reads pick up the flag.
+            let key_parts: &[&str] = &[user_id.as_ref()];
+            let key_parts_list = [key_parts];
+            UserDetails::remove_from_index_multiple_json(&key_parts_list).await?;
         }
         OperationOutcome::MissingDependency => return Err(EventProcessorError::SkipIndexing),
     }

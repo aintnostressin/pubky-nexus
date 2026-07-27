@@ -1,4 +1,4 @@
-use super::{UserDetails, USER_DELETED_SENTINEL};
+use super::UserDetails;
 use crate::db::kv::RedisResult;
 use crate::db::RedisOps;
 use crate::models::create_zero_score_tuples;
@@ -99,10 +99,7 @@ impl UserSearch {
         let mut pairs: Vec<String> = Vec::with_capacity(details_list.len());
         let mut ids: Vec<String> = Vec::with_capacity(details_list.len());
 
-        for details in details_list
-            .iter()
-            .filter(|d| d.name != USER_DELETED_SENTINEL)
-        {
+        for details in details_list {
             // Convert the username to lowercase before storing
             let username = details.name.to_lowercase();
             let user_id = &details.id;
