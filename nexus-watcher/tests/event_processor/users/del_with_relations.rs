@@ -457,9 +457,9 @@ async fn test_deleted_user_remains_in_search() -> Result<()> {
     Ok(())
 }
 
-/// Regression: a live user who sets their name to the literal "[DELETED]" must still
-/// appear in streams and recommendations and report deleted: false.
-/// This is the bug that motivated the entire flag-based approach.
+/// Regression: a live user who sets their name to the literal "[DELETED]" must
+/// report deleted: false and remain visible in name search.
+/// This is the bug that motivated the flag-based approach.
 #[tokio_shared_rt::test(shared)]
 async fn test_live_user_with_deleted_name_is_not_tombstoned() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
