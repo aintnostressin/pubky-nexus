@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 use nexus_common::file::{default_config_dir_path, validate_and_expand_path};
 use nexus_webapi::mock::MockType;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(name = "pubky-nexus")]
@@ -18,11 +18,17 @@ pub struct Cli {
 impl Cli {
     pub fn receive_command(cli: Cli) -> NexusCommands {
         match cli.command {
-            // The top-level `config_dir` was already captured by the caller; the
-            // synthetic `Run` carries no subcommand-level override.
             None => NexusCommands::Run(ConfigDirArgs { config_dir: None }),
             Some(command) => command,
         }
+    }
+
+    /// Subcommand value wins, else the top-level value.
+    pub fn effective_config_dir(&self) -> &Path {
+        self.command
+            .as_ref()
+            .and_then(|command| command.config_dir_override())
+            .unwrap_or(&self.config_dir)
     }
 }
 
@@ -53,18 +59,33 @@ pub enum NexusCommands {
     Run(ConfigDirArgs),
 }
 
+impl NexusCommands {
+    /// Subcommand-level `--config-dir`, if this variant accepts one.
+    ///
+    /// Every variant is matched explicitly — no wildcard — so adding a
+    /// variant is a non-exhaustive-match compile error until its override
+    /// behavior is decided here.
+    fn config_dir_override(&self) -> Option<&Path> {
+        match self {
+            NexusCommands::Api(args) | NexusCommands::Watcher(args) | NexusCommands::Run(args) => {
+                args.config_dir.as_deref()
+            }
+            NexusCommands::Jobs(JobCommands::Run(JobRunArgs { config, .. })) => {
+                config.config_dir.as_deref()
+            }
+            NexusCommands::Jobs(JobCommands::List) => None,
+            NexusCommands::Db(DbCommands::Clear { config, .. }) => config.config_dir.as_deref(),
+            NexusCommands::Db(DbCommands::Mock(args)) => args.config.config_dir.as_deref(),
+            NexusCommands::Db(DbCommands::Migration(_)) => None,
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct ConfigDirArgs {
     /// Directory containing `config.toml`. Overrides the top-level `--config-dir`
     #[arg(short, long, value_parser = validate_config_dir_path)]
     pub config_dir: Option<PathBuf>,
-}
-
-impl ConfigDirArgs {
-    /// The subcommand-level value wins; otherwise fall back to the top-level one.
-    pub fn resolve(self, root: PathBuf) -> PathBuf {
-        self.config_dir.unwrap_or(root)
-    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -155,26 +176,6 @@ mod tests {
         &["db", "mock"],
     ];
 
-    /// Extract the `ConfigDirArgs` from a parsed `Cli` and resolve it against
-    /// the top-level dir, so table-driven tests can assert on the effective dir.
-    fn resolved_config_dir(cli: Cli, root: &str) -> Option<PathBuf> {
-        match cli.command {
-            Some(NexusCommands::Api(args))
-            | Some(NexusCommands::Watcher(args))
-            | Some(NexusCommands::Run(args)) => Some(args.resolve(root.into())),
-            Some(NexusCommands::Jobs(JobCommands::Run(JobRunArgs { config, .. }))) => {
-                Some(config.resolve(root.into()))
-            }
-            Some(NexusCommands::Db(DbCommands::Clear { config, .. })) => {
-                Some(config.resolve(root.into()))
-            }
-            Some(NexusCommands::Db(DbCommands::Mock(args))) => {
-                Some(args.config.resolve(root.into()))
-            }
-            _ => None,
-        }
-    }
-
     /// Catches duplicate arg IDs and malformed flattens at test time.
     #[test]
     fn cli_definition_is_valid() {
@@ -189,10 +190,8 @@ mod tests {
             let label = sub.join(" ");
             let cli = Cli::try_parse_from(argv)
                 .unwrap_or_else(|err| panic!("`nexusd {label}` failed to parse: {err}"));
-            let resolved = resolved_config_dir(cli, "root-dir")
-                .unwrap_or_else(|| panic!("`nexusd {label}` does not carry a ConfigDirArgs"));
             assert_eq!(
-                resolved,
+                cli.effective_config_dir(),
                 PathBuf::from("root-dir"),
                 "`nexusd {label}` must inherit the top-level config dir"
             );
@@ -208,10 +207,8 @@ mod tests {
             let label = sub.join(" ");
             let cli = Cli::try_parse_from(argv)
                 .unwrap_or_else(|err| panic!("`nexusd {label}` failed to parse: {err}"));
-            let resolved = resolved_config_dir(cli, "root-dir")
-                .unwrap_or_else(|| panic!("`nexusd {label}` does not carry a ConfigDirArgs"));
             assert_eq!(
-                resolved,
+                cli.effective_config_dir(),
                 PathBuf::from("sub-dir"),
                 "`nexusd {label}` must let the subcommand-level -c win"
             );
@@ -225,15 +222,41 @@ mod tests {
             cli.command.is_none(),
             "bare invocation must not carry a subcommand"
         );
-        match Cli::receive_command(cli) {
-            NexusCommands::Run(args) => {
-                assert_eq!(
-                    args.resolve(PathBuf::from("root-dir")),
-                    PathBuf::from("root-dir")
-                );
-            }
-            other => panic!("unexpected command: {other:?}"),
+        assert_eq!(
+            cli.effective_config_dir(),
+            PathBuf::from("root-dir"),
+            "bare invocation must use the top-level config dir"
+        );
+    }
+
+    /// The invocations the Dockerfile (CMD ["nexusd"]) and the README rely on
+    /// — no -c anywhere — must resolve to the default config dir.
+    #[test]
+    fn subcommands_without_any_flag_use_the_default_dir() {
+        for sub in CONFIG_DIR_SUBCOMMANDS {
+            let mut argv = vec!["nexusd"];
+            argv.extend_from_slice(sub);
+            let label = sub.join(" ");
+            let cli = Cli::try_parse_from(argv)
+                .unwrap_or_else(|err| panic!("`nexusd {label}` failed to parse: {err}"));
+            assert_eq!(
+                cli.effective_config_dir(),
+                default_config_dir_path(),
+                "`nexusd {label}` with no -c must use the default config dir"
+            );
         }
+
+        // Bare `nexusd` is the literal Docker CMD.
+        let cli = Cli::try_parse_from(["nexusd"]).expect("should parse");
+        assert!(
+            cli.command.is_none(),
+            "bare invocation must not carry a subcommand"
+        );
+        assert_eq!(
+            cli.effective_config_dir(),
+            default_config_dir_path(),
+            "bare invocation must use the default config dir"
+        );
     }
 
     /// Pins the help-surface intent: subcommands that do not read a config dir
