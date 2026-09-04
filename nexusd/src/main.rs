@@ -6,10 +6,7 @@ use nexus_common::{DaemonConfig, StackManager, TrustRankConfig};
 use nexus_watcher::service::NexusWatcher;
 use nexus_webapi::mock::MockDb;
 use nexus_webapi::NexusApi;
-use nexusd::cli::{
-    ApiArgs, Cli, DbCommands, JobCommands, JobRunArgs, MigrationCommands, NexusCommands,
-    WatcherArgs,
-};
+use nexusd::cli::{Cli, DbCommands, JobCommands, JobRunArgs, MigrationCommands, NexusCommands};
 use nexusd::jobs::JobRegistry;
 use nexusd::migrations::{import_migrations, MigrationBuilder, MigrationManager};
 use nexusd::trust::TrustRecomputeJob;
@@ -33,7 +30,8 @@ async fn main() -> Result<(), DynError> {
 
     match command {
         NexusCommands::Db(db_command) => match db_command {
-            DbCommands::Clear { yes } => {
+            DbCommands::Clear { yes, config } => {
+                let config_dir = config.resolve(config_dir);
                 if !yes {
                     eprintln!(
                         "db clear is destructive: it wipes the Redis logical database (FLUSHDB) and deletes every node in the Neo4j graph configured in {}.",
@@ -46,6 +44,7 @@ async fn main() -> Result<(), DynError> {
                 MockDb::clear_database(&config.stack).await
             }
             DbCommands::Mock(args) => {
+                let config_dir = args.config.resolve(config_dir);
                 let config = DaemonConfig::read_or_create_config_file(config_dir).await?;
                 MockDb::run(args.mock_type, &config.stack).await
             }
@@ -76,14 +75,15 @@ async fn main() -> Result<(), DynError> {
                 }
             },
         },
-        NexusCommands::Api(ApiArgs { config_dir }) => {
-            NexusApi::start_from_daemon(config_dir, None).await?;
+        NexusCommands::Api(args) => {
+            NexusApi::start_from_daemon(args.resolve(config_dir), None).await?;
         }
-        NexusCommands::Watcher(WatcherArgs { config_dir }) => {
-            NexusWatcher::start_from_daemon(config_dir, None).await?;
+        NexusCommands::Watcher(args) => {
+            NexusWatcher::start_from_daemon(args.resolve(config_dir), None).await?;
         }
         NexusCommands::Jobs(job_command) => match job_command {
-            JobCommands::Run(JobRunArgs { name, config_dir }) => {
+            JobCommands::Run(JobRunArgs { name, config }) => {
+                let config_dir = config.resolve(config_dir);
                 let config = DaemonConfig::read_or_create_config_file(config_dir).await?;
                 // run_on_demand validates [jobs.*], so a typo'd section fails here
                 // just like `nexusd run`.
@@ -98,7 +98,8 @@ async fn main() -> Result<(), DynError> {
                 }
             }
         },
-        NexusCommands::Run { config_dir } => {
+        NexusCommands::Run(args) => {
+            let config_dir = args.resolve(config_dir);
             let config = DaemonConfig::read_or_create_config_file(config_dir.clone()).await?;
             DaemonLauncher::start(
                 config_dir,
