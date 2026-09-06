@@ -49,7 +49,8 @@ fi
 [ -f "$CARGO_HOME/env" ] && source "$CARGO_HOME/env"
 
 # Lint/format components must match CI (format.yml / lint.yml).
-rustup component add clippy rustfmt >/dev/null 2>&1 || true
+rustup component add clippy rustfmt >/dev/null 2>&1 \
+  || echo "[setup] WARN: rustup component add clippy rustfmt failed"
 
 # cargo-nextest: the test runner used by CI. Avoid a long source build on first
 # run via the pre-built binary when possible.
@@ -57,17 +58,18 @@ if ! command -v cargo-nextest >/dev/null 2>&1; then
   if [ "$(uname -s)-$(uname -m)" = "Linux-x86_64" ]; then
     mkdir -p "$CARGO_HOME/bin"
     curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$CARGO_HOME/bin" \
-      || cargo install cargo-nextest --locked
+      || { echo "[setup] WARN: nextest pre-built binary install failed, building from source"; \
+           cargo install cargo-nextest --locked; }
   else
     cargo install cargo-nextest --locked
   fi
 fi
 
-cargo fetch --locked || true
+cargo fetch --locked || echo "[setup] WARN: cargo fetch failed"
 
 # Warm the build cache (incremental thanks to /cache + sccache; first run is
 # slow, every run after is warm). Never let a warm-up failure block the agent.
-cargo build --workspace --all-targets || true
+cargo build --workspace --all-targets || echo "[setup] WARN: cargo build warm-up failed"
 
 # ---- Test services (Neo4j + Redis + Postgres) -------------------------------
 # Tests need Neo4j (with the GDS plugin baked into docker/neo4j/Dockerfile),
@@ -80,17 +82,19 @@ export -f port_open
 if docker info >/dev/null 2>&1; then
   cd docker
   [ -f .env ] || cp .env-sample .env
-  docker compose --profile tests up -d || true
+  docker compose --profile tests up -d || echo "[setup] WARN: docker compose up failed"
 
   # Wait on healthchecks so tests don't flake on cold services.
   timeout 60 bash -c 'until port_open 6379; do sleep 1; done' \
-    && echo "Redis is ready" || echo "WARN: Redis not reachable on 6379"
+    && echo "[setup] Redis is ready" || echo "[setup] WARN: Redis not reachable on 6379"
   timeout 180 bash -c 'until curl -sf http://localhost:7474 > /dev/null; do sleep 2; done' \
-    && echo "Neo4j is ready" || echo "WARN: Neo4j not reachable on 7474"
+    && echo "[setup] Neo4j is ready" || echo "[setup] WARN: Neo4j not reachable on 7474"
   timeout 60 bash -c 'until port_open 5432; do sleep 1; done' \
-    && echo "Postgres is ready" || echo "WARN: Postgres not reachable on 5432"
+    && echo "[setup] Postgres is ready" || echo "[setup] WARN: Postgres not reachable on 5432"
   cd ..
 else
-  echo "Docker daemon not reachable; skipping test service startup."
-  echo "Run tests against services on the host via host.docker.internal."
+  echo "[setup] Docker daemon not reachable; skipping test service startup."
+  echo "[setup] Run tests against services on the host via host.docker.internal."
 fi
+
+echo "[setup] finished in ${SECONDS}s"
