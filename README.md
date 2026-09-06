@@ -158,7 +158,7 @@ The Migration Manager uses a phased approach to handle data migrations safely an
 - **Cutover**: The application begins reading from the new source instead of the old source. For Redis, this often involves renaming keys (e.g., swapping the new key to the old key name). This phase ensures that the application is fully transitioned to the new source.
 
 - **Cleanup**: The old source is no longer needed and can be safely cleaned up. This includes removing old keys in Redis or deleting data in Neo4j that is no longer required.
-  Use the example at /examples/migration.rs as your guide.
+  Use the doc comment on `import_migrations` in `nexusd/src/migrations/mod.rs` as your guide.
 
 ### Adding a new migration
 

@@ -55,6 +55,7 @@ rustup component add clippy rustfmt >/dev/null 2>&1 || true
 # run via the pre-built binary when possible.
 if ! command -v cargo-nextest >/dev/null 2>&1; then
   if [ "$(uname -s)-$(uname -m)" = "Linux-x86_64" ]; then
+    mkdir -p "$CARGO_HOME/bin"
     curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$CARGO_HOME/bin" \
       || cargo install cargo-nextest --locked
   else
@@ -62,7 +63,7 @@ if ! command -v cargo-nextest >/dev/null 2>&1; then
   fi
 fi
 
-cargo fetch --locked
+cargo fetch --locked || true
 
 # Warm the build cache (incremental thanks to /cache + sccache; first run is
 # slow, every run after is warm). Never let a warm-up failure block the agent.

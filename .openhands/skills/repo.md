@@ -18,7 +18,7 @@ Cargo workspace (resolver = "2"), members:
   social graph.
 - `nexusd` — CLI/daemon binary (`main.rs`) that runs `api`, `watcher`, `db`,
   `jobs`, migrations, and trust recompute.
-- `examples` — small example binaries (crate `pubky-nexus-examples`; has its
+- `examples` — small example binaries (crate `nexus-examples`; has its
   own README).
 
 ## Commands (exact)
@@ -41,9 +41,9 @@ Cargo workspace (resolver = "2"), members:
 Integration tests require Neo4j, Redis, and Postgres. `.openhands/setup.sh`
 starts the `docker/` compose stack (profile `tests`) when a docker daemon is
 reachable. If docker is unavailable, point the app at services on the host via
-`host.docker.internal` using `NexusConfig::test_config()` /
-`NexusConfig::default()`, or run `cargo run -p nexusd -- --config-dir=<dir>`
-with a config whose endpoints use `host.docker.internal`.
+`host.docker.internal`: run `cargo run -p nexusd -- --config-dir=<dir>` with a
+config whose endpoints use `host.docker.internal` (the stack endpoints live in
+`StackConfig` in `nexus-common/src/config/stack.rs`, loaded from config.toml).
 
 Default local endpoints: Neo4j bolt `localhost:7687` (HTTP 7474, auth
 `neo4j/12345678`), Redis `localhost:6379`, Postgres `localhost:5432`
@@ -63,7 +63,7 @@ Default local endpoints: Neo4j bolt `localhost:7687` (HTTP 7474, auth
 
 - Migrations: scaffold with `cargo run -p nexusd -- db migration new <Name>`,
   then register it in `import_migrations` in `nexusd/src/migrations/mod.rs`
-  (guide: `examples/migration.rs`).
+  (guide: the `import_migrations` doc comment in that file).
 - Cron config (`[jobs.<name>]` in config.toml) is SECONDS-FIRST, 6 fields
   (`sec min hour dom mon dow [year]`), not the standard 5-field crontab.
 - App config defaults to `$HOME/.pubky-nexus/config.toml`.
