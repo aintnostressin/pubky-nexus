@@ -15,66 +15,60 @@ fn ft_search_timeout_ms() -> usize {
     *FT_SEARCH_TIMEOUT.get().unwrap_or(&FT_SEARCH_TIMEOUT_MS)
 }
 
+const POST_CONTENT_INDEX: &str = "postContentIdx";
+
+/// FT.CREATE argument list for `postContentIdx`, starting immediately after
+/// `PREFIX 1 <prefix>`. Kept as a const so the declaration in `setup_cache`
+/// can be compared against the frozen copy in index migrations.
+pub const POST_CONTENT_INDEX_SCHEMA_ARGS: &[&str] = &[
+    "NOOFFSETS",
+    "NOHL",
+    "SCHEMA",
+    "$.content",
+    "AS",
+    "content",
+    "TEXT",
+    "$.author",
+    "AS",
+    "author",
+    "TAG",
+    "CASESENSITIVE",
+    "$.kind",
+    "AS",
+    "kind",
+    "TAG",
+    "CASESENSITIVE",
+];
+
+/// Result of attempting to create the post content index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FtCreateResult {
+    Created,
+    AlreadyExists,
+}
+
 /// Creates the post content index: $.content TEXT + $.author TAG CASESENSITIVE + $.kind TAG CASESENSITIVE.
 /// NOOFFSETS/NOHL kept; NOFIELDS dropped to allow field-targeted queries.
-/// Idempotent: short-circuits on "already exists".
-pub(crate) async fn ft_create_post_content_index(prefix: &str) -> RedisResult<()> {
+/// Returns `AlreadyExists` when Redis reports the index already exists, leaving
+/// the caller free to log that the on-disk schema was not verified.
+pub(crate) async fn ft_create_post_content_index(prefix: &str) -> RedisResult<FtCreateResult> {
     let mut conn = get_redis_conn().await?;
 
-    let result = deadpool_redis::redis::cmd("FT.CREATE")
-        .arg("postContentIdx")
+    let mut cmd = deadpool_redis::redis::cmd("FT.CREATE");
+    cmd.arg(POST_CONTENT_INDEX)
         .arg("ON")
         .arg("JSON")
         .arg("PREFIX")
         .arg("1")
-        .arg(prefix)
-        .arg("NOOFFSETS")
-        .arg("NOHL")
-        .arg("SCHEMA")
-        .arg("$.content")
-        .arg("AS")
-        .arg("content")
-        .arg("TEXT")
-        .arg("$.author")
-        .arg("AS")
-        .arg("author")
-        .arg("TAG")
-        .arg("CASESENSITIVE")
-        .arg("$.kind")
-        .arg("AS")
-        .arg("kind")
-        .arg("TAG")
-        .arg("CASESENSITIVE")
-        .query_async::<()>(&mut conn)
-        .await;
-
-    match result {
-        Ok(()) => Ok(()),
-        Err(e) if e.to_string().contains("already exists") => Ok(()),
-        Err(e) => Err(RedisError::CommandFailed(e.to_string().into())),
+        .arg(prefix);
+    for arg in POST_CONTENT_INDEX_SCHEMA_ARGS {
+        cmd.arg(*arg);
     }
-}
 
-/// Drops the post content index without deleting the underlying documents.
-/// Idempotent: swallows "Unknown index name" so repeated calls are safe.
-pub(crate) async fn drop_post_content_index() -> RedisResult<()> {
-    let mut conn = get_redis_conn().await?;
-
-    let result = deadpool_redis::redis::cmd("FT.DROPINDEX")
-        .arg("postContentIdx")
-        .query_async::<()>(&mut conn)
-        .await;
-
-    match result {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let msg = e.to_string().to_lowercase();
-            if msg.contains("unknown index name") || msg.contains("no such index") {
-                Ok(())
-            } else {
-                Err(RedisError::CommandFailed(e.to_string().into()))
-            }
-        }
+    match cmd.query_async::<()>(&mut conn).await {
+        Ok(()) => Ok(FtCreateResult::Created),
+        Err(e) if e.to_string().contains("already exists") => Ok(FtCreateResult::AlreadyExists),
+        Err(e) => Err(RedisError::CommandFailed(e.to_string().into())),
     }
 }
 

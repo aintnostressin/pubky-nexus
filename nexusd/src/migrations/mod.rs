@@ -40,8 +40,8 @@ use crate::migrations::migrations_list::users_by_tags_index_backfill_1786924800:
 /// # Parameters
 /// - `migration_manager`: A mutable reference to `MigrationManager` where migrations will be registered.
 ///
-pub fn import_migrations(migration_manager: &mut MigrationManager) {
-    let migrations: Vec<Box<dyn Migration>> = vec![
+fn build_migrations() -> Vec<Box<dyn Migration>> {
+    vec![
         // Note: Add your migrations here to be picked up by the manager
         Box::new(UsersByPkReindex1751635096),
         Box::new(RemoveMuted1771718400),
@@ -49,8 +49,69 @@ pub fn import_migrations(migration_manager: &mut MigrationManager) {
         Box::new(PostContentIndexSetup1780444800),
         Box::new(PostContentIndexAuthorSetup1780531200),
         Box::new(UsersByTagsIndexBackfill1786924800),
-    ];
-    for migration in migrations {
+    ]
+}
+
+pub fn import_migrations(migration_manager: &mut MigrationManager) {
+    for migration in build_migrations() {
         migration_manager.register(migration);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_migrations;
+    use crate::migrations::migrations_list::post_content_index_author_setup_1780531200::POST_CONTENT_INDEX_SCHEMA_ARGS_V2;
+    use nexus_common::db::kv::POST_CONTENT_INDEX_SCHEMA_ARGS;
+
+    /// The live `setup_cache` declaration and the frozen v2 migration must agree
+    /// on the `postContentIdx` schema while v2 is the newest migration touching
+    /// this index. If a later migration changes the schema, this assertion should
+    /// be retargeted to that migration's frozen arg list.
+    #[test]
+    fn setup_cache_schema_matches_frozen_v2_migration_schema() {
+        assert_eq!(
+            POST_CONTENT_INDEX_SCHEMA_ARGS, POST_CONTENT_INDEX_SCHEMA_ARGS_V2,
+            "setup_cache postContentIdx schema must match the frozen v2 migration schema"
+        );
+    }
+
+    /// Extracts the trailing unix timestamp from a migration id such as
+    /// `PostContentIndexAuthorSetup1780531200`.
+    fn trailing_timestamp(id: &str) -> u64 {
+        let digits: String = id
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits
+            .chars()
+            .rev()
+            .collect::<String>()
+            .parse()
+            .expect("migration id must end with a unix timestamp")
+    }
+
+    /// The migration registry is a hand-maintained `Vec`. If a newer index
+    /// migration were inserted above `PostContentIndexAuthorSetup1780531200`, the
+    /// frozen v2 drop+create would silently overwrite it on a fresh environment.
+    /// This test guards ordering by asserting the vec is sorted ascending by the
+    /// trailing timestamp in each `id()`.
+    #[test]
+    fn migrations_are_registered_in_chronological_order() {
+        let migrations = build_migrations();
+
+        let timestamps: Vec<u64> = migrations
+            .iter()
+            .map(|m| trailing_timestamp(m.id()))
+            .collect();
+
+        let mut sorted = timestamps.clone();
+        sorted.sort_unstable();
+
+        assert_eq!(
+            timestamps, sorted,
+            "migrations must be registered in ascending chronological order"
+        );
     }
 }

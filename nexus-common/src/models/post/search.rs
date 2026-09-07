@@ -152,19 +152,20 @@ const POST_CONTENT_INDEX: &str = "postContentIdx";
 
 /// Creates the post content full-text index: $.content TEXT + $.author TAG CASESENSITIVE + $.kind TAG CASESENSITIVE.
 /// Includes NOOFFSETS/NOHL; NOFIELDS dropped to allow field-targeted queries.
-/// Idempotent: no-ops if the index already exists.
+/// Idempotent: no-ops if the index already exists, but logs that the existing
+/// index schema was not verified.
 pub async fn create_post_content_index() -> RedisResult<()> {
     let prefix = format!("{}:", PostDetails::prefix().await);
-    search::ft_create_post_content_index(&prefix).await?;
-    info!("RediSearch index '{POST_CONTENT_INDEX}' created or already exists");
-    Ok(())
-}
-
-/// Drops the post content index without deleting underlying JSON documents.
-/// Idempotent: swallows "Unknown index name" errors.
-pub async fn drop_post_content_index() -> RedisResult<()> {
-    search::drop_post_content_index().await?;
-    info!("RediSearch index '{POST_CONTENT_INDEX}' dropped or already absent");
+    match search::ft_create_post_content_index(&prefix).await? {
+        search::FtCreateResult::Created => {
+            info!("RediSearch index '{POST_CONTENT_INDEX}' created");
+        }
+        search::FtCreateResult::AlreadyExists => {
+            info!(
+                "RediSearch index '{POST_CONTENT_INDEX}' already exists; existing index schema was not verified"
+            );
+        }
+    }
     Ok(())
 }
 

@@ -19,6 +19,30 @@ pub struct PostContentIndexAuthorSetup1780531200;
 
 const POST_CONTENT_INDEX: &str = "postContentIdx";
 
+/// Frozen FT.CREATE argument list for the v2 `postContentIdx` schema, starting
+/// immediately after `PREFIX 1 <prefix>`. This copy must stay byte-identical to
+/// the live declaration in `nexus-common/src/db/kv/index/search.rs` while v2 is
+/// the newest migration touching this index.
+pub const POST_CONTENT_INDEX_SCHEMA_ARGS_V2: &[&str] = &[
+    "NOOFFSETS",
+    "NOHL",
+    "SCHEMA",
+    "$.content",
+    "AS",
+    "content",
+    "TEXT",
+    "$.author",
+    "AS",
+    "author",
+    "TAG",
+    "CASESENSITIVE",
+    "$.kind",
+    "AS",
+    "kind",
+    "TAG",
+    "CASESENSITIVE",
+];
+
 /// Drops the existing post content index without deleting the underlying documents.
 /// Idempotent: no-ops if the index is already absent.
 async fn drop_post_content_index_v2() -> Result<(), DynError> {
@@ -31,11 +55,15 @@ async fn drop_post_content_index_v2() -> Result<(), DynError> {
 
     match result {
         Ok(()) => Ok(()),
-        Err(e) if e.to_string().to_lowercase().contains("unknown index name") => {
-            info!("RediSearch index '{POST_CONTENT_INDEX}' already absent");
-            Ok(())
+        Err(e) => {
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("unknown index name") || msg.contains("no such index") {
+                info!("RediSearch index '{POST_CONTENT_INDEX}' already absent");
+                Ok(())
+            } else {
+                Err(e.into())
+            }
         }
-        Err(e) => Err(e.into()),
     }
 }
 
@@ -47,34 +75,18 @@ async fn create_post_content_index_v2() -> Result<(), DynError> {
     let prefix = format!("{}:", PostDetails::prefix().await);
     let mut conn = get_redis_conn().await?;
 
-    let result = redis::cmd("FT.CREATE")
-        .arg(POST_CONTENT_INDEX)
+    let mut cmd = redis::cmd("FT.CREATE");
+    cmd.arg(POST_CONTENT_INDEX)
         .arg("ON")
         .arg("JSON")
         .arg("PREFIX")
         .arg("1")
-        .arg(&prefix)
-        .arg("NOOFFSETS")
-        .arg("NOHL")
-        .arg("SCHEMA")
-        .arg("$.content")
-        .arg("AS")
-        .arg("content")
-        .arg("TEXT")
-        .arg("$.author")
-        .arg("AS")
-        .arg("author")
-        .arg("TAG")
-        .arg("CASESENSITIVE")
-        .arg("$.kind")
-        .arg("AS")
-        .arg("kind")
-        .arg("TAG")
-        .arg("CASESENSITIVE")
-        .query_async::<()>(&mut conn)
-        .await;
+        .arg(&prefix);
+    for arg in POST_CONTENT_INDEX_SCHEMA_ARGS_V2 {
+        cmd.arg(*arg);
+    }
 
-    match result {
+    match cmd.query_async::<()>(&mut conn).await {
         Ok(()) => Ok(()),
         Err(e) if e.to_string().contains("already exists") => {
             info!("RediSearch index '{POST_CONTENT_INDEX}' already exists");
