@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # OpenHands repo setup: runs automatically before the agent starts working.
 # Keeps ALL toolchain/build setup out of agent steps (wall-clock only, no tokens).
 #
@@ -11,6 +11,20 @@
 #   $HOME/.cache/oh/sccache:/cache/sccache:rw"
 #   SANDBOX_USER_ID=$(id -u)   # avoid root-owned files in those host dirs
 # If /cache is not mounted we fall back to the image defaults (cold but correct).
+#
+# Why the heredoc wrapper: the OpenHands app-server runs this via
+# `source <file>` under /bin/sh, which is dash on the agent-server image. dash
+# has no `source` builtin and no bashisms, and when dash sources a file it
+# cannot resolve that file's own path. So the real (bash) setup is carried
+# below as a single-quoted heredoc assigned to a variable; this POSIX-safe
+# header writes it to a temp file and runs it under bash. It works identically
+# whether this file is sourced by dash, sourced by bash, or executed directly.
+#
+# To change the setup logic, edit ONLY the payload inside the heredoc below
+# (the lines between `_nexus_setup_body=$(cat <<'__NEXUS_SETUP_EOF__'` and the
+# closing `__NEXUS_SETUP_EOF__`). Keep the surrounding boilerplate intact.
+
+_nexus_setup_body=$(cat <<'__NEXUS_SETUP_EOF__'
 set -euo pipefail
 
 CACHE_ROOT=/cache
@@ -98,3 +112,17 @@ else
 fi
 
 echo "[setup] finished in ${SECONDS}s"
+__NEXUS_SETUP_EOF__
+)
+
+_nexus_tmp=$(mktemp /tmp/.nexus-setup.XXXXXX.sh) || exit 1
+printf '%s\n' "$_nexus_setup_body" > "$_nexus_tmp"
+bash "$_nexus_tmp" "$@"
+_nexus_rc=$?
+rm -f "$_nexus_tmp"
+# If sourced, `exit` would tear down the caller's shell; only exit when run as
+# a subprocess. When sourced, return the payload's exit code instead.
+if (return 0 2>/dev/null); then
+  return "$_nexus_rc" 2>/dev/null || true
+fi
+exit "$_nexus_rc"
