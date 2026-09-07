@@ -2,7 +2,7 @@
 ///
 /// # Deployment expectation: stop → migrate → start
 ///
-/// Between `drop_post_content_index` and `create_post_content_index` the
+/// Between `drop_post_content_index_v2` and `create_post_content_index_v2` the
 /// index is absent, so global content search returns empty results. After
 /// FT.CREATE the PREFIX clause triggers a background scan that indexes all
 /// existing PostDetails JSON documents against the new schema — both `author`
