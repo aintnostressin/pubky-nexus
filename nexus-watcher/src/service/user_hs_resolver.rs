@@ -586,7 +586,10 @@ mod tests {
 
         assert_eq!(
             get_user_homeserver(&user_id).await?,
-            Some(hs_id.to_string())
+            UserHomeserverMapping {
+                hs_id: Some(hs_id.to_string()),
+                stale: false,
+            }
         );
         assert!(get_user_ids_by_homeserver(&hs_id).await?.contains(&user_id));
 
@@ -610,7 +613,13 @@ mod tests {
         assert!(!outcome.resolved);
         assert!(!outcome.marked_stale);
 
-        assert_eq!(get_user_homeserver(&user_id).await?, None);
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            UserHomeserverMapping {
+                hs_id: None,
+                stale: false,
+            }
+        );
         assert!(
             get_users_needing_resolution(3_600_000)
                 .await?
@@ -648,7 +657,10 @@ mod tests {
         // Binding unchanged, and the user is indexed on neither homeserver
         assert_eq!(
             get_user_homeserver(&user_id).await?,
-            Some(stored_hs.to_string())
+            UserHomeserverMapping {
+                hs_id: Some(stored_hs.to_string()),
+                stale: true,
+            }
         );
         assert!(!get_user_ids_by_homeserver(&stored_hs)
             .await?
@@ -682,7 +694,10 @@ mod tests {
 
         assert_eq!(
             get_user_homeserver(&user_id).await?,
-            Some(stored_hs.to_string())
+            UserHomeserverMapping {
+                hs_id: Some(stored_hs.to_string()),
+                stale: true,
+            }
         );
         assert!(!get_user_ids_by_homeserver(&stored_hs)
             .await?
