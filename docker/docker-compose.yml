@@ -1,4 +1,10 @@
-name: pubky-nexus
+# Every name and host port below is an env var with the stock value as its
+# default, so a plain `docker compose up` behaves as before. To run several
+# stacks on one Docker daemon (e.g. one per Linux user), set
+# COMPOSE_PROJECT_NAME, CONTAINER_PREFIX and the *_PORT variables in .env;
+# see .env-sample. Container names, networks and published ports are global
+# per daemon, so each stack needs its own.
+name: ${COMPOSE_PROJECT_NAME:-pubky-nexus}
 
 services:
   neo4j:
@@ -7,11 +13,11 @@ services:
     # GitHub Actions layer cache.
     build: ./neo4j
     image: pubky-nexus/neo4j:5.26.27-gds2.13.10
-    container_name: neo4j
+    container_name: ${CONTAINER_PREFIX:-}neo4j
     restart: unless-stopped
     ports:
-      - 127.0.0.1:7474:7474
-      - 127.0.0.1:7687:7687
+      - 127.0.0.1:${NEO4J_HTTP_PORT:-7474}:7474
+      - 127.0.0.1:${NEO4J_BOLT_PORT:-7687}:7687
     volumes:
       # Mount the neo4j configuration file to container
       - .database/neo4j/conf:/conf:Z
@@ -45,9 +51,9 @@ services:
       NEO4J_dbms_security_procedures_allowlist: gds.graph.project,gds.graph.project.estimate,gds.graph.drop,gds.graph.list,gds.pageRank.mutate,gds.graph.nodeProperty.stream
   redis:
     image: redis:8.0.6-alpine
-    container_name: redis
+    container_name: ${CONTAINER_PREFIX:-}redis
     ports:
-      - 127.0.0.1:6379:6379
+      - 127.0.0.1:${REDIS_PORT:-6379}:6379
     networks:
       - default
     volumes:
@@ -55,9 +61,9 @@ services:
     restart: always
   redisinsight:
     image: redis/redisinsight:3.0.3
-    container_name: redisinsight
+    container_name: ${CONTAINER_PREFIX:-}redisinsight
     ports:
-      - 127.0.0.1:5540:5540
+      - 127.0.0.1:${REDISINSIGHT_PORT:-5540}:5540
     networks:
       - default
     environment:
@@ -70,7 +76,7 @@ services:
   postgres:
     profiles: ["tests"]
     image: postgres:18-alpine
-    container_name: postgres
+    container_name: ${CONTAINER_PREFIX:-}postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -85,4 +91,4 @@ services:
 
 networks:
   default:
-    name: pubky-nexus
+    name: ${COMPOSE_PROJECT_NAME:-pubky-nexus}
