@@ -101,18 +101,23 @@ warn every `external_hs_monitoring_interval_ms` (5s by default).
 Suggested Prometheus alerts (gauges take no `_total` suffix, so the names are
 the same under SigNoz):
 
+Both carry the same `limit > 0` guard. `monitored_homeservers_limit = 0`
+disables third-party indexing deliberately, and it is the degenerate case for
+both expressions: `dropped` then equals `eligible` (everything is truncated
+away) and the ratio is `+Inf`. Without the guard each alert pages forever on a
+deployment that turned the feature off on purpose.
+
 ```yaml
 # Blast radius: some third-party HSs are not being indexed at all. `for` rides
 # out a single cycle where a burst of newly-active HSs briefly exceeds the cut.
 - alert: NexusMonitoredHsDropped
-  expr: max(watcher_monitored_hs_dropped) > 0
+  expr: |
+    max(watcher_monitored_hs_dropped) > 0
+    and max(watcher_monitored_hs_limit) > 0
   for: 5m
 
 # Onset: the eligible set is within 20% of the ceiling, so raise the limit (and
-# budget the extra HS + PKDNS requests) before HSs start being dropped. The
-# `limit > 0` guard matters: `monitored_homeservers_limit = 0` disables
-# third-party indexing entirely, and without it the ratio is +Inf and fires
-# forever on a deployment that deliberately turned the feature off.
+# budget the extra HS + PKDNS requests) before HSs start being dropped.
 - alert: NexusMonitoredHsApproachingLimit
   expr: |
     max(watcher_monitored_hs_eligible) / max(watcher_monitored_hs_limit) > 0.8
@@ -122,9 +127,12 @@ the same under SigNoz):
 
 > **Caveat:** these gauges only move while the runner ticks, and a gauge keeps
 > exporting its last value for as long as the process is alive. They tell you
-> nothing about a runner that has hung or stopped scheduling — pair them with a
-> liveness signal for the external-HS task, as the resolver does with its
-> heartbeat gauge.
+> nothing about a runner that has hung or stopped scheduling. No task in this
+> tree exports a liveness signal today — the resolver's
+> `nexus.task.hs-resolver.total` / `.failed` histograms are per-run counts, not
+> a heartbeat — so a stalled external-HS runner is still undetectable from
+> metrics alone. Closing that needs a monotonic timestamp gauge per task, which
+> this change does not add.
 
 ### `external_hs_monitoring_interval_ms`
 
