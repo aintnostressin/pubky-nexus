@@ -79,6 +79,61 @@ endpoint (hence "key-based" — keyed on each user's pubky). Configured in
 *Tuning:* each additional monitored HS adds HS requests (and, upstream, PKDNS
 resolutions) per tick. Raise deliberately as the network of indexed HSs grows.
 
+### Monitoring the limit
+
+The runner orders eligible third-party HSs and then **truncates** the list to
+`monitored_homeservers_limit`. That cut is silent and total: an HS past the limit
+is not polled later, it is not polled **at all**, so its hosted users' events
+never arrive. Nothing reported this, which made both "approaching the ceiling"
+and "already dropping HSs" invisible. `pre_run` now exports:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `watcher.monitored_hs.eligible` | gauge | Active third-party HSs eligible this cycle, after the primary and blacklist filters and **before** the limit is applied. |
+| `watcher.monitored_hs.limit` | gauge | The configured `monitored_homeservers_limit`, exported so a dashboard computes headroom without hard-coding the operator's config. |
+| `watcher.monitored_hs.dropped` | gauge | Eligible HSs cut by the limit this cycle. Any non-zero value means those HSs are not being indexed. |
+
+Because metrics are disabled by default, `pre_run` also logs: `WARN` when the
+drop count changes to non-zero, `INFO` when it returns to zero. It deliberately
+does not log while the count is unchanged — a saturated instance would otherwise
+warn every `external_hs_monitoring_interval_ms` (5s by default).
+
+Suggested Prometheus alerts (gauges take no `_total` suffix, so the names are
+the same under SigNoz):
+
+Both carry the same `limit > 0` guard. `monitored_homeservers_limit = 0`
+disables third-party indexing deliberately, and it is the degenerate case for
+both expressions: `dropped` then equals `eligible` (everything is truncated
+away) and the ratio is `+Inf`. Without the guard each alert pages forever on a
+deployment that turned the feature off on purpose.
+
+```yaml
+# Blast radius: some third-party HSs are not being indexed at all. `for` rides
+# out a single cycle where a burst of newly-active HSs briefly exceeds the cut.
+- alert: NexusMonitoredHsDropped
+  expr: |
+    max(watcher_monitored_hs_dropped) > 0
+    and max(watcher_monitored_hs_limit) > 0
+  for: 5m
+
+# Onset: the eligible set is within 20% of the ceiling, so raise the limit (and
+# budget the extra HS + PKDNS requests) before HSs start being dropped.
+- alert: NexusMonitoredHsApproachingLimit
+  expr: |
+    max(watcher_monitored_hs_eligible) / max(watcher_monitored_hs_limit) > 0.8
+    and max(watcher_monitored_hs_limit) > 0
+  for: 15m
+```
+
+> **Caveat:** these gauges only move while the runner ticks, and a gauge keeps
+> exporting its last value for as long as the process is alive. They tell you
+> nothing about a runner that has hung or stopped scheduling. No task in this
+> tree exports a liveness signal today — the resolver's
+> `nexus.task.hs-resolver.total` / `.failed` histograms are per-run counts, not
+> a heartbeat — so a stalled external-HS runner is still undetectable from
+> metrics alone. Closing that needs a monotonic timestamp gauge per task, which
+> this change does not add.
+
 ### `external_hs_monitoring_interval_ms`
 
 > Scheduling interval[^1] for this `KeyBasedEventProcessorRunner` (the external-HS
