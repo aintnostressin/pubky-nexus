@@ -11,8 +11,9 @@ request_timeout_secs = 30
 # Maximum size (in bytes) accepted for a request body
 max_body_size_bytes = 1048576
 # Hide posts by authors absent from the trust ranking on `source=all` post streams.
-# Has no effect until [jobs.trust-recompute] has built a ranking: without one the
-# stream is served unfiltered. Set to false to serve every post regardless.
+# Has no effect until the trust-recompute job ([jobs.trust-recompute]) has built a
+# ranking: without one the stream is served unfiltered. Set to false to serve every
+# post regardless.
 hide_unranked_authors = true
 
 [api.rate_limit]

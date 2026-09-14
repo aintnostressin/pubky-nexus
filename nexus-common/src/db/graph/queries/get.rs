@@ -1039,11 +1039,10 @@ pub fn get_files_by_ids(key_pair: &[&[&str]]) -> Query {
 // Build the graph query based on parameters
 /// Builds the Cypher fallback for a post stream.
 ///
-/// `ranked_only` hides posts by authors without a positive trust score, the
-/// same population the Redis ranking holds (see `get_trust_ranked_user_ids`).
-/// A never-computed ranking leaves `trust` null on every user and the
-/// predicate would then hide every post: callers pass `true` only after
-/// checking that a ranking exists.
+/// `ranked_only` keeps only authors the trust ranking holds, with the same
+/// predicate as `get_trust_ranked_user_ids`. A never-computed ranking leaves
+/// `trust` null on every user and would then hide every post: callers pass
+/// `true` only after checking that a ranking exists.
 pub fn post_stream(
     source: StreamSource,
     sorting: StreamSorting,
@@ -1125,22 +1124,25 @@ pub fn post_stream(
     // posts.
     cypher.push_str("MATCH (p:Post)<-[:AUTHORED]-(author:User)\n");
 
-    // Hide unranked authors. `coalesce` keeps the predicate boolean for users
-    // the recompute never scored, who would otherwise drop out as NULL anyway.
-    if ranked_only {
-        append_condition(
-            &mut cypher,
-            "coalesce(author.trust, 0) > 0",
-            &mut where_clause_applied,
-        );
-    }
-
     // Apply tags
     if tags.is_some() {
         cypher.push_str("MATCH (:User)-[tag:TAGGED]->(p)\n");
         append_condition(
             &mut cypher,
             "tag.label IN $labels",
+            &mut where_clause_applied,
+        );
+    }
+
+    // Same population as `get_trust_ranked_user_ids`. After the tags MATCH,
+    // so the tag condition opens that clause's WHERE rather than this one.
+    if ranked_only {
+        append_condition(
+            &mut cypher,
+            &format!(
+                "author.trust > 0 AND author.name <> '{USER_DELETED_SENTINEL}' \
+                 AND NOT coalesce(author.deleted, false)"
+            ),
             &mut where_clause_applied,
         );
     }
@@ -1558,12 +1560,12 @@ mod tests {
 
     #[test]
     fn post_stream_hides_unranked_authors_only_when_asked() {
-        let build_all = |ranked_only: bool| {
+        let build_all = |tags: Option<Vec<String>>, ranked_only: bool| {
             post_stream(
                 StreamSource::All,
                 StreamSorting::Timeline,
                 SortOrder::Descending,
-                &None,
+                &tags,
                 Pagination {
                     limit: Some(10),
                     ..Default::default()
@@ -1574,14 +1576,26 @@ mod tests {
             .unwrap()
             .to_cypher_populated()
         };
+        let predicate = "author.trust > 0 AND author.name <> '[DELETED]' \
+                         AND NOT coalesce(author.deleted, false)";
 
-        let ranked = build_all(true);
+        let ranked = build_all(None, true);
         assert!(
-            ranked.contains("WHERE coalesce(author.trust, 0) > 0"),
-            "ranked_only must filter on the author's trust score:\n{ranked}"
+            ranked.contains(&format!("WHERE {predicate}")),
+            "ranked_only keeps the ranking's population:\n{ranked}"
         );
 
-        let unranked = build_all(false);
+        // With tags the predicate must follow the tags MATCH, or it would
+        // leave that clause opening with AND.
+        let tagged = build_all(Some(vec!["a".into(), "b".into()]), true);
+        assert!(
+            tagged.contains(&format!(
+                "MATCH (:User)-[tag:TAGGED]->(p)\nWHERE tag.label IN ['a', 'b']\nAND {predicate}"
+            )),
+            "the trust predicate follows the tag condition:\n{tagged}"
+        );
+
+        let unranked = build_all(None, false);
         assert!(
             !unranked.contains("author.trust"),
             "without ranked_only no trust predicate is emitted:\n{unranked}"

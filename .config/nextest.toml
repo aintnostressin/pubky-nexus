@@ -26,11 +26,12 @@ test-group = 'influencers-sorted-set'
 filter = 'package(nexusd) and binary(cache_setup)'
 threads-required = 'num-test-threads'
 
-# nexus-webapi/tests/stream/post/trust_filter.rs flips the process-global
-# hide_unranked_authors switch and drops and rebuilds the shared trust ranking
-# (Sorted:Users:SocialGraph). Sibling tests assert the exact first page of
-# source=all and user/views.rs reads the ranking, so it must not overlap with
-# any other test in the run.
+# nexus-webapi/tests/stream/post/trust_filter.rs drops and rebuilds the shared
+# trust ranking (Sorted:Users:SocialGraph), which every user view reads, and
+# turns the trust filter on for the whole fixture timeline. Sibling tests
+# assert the exact first page of source=all and user/views.rs asserts the
+# ranking, so it must not overlap with any other test in the run. (The switch
+# itself is per-process under nextest; it only leaks under plain cargo test.)
 
 [[profile.default.overrides]]
 filter = 'package(nexus-webapi) and test(/^stream::post::trust_filter::/)'

@@ -16,7 +16,7 @@ use utoipa::OpenApi;
 #[utoipa::path(
     get,
     path = BOOTSTRAP_ROUTE,
-    description = "Initial payload for all data required to bootstrap the pubky.app application. The client app will request it while the user is performing sign-in/sign-up in order to pre-populate the client DB",
+    description = "Initial payload for all data required to bootstrap the pubky.app application. The client app will request it while the user is performing sign-in/sign-up in order to pre-populate the client DB. The post timeline is the `source=all` stream and follows `[api] hide_unranked_authors`.",
     tag = "Bootstrap",
     params(
         ("user_id" = PubkyId, Path, description = "User Pubky ID")

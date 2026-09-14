@@ -128,6 +128,7 @@ mod tests {
         );
 
         assert_eq!(c.stack.log_level, Level::Info);
+        assert!(c.api.hide_unranked_authors);
         assert_eq!(
             c.stack.files_path,
             validate_and_expand_path(PathBuf::from_str("~/.pubky-nexus/static/files").unwrap())

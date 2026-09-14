@@ -94,9 +94,9 @@ pub struct ApiConfig {
     #[serde(default = "default_max_body_size_bytes")]
     pub max_body_size_bytes: usize,
     /// Hide posts by authors absent from the trust ranking on `source=all`
-    /// post streams. Has no effect until a ranking has been computed
-    /// (`[jobs.trust-recompute]`): without one the stream is served
-    /// unfiltered. Off reproduces the unfiltered stream exactly.
+    /// post streams (and the bootstrap timeline). Has no effect until nexusd's
+    /// `trust-recompute` job has built a ranking: without one the stream is
+    /// served unfiltered. Off reproduces the unfiltered stream exactly.
     #[serde(default = "default_hide_unranked_authors")]
     pub hide_unranked_authors: bool,
     #[serde(default = "default_stack")]
