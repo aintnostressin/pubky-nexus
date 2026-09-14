@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -58,6 +60,42 @@ impl SocialGraphStatus {
 
         debug_assert_eq!(ranks.len(), user_ids.len());
         Ok(Self::classify(population, &ranks))
+    }
+
+    /// Whether a ranking has been built. `false` when the recompute job never
+    /// ran, which is production's state with an empty seed set, and after a
+    /// rebuild that found nobody with trust (that drops the key).
+    pub async fn is_built() -> RedisResult<bool> {
+        let (population, _) =
+            Self::index_sorted_set_card_and_members(&USER_SOCIAL_GRAPH_KEY_PARTS, &[], None)
+                .await?;
+        Ok(population > 0)
+    }
+
+    /// The subset of `user_ids` present in the ranking, or `None` when no
+    /// ranking exists. Callers use `None` to serve everyone rather than nobody:
+    /// an unbuilt ranking says nothing about any user.
+    ///
+    /// One round trip, and the size is read with the ranks so a rebuild landing
+    /// mid-read cannot pair an empty set's `None` slots with a live population.
+    pub async fn ranked_among<T: AsRef<str>>(
+        user_ids: &[T],
+    ) -> RedisResult<Option<HashSet<String>>> {
+        let members: Vec<&str> = user_ids.iter().map(|id| id.as_ref()).collect();
+        let (population, ranks) =
+            Self::index_sorted_set_card_and_members(&USER_SOCIAL_GRAPH_KEY_PARTS, &members, None)
+                .await?;
+        if population == 0 {
+            return Ok(None);
+        }
+        Ok(Some(
+            members
+                .iter()
+                .zip(&ranks)
+                .filter(|(_, rank)| rank.is_some())
+                .map(|(id, _)| id.to_string())
+                .collect(),
+        ))
     }
 
     /// Reads one user's status.

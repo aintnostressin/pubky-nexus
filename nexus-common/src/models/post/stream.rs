@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::{Bookmark, PostCounts, PostDetails, PostView};
@@ -5,6 +8,7 @@ use crate::db::kv::{RedisResult, ScoreAction, SortOrder};
 use crate::db::{get_neo4j_graph, queries, GraphError, GraphResult, RedisOps};
 use crate::models::error::ModelError;
 use crate::models::error::ModelResult;
+use crate::models::user::SocialGraphStatus;
 use crate::models::{
     follow::{Followers, Following, Friends, UserFollows},
     post::search::PostsByTagSearch,
@@ -25,6 +29,105 @@ pub const POST_PER_USER_KEY_PARTS: [&str; 2] = ["Posts", "AuthorParents"];
 pub const POST_REPLIES_PER_USER_KEY_PARTS: [&str; 2] = ["Posts", "AuthorReplies"];
 pub const POST_REPLIES_PER_POST_KEY_PARTS: [&str; 2] = ["Posts", "PostReplies"];
 const BOOKMARKS_USER_KEY_PARTS: [&str; 2] = ["Bookmarks", "User"];
+
+/// Whether `source=all` hides posts by authors absent from the trust ranking.
+/// Set once from `[api] hide_unranked_authors` when the API starts; defaults
+/// on so a process that never reads a config behaves like production. Has no
+/// effect until a ranking exists (see [`SocialGraphStatus::is_built`]).
+static HIDE_UNRANKED_AUTHORS: AtomicBool = AtomicBool::new(true);
+
+/// Turns the `source=all` trust filter on or off for this process. Off
+/// reproduces the unfiltered stream exactly: no extra round trips.
+pub fn set_hide_unranked_authors(enabled: bool) {
+    HIDE_UNRANKED_AUTHORS.store(enabled, Ordering::Relaxed);
+}
+
+/// Whether the `source=all` trust filter is on for this process.
+pub fn hide_unranked_authors() -> bool {
+    HIDE_UNRANKED_AUTHORS.load(Ordering::Relaxed)
+}
+
+/// Smallest window read from a sorted set per round when filling a filtered
+/// page: a `limit=1` request still scans enough entries to find a ranked
+/// author without a round trip per entry.
+const RANKED_PAGE_MIN_WINDOW: usize = 20;
+
+/// Windows read at most per filtered page. Bounds the scan when ranked
+/// authors are sparse; a page can then come back short of `limit` even
+/// though the stream continues.
+const RANKED_PAGE_MAX_WINDOWS: usize = 5;
+
+/// The author half of an `author:post` key. A key with no separator is taken
+/// whole, which no ranking contains, so a malformed key is dropped like an
+/// unranked one (hydration would skip it anyway).
+fn author_of(post_key: &str) -> &str {
+    post_key
+        .split_once(':')
+        .map_or(post_key, |(author, _)| author)
+}
+
+/// Fills one page of `limit` scored `author:post` entries whose authors are
+/// ranked, reading windows of the underlying stream from `skip` onward.
+///
+/// `fetch(skip, window)` reads one window of the raw stream; `ranked(authors)`
+/// answers which of them are in the ranking, or `None` when no ranking exists,
+/// in which case the raw window is served as is. Stops when the page is full,
+/// the stream is exhausted (a short window) or [`RANKED_PAGE_MAX_WINDOWS`]
+/// windows were read. Order is preserved, nothing is added.
+///
+/// The page's last entry is the cursor a score-paging client resumes from.
+/// `skip` counts raw entries, so a client paging by `skip += limit` sees
+/// overlapping pages when entries were hidden; it never misses one.
+async fn fill_ranked_page<F, FFut, R, RFut>(
+    skip: usize,
+    limit: usize,
+    fetch: F,
+    ranked: R,
+) -> RedisResult<Vec<(String, f64)>>
+where
+    F: Fn(usize, usize) -> FFut,
+    FFut: Future<Output = RedisResult<Vec<(String, f64)>>>,
+    R: Fn(Vec<String>) -> RFut,
+    RFut: Future<Output = Option<HashSet<String>>>,
+{
+    let window = limit.max(RANKED_PAGE_MIN_WINDOW);
+    let mut page: Vec<(String, f64)> = Vec::with_capacity(limit);
+    let mut offset = skip;
+
+    for _ in 0..RANKED_PAGE_MAX_WINDOWS {
+        let entries = fetch(offset, window).await?;
+        let fetched = entries.len();
+        if fetched == 0 {
+            break;
+        }
+
+        let mut seen = HashSet::new();
+        let authors: Vec<String> = entries
+            .iter()
+            .map(|(key, _)| author_of(key))
+            .filter(|author| seen.insert(*author))
+            .map(str::to_string)
+            .collect();
+
+        match ranked(authors).await {
+            Some(ranked_authors) => page.extend(
+                entries
+                    .into_iter()
+                    .filter(|(key, _)| ranked_authors.contains(author_of(key))),
+            ),
+            // No ranking: nothing to hide, so this window is served whole.
+            None => page.extend(entries),
+        }
+
+        if page.len() >= limit || fetched < window {
+            break;
+        }
+        offset += fetched;
+    }
+
+    page.truncate(limit);
+    Ok(page)
+}
 
 #[derive(ToSchema, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(tag = "source", rename_all = "snake_case")]
@@ -408,7 +511,10 @@ impl PostStream {
         kind: Option<KindFilter>,
     ) -> GraphResult<PostKeyStream> {
         let graph = get_neo4j_graph()?;
-        let query = queries::get::post_stream(source, sorting, order, tags, pagination, kind)?;
+        let ranked_only =
+            matches!(source, StreamSource::All) && Self::hide_unranked_on_shared_surface().await;
+        let query =
+            queries::get::post_stream(source, sorting, order, tags, pagination, kind, ranked_only)?;
 
         // The 10-second budget covers execution AND row streaming: execute()
         // only submits the query and the heavy work (ORDER BY materializes at
@@ -439,6 +545,50 @@ impl PostStream {
         .map_err(|_| GraphError::QueryTimeout)?
     }
 
+    /// Whether `source=all` hides unranked authors right now: the switch is on
+    /// and a ranking exists. Fails open: a Redis error serves the stream
+    /// unfiltered rather than failing the request.
+    async fn hide_unranked_on_shared_surface() -> bool {
+        if !hide_unranked_authors() {
+            return false;
+        }
+        match SocialGraphStatus::is_built().await {
+            Ok(built) => built,
+            Err(e) => {
+                warn!("Trust ranking unavailable, serving source=all unfiltered: {e}");
+                false
+            }
+        }
+    }
+
+    /// One page of a `source=all` sorted set with unranked authors hidden
+    /// (see [`fill_ranked_page`]), or the raw window when the switch is off.
+    /// Fails open: a Redis error on the rank lookup serves the window whole.
+    async fn ranked_page<F, FFut>(
+        skip: Option<usize>,
+        limit: usize,
+        fetch: F,
+    ) -> RedisResult<Vec<(String, f64)>>
+    where
+        F: Fn(usize, usize) -> FFut,
+        FFut: Future<Output = RedisResult<Vec<(String, f64)>>>,
+    {
+        let skip = skip.unwrap_or(0);
+        if !hide_unranked_authors() {
+            return fetch(skip, limit).await;
+        }
+        fill_ranked_page(skip, limit, fetch, |authors| async move {
+            match SocialGraphStatus::ranked_among(&authors).await {
+                Ok(ranked) => ranked,
+                Err(e) => {
+                    warn!("Trust ranking unavailable, serving source=all unfiltered: {e}");
+                    None
+                }
+            }
+        })
+        .await
+    }
+
     pub async fn get_global_posts_keys(
         sorting: StreamSorting,
         order: SortOrder,
@@ -447,35 +597,30 @@ impl PostStream {
         skip: Option<usize>,
         limit: Option<usize>,
     ) -> RedisResult<PostKeyStream> {
-        let sorted_set = match sorting {
-            StreamSorting::TotalEngagement => {
-                Self::try_from_index_sorted_set(
-                    &POST_TOTAL_ENGAGEMENT_KEY_PARTS,
-                    start,
-                    end,
-                    skip,
-                    limit,
-                    order,
-                    None,
-                )
-                .await?
-            }
-            StreamSorting::Timeline => {
-                Self::try_from_index_sorted_set(
-                    &POST_TIMELINE_KEY_PARTS,
-                    start,
-                    end,
-                    skip,
-                    limit,
-                    order,
-                    None,
-                )
-                .await?
-            }
+        let key_parts: &[&str] = match sorting {
+            StreamSorting::TotalEngagement => &POST_TOTAL_ENGAGEMENT_KEY_PARTS,
+            StreamSorting::Timeline => &POST_TIMELINE_KEY_PARTS,
         };
-        Ok(PostKeyStream::from_scored_entries(
-            sorted_set.unwrap_or_default(),
-        ))
+        // Matches the sorted-set read's own default when no limit is given.
+        let limit = limit.unwrap_or(1000);
+        let entries = Self::ranked_page(skip, limit, |skip, limit| {
+            let order = order.clone();
+            async move {
+                Ok(Self::try_from_index_sorted_set(
+                    key_parts,
+                    start,
+                    end,
+                    Some(skip),
+                    Some(limit),
+                    order,
+                    None,
+                )
+                .await?
+                .unwrap_or_default())
+            }
+        })
+        .await?;
+        Ok(PostKeyStream::from_scored_entries(entries))
     }
 
     pub async fn get_posts_keys_by_tag(
@@ -486,32 +631,28 @@ impl PostStream {
         skip: Option<usize>,
         limit: Option<usize>,
     ) -> RedisResult<PostKeyStream> {
-        let skip = skip.unwrap_or(0);
         let limit = limit.unwrap_or(10);
-
-        let pag = Pagination {
-            start,
-            end,
-            skip: Some(skip),
-            limit: Some(limit),
-        };
-
-        let post_search_result = PostsByTagSearch::get_by_label(label, Some(sorting), pag).await?;
-
-        let stream = match post_search_result {
-            Some(post_keys) => {
-                // Iterate over PostsByTagSearch structs to extract post keys and capture the last score
-                let last_post_score = post_keys.last().map(|entry| entry.score as u64);
-                let post_keys = post_keys
-                    .into_iter()
-                    .map(|post_score| post_score.post_key)
-                    .collect();
-                PostKeyStream::new(post_keys, last_post_score)
+        let entries = Self::ranked_page(skip, limit, |skip, limit| {
+            let sorting = sorting.clone();
+            async move {
+                let pagination = Pagination {
+                    start,
+                    end,
+                    skip: Some(skip),
+                    limit: Some(limit),
+                };
+                Ok(
+                    PostsByTagSearch::get_by_label(label, Some(sorting), pagination)
+                        .await?
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|entry| (entry.post_key, entry.score as f64))
+                        .collect(),
+                )
             }
-            None => PostKeyStream::default(),
-        };
-
-        Ok(stream)
+        })
+        .await?;
+        Ok(PostKeyStream::from_scored_entries(entries))
     }
 
     pub async fn get_author_posts(
@@ -963,5 +1104,157 @@ mod tests {
             &None,
             &None,
         ));
+    }
+
+    // ##### Trust filter: fill_ranked_page #####
+
+    use std::cell::{Cell, RefCell};
+
+    const RANKED: &str = "ranked";
+    const NEW: &str = "new";
+
+    /// A raw stream of `len` root posts, newest first, where every third
+    /// author is ranked. Scores descend so the cursor is the last kept score.
+    fn raw_stream(len: usize) -> Vec<(String, f64)> {
+        (0..len)
+            .map(|i| {
+                let author = if i % 3 == 0 { RANKED } else { NEW };
+                (format!("{author}:p{i}"), (len - i) as f64)
+            })
+            .collect()
+    }
+
+    /// Serves `stream` in windows and counts the reads, like the sorted set does.
+    fn windows_of<'a>(
+        stream: &'a [(String, f64)],
+        reads: &'a Cell<usize>,
+        offsets: &'a RefCell<Vec<usize>>,
+    ) -> impl Fn(usize, usize) -> std::future::Ready<RedisResult<Vec<(String, f64)>>> + 'a {
+        move |skip, window| {
+            reads.set(reads.get() + 1);
+            offsets.borrow_mut().push(skip);
+            let end = (skip + window).min(stream.len());
+            let slice = stream.get(skip..end).unwrap_or_default().to_vec();
+            std::future::ready(Ok(slice))
+        }
+    }
+
+    fn ranked_lookup(authors: Vec<String>) -> std::future::Ready<Option<HashSet<String>>> {
+        std::future::ready(Some(authors.into_iter().filter(|a| a == RANKED).collect()))
+    }
+
+    fn no_ranking(_: Vec<String>) -> std::future::Ready<Option<HashSet<String>>> {
+        std::future::ready(None)
+    }
+
+    fn keys(page: &[(String, f64)]) -> Vec<&str> {
+        page.iter().map(|(key, _)| key.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_page_is_filled_across_windows_in_stream_order() {
+        let stream = raw_stream(60);
+        let reads = Cell::new(0);
+        let offsets = RefCell::new(Vec::new());
+
+        let page = fill_ranked_page(0, 10, windows_of(&stream, &reads, &offsets), ranked_lookup)
+            .await
+            .unwrap();
+
+        // Windows are 20 wide (RANKED_PAGE_MIN_WINDOW) and hold 7 ranked
+        // entries each, so the second window fills the page.
+        let expected: Vec<String> = (0..10).map(|n| format!("{RANKED}:p{}", n * 3)).collect();
+        assert_eq!(keys(&page), expected);
+        assert_eq!(reads.get(), 2);
+        assert_eq!(*offsets.borrow(), vec![0, 20]);
+        // The cursor is the last kept entry's score.
+        assert_eq!(page.last().unwrap().1, (60 - 27) as f64);
+    }
+
+    #[tokio::test]
+    async fn without_a_ranking_the_raw_window_is_served() {
+        let stream = raw_stream(60);
+        let reads = Cell::new(0);
+        let offsets = RefCell::new(Vec::new());
+
+        let page = fill_ranked_page(0, 10, windows_of(&stream, &reads, &offsets), no_ranking)
+            .await
+            .unwrap();
+
+        assert_eq!(page, stream[..10].to_vec());
+        assert_eq!(reads.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_short_window_ends_the_scan() {
+        let stream: Vec<(String, f64)> = (0..5).map(|i| (format!("{NEW}:p{i}"), 1.0)).collect();
+        let reads = Cell::new(0);
+        let offsets = RefCell::new(Vec::new());
+
+        let page = fill_ranked_page(0, 10, windows_of(&stream, &reads, &offsets), ranked_lookup)
+            .await
+            .unwrap();
+
+        assert!(page.is_empty());
+        assert_eq!(reads.get(), 1, "an exhausted stream is not re-read");
+    }
+
+    #[tokio::test]
+    async fn the_scan_is_bounded_when_ranked_authors_are_sparse() {
+        let stream: Vec<(String, f64)> = (0..1000).map(|i| (format!("{NEW}:p{i}"), 1.0)).collect();
+        let reads = Cell::new(0);
+        let offsets = RefCell::new(Vec::new());
+
+        let page = fill_ranked_page(0, 10, windows_of(&stream, &reads, &offsets), ranked_lookup)
+            .await
+            .unwrap();
+
+        assert!(page.is_empty());
+        assert_eq!(reads.get(), RANKED_PAGE_MAX_WINDOWS);
+        assert_eq!(*offsets.borrow(), vec![0, 20, 40, 60, 80]);
+    }
+
+    #[tokio::test]
+    async fn skip_offsets_the_raw_stream() {
+        let stream = raw_stream(60);
+        let reads = Cell::new(0);
+        let offsets = RefCell::new(Vec::new());
+
+        let page = fill_ranked_page(3, 2, windows_of(&stream, &reads, &offsets), ranked_lookup)
+            .await
+            .unwrap();
+
+        assert_eq!(*offsets.borrow(), vec![3]);
+        assert_eq!(
+            keys(&page),
+            vec![format!("{RANKED}:p3"), format!("{RANKED}:p6")]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_ranking_is_asked_once_per_distinct_author() {
+        let stream = raw_stream(60);
+        let reads = Cell::new(0);
+        let offsets = RefCell::new(Vec::new());
+        let asked = RefCell::new(Vec::new());
+
+        let _ = fill_ranked_page(0, 5, windows_of(&stream, &reads, &offsets), |authors| {
+            asked.borrow_mut().push(authors.clone());
+            ranked_lookup(authors)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *asked.borrow(),
+            vec![vec![RANKED.to_string(), NEW.to_string()]],
+            "authors are deduplicated in first-occurrence order"
+        );
+    }
+
+    #[test]
+    fn author_of_takes_the_author_half_or_the_whole_key() {
+        assert_eq!(author_of("alice:post1"), "alice");
+        assert_eq!(author_of("nocolon"), "nocolon");
     }
 }

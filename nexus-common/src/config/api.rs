@@ -26,6 +26,10 @@ const fn default_max_body_size_bytes() -> usize {
     DEFAULT_MAX_BODY_SIZE_BYTES
 }
 
+const fn default_hide_unranked_authors() -> bool {
+    true
+}
+
 /// Per-bucket rate limiting configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct RateLimitBucketConfig {
@@ -89,6 +93,12 @@ pub struct ApiConfig {
     /// Maximum size (in bytes) accepted for a request body
     #[serde(default = "default_max_body_size_bytes")]
     pub max_body_size_bytes: usize,
+    /// Hide posts by authors absent from the trust ranking on `source=all`
+    /// post streams. Has no effect until a ranking has been computed
+    /// (`[jobs.trust-recompute]`): without one the stream is served
+    /// unfiltered. Off reproduces the unfiltered stream exactly.
+    #[serde(default = "default_hide_unranked_authors")]
+    pub hide_unranked_authors: bool,
     #[serde(default = "default_stack")]
     pub stack: StackConfig,
     #[serde(default)]
@@ -103,6 +113,7 @@ impl Default for ApiConfig {
             pubky_listen_socket: SocketAddr::from((DEFAULT_LOCAL_IP, DEFAULT_PUBKY_LOCAL_PORT)),
             request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
             max_body_size_bytes: DEFAULT_MAX_BODY_SIZE_BYTES,
+            hide_unranked_authors: default_hide_unranked_authors(),
             stack: StackConfig::default(),
             rate_limit: RateLimitConfig::default(),
         }

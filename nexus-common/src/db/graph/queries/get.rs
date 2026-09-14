@@ -1037,6 +1037,13 @@ pub fn get_files_by_ids(key_pair: &[&[&str]]) -> Query {
 }
 
 // Build the graph query based on parameters
+/// Builds the Cypher fallback for a post stream.
+///
+/// `ranked_only` hides posts by authors without a positive trust score, the
+/// same population the Redis ranking holds (see `get_trust_ranked_user_ids`).
+/// A never-computed ranking leaves `trust` null on every user and the
+/// predicate would then hide every post: callers pass `true` only after
+/// checking that a ranking exists.
 pub fn post_stream(
     source: StreamSource,
     sorting: StreamSorting,
@@ -1044,6 +1051,7 @@ pub fn post_stream(
     tags: &Option<Vec<String>>,
     pagination: Pagination,
     kind: Option<KindFilter>,
+    ranked_only: bool,
 ) -> GraphResult<Query> {
     // Initialize the cypher query
     let mut cypher = String::new();
@@ -1116,6 +1124,16 @@ pub fn post_stream(
     // is already bound, so this expands their posts instead of enumerating all
     // posts.
     cypher.push_str("MATCH (p:Post)<-[:AUTHORED]-(author:User)\n");
+
+    // Hide unranked authors. `coalesce` keeps the predicate boolean for users
+    // the recompute never scored, who would otherwise drop out as NULL anyway.
+    if ranked_only {
+        append_condition(
+            &mut cypher,
+            "coalesce(author.trust, 0) > 0",
+            &mut where_clause_applied,
+        );
+    }
 
     // Apply tags
     if tags.is_some() {
@@ -1529,12 +1547,45 @@ mod tests {
                 ..Default::default()
             },
             None,
+            false,
         )
         .unwrap()
     }
 
     fn build(source: StreamSource) -> String {
         build_query(source).to_cypher_populated()
+    }
+
+    #[test]
+    fn post_stream_hides_unranked_authors_only_when_asked() {
+        let build_all = |ranked_only: bool| {
+            post_stream(
+                StreamSource::All,
+                StreamSorting::Timeline,
+                SortOrder::Descending,
+                &None,
+                Pagination {
+                    limit: Some(10),
+                    ..Default::default()
+                },
+                None,
+                ranked_only,
+            )
+            .unwrap()
+            .to_cypher_populated()
+        };
+
+        let ranked = build_all(true);
+        assert!(
+            ranked.contains("WHERE coalesce(author.trust, 0) > 0"),
+            "ranked_only must filter on the author's trust score:\n{ranked}"
+        );
+
+        let unranked = build_all(false);
+        assert!(
+            !unranked.contains("author.trust"),
+            "without ranked_only no trust predicate is emitted:\n{unranked}"
+        );
     }
 
     #[test]

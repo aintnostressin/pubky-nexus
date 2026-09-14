@@ -5,6 +5,10 @@ pubky_listen_socket = "127.0.0.1:8082"
 request_timeout_secs = 30
 # Maximum size (in bytes) accepted for a request body
 max_body_size_bytes = 1048576
+# Hide posts by authors absent from the trust ranking on `source=all` post streams.
+# Has no effect until [jobs.trust-recompute] has built a ranking: without one the
+# stream is served unfiltered. Set to false to serve every post regardless.
+hide_unranked_authors = true
 
 [rate_limit]
 # Enable rate limiting (disabled by default for permissiveness behind NATs)

@@ -63,6 +63,11 @@ impl TestServiceServer {
             // When we define the sockets, use local port 0 so OS assigns an available port
             public_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             pubky_listen_socket: SocketAddr::from(([127, 0, 0, 1], 0)),
+            // The fixture ranks three users (docker/test-graph/mocks/wot.cypher),
+            // so with the filter on every other fixture post would vanish from
+            // `source=all`. Its own tests (stream/post/trust_filter.rs) switch
+            // it on for their duration.
+            hide_unranked_authors: false,
             ..Default::default()
         };
 
