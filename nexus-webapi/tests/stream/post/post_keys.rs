@@ -65,7 +65,10 @@ fn verify_last_post_score(keys_body: &Value, posts: &[Value]) {
     println!("last_post_score: {:?}", last_post_score);
 
     if posts.is_empty() {
-        // If there are no posts, the score should be None
+        // If there are no posts, the score should be None. This holds with the
+        // shared-surface filter off (the test server default); with it on, a
+        // fully hidden window is an empty `post_keys` with the cursor kept,
+        // see stream/post/ranked_only.rs.
         assert!(
             last_post_score.is_none(),
             "last_post_score should be None when there are no posts"

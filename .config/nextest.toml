@@ -25,3 +25,15 @@ test-group = 'influencers-sorted-set'
 [[profile.default.overrides]]
 filter = 'package(nexusd) and binary(cache_setup)'
 threads-required = 'num-test-threads'
+
+# nexus-webapi/tests/stream/post/ranked_only.rs seeds root posts at the head
+# of the shared Sorted:Posts:Global:Timeline, drops and rebuilds the trust
+# ranking, and flips the process-global hide_unranked_authors switch. Sibling tests assert
+# the exact first page of source=all (stream/post/kind/exclude.rs,
+# post_keys.rs), so those tests must not overlap with this file. Under plain
+# `cargo test` (one process) the switch would also filter every concurrent
+# request; that needs --test-threads=1 and is noted in the file's module doc.
+
+[[profile.default.overrides]]
+filter = 'package(nexus-webapi) and test(/^stream::post::ranked_only::/)'
+threads-required = 'num-test-threads'

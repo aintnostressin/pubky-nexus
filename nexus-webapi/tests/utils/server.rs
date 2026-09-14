@@ -63,6 +63,10 @@ impl TestServiceServer {
             // When we define the sockets, use local port 0 so OS assigns an available port
             public_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             pubky_listen_socket: SocketAddr::from(([127, 0, 0, 1], 0)),
+            // The fixture ranks three users (wot.cypher) and every other
+            // fixture post would vanish from `source=all`. The filter's own
+            // tests (stream/post/ranked_only.rs) switch it on for their duration.
+            hide_unranked_authors: false,
             ..Default::default()
         };
 

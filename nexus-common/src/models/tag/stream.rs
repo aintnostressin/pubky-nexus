@@ -1,6 +1,8 @@
 use crate::db::kv::{RedisResult, SortOrder};
 use crate::db::{fetch_key_from_graph, queries, RedisOps};
 use crate::models::error::ModelResult;
+use crate::models::post::hide_unranked_authors;
+use crate::models::user::USER_SOCIAL_GRAPH_KEY_PARTS;
 use crate::types::routes::HotTagsInputDTO;
 use crate::types::{StreamReach, Timeframe};
 use serde::{Deserialize, Serialize};
@@ -95,6 +97,15 @@ impl HotTags {
     /// data is unavailable, it queries the graph database to retrieve the latest hot tags.
     /// If new data is found, it updates the cache before returning the results.
     ///
+    /// Shared surface: when the trust ranking exists, only ranked taggers count
+    /// (see [`queries::get::get_global_hot_tags`]). The cache holds one
+    /// generation per timeframe and that decision is made when a generation is
+    /// built, so a ranking that appears mid-generation, or a flip of
+    /// `hide_unranked_authors`, is honoured at the next cache expiry or
+    /// reindex: up to the timeframe's TTL (`Timeframe::to_cache_period`, one
+    /// hour to a day). One cache serves both cases: within a generation the
+    /// choice is fixed, so a ranked and an unranked result never interleave.
+    ///
     /// # Arguments
     ///
     /// * `hot_tags_input` - The input parameters received from the API endpoint
@@ -115,7 +126,8 @@ impl HotTags {
             20,
             hot_tags_input.tagged_type.clone(),
         );
-        let query = queries::get::get_global_hot_tags(&hot_tag_input);
+        let ranked_taggers_only = hide_unranked_authors() && Self::ranking_exists().await?;
+        let query = queries::get::get_global_hot_tags(&hot_tag_input, ranked_taggers_only);
         let result = fetch_key_from_graph::<HotTags>(query, "hot_tags").await?;
 
         let hot_tags = match result {
@@ -129,6 +141,15 @@ impl HotTags {
         HotTags::get_from_global_cache(hot_tags_input)
             .await
             .map_err(Into::into)
+    }
+
+    /// Whether a trust ranking has been built (`ZCARD Sorted:Users:SocialGraph > 0`).
+    /// A never-built ranking must serve every tag rather than none.
+    async fn ranking_exists() -> RedisResult<bool> {
+        let (population, _) =
+            Self::index_sorted_set_card_and_members(&USER_SOCIAL_GRAPH_KEY_PARTS, &[], None)
+                .await?;
+        Ok(population > 0)
     }
 
     /// Retrieves hot tags from the global cache

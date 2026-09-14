@@ -867,16 +867,25 @@ pub fn get_hot_tags_by_reach(
         .param("to", to)
 }
 
-pub fn get_global_hot_tags(tags_query: &HotTagsInputDTO) -> Query {
+/// Global hot tags. With `ranked_taggers_only`, only taggers present in the
+/// trust ranking count and are listed, so an unranked farm cannot push a label
+/// onto the shared surface. A never-built ranking leaves `trust` null on every
+/// user and the predicate would then hide every tag: callers must check that a
+/// ranking exists before asking for the ranked variant.
+pub fn get_global_hot_tags(tags_query: &HotTagsInputDTO, ranked_taggers_only: bool) -> Query {
     let input_tagged_type = match &tags_query.tagged_type {
         Some(tagged_type) => tagged_type.to_string(),
         None => String::from("Post|User"),
+    };
+    let ranked_predicate = match ranked_taggers_only {
+        true => " AND coalesce(user.trust, 0) > 0",
+        false => "",
     };
     let (from, to) = tags_query.timeframe.to_timestamp_range();
     let cypher = format!(
         "
         MATCH (user: User)-[tag:TAGGED]->(tagged:{})
-        WHERE tag.indexed_at >= $from AND tag.indexed_at < $to
+        WHERE tag.indexed_at >= $from AND tag.indexed_at < $to{}
         WITH
             tag.label AS label,
             COLLECT(DISTINCT user.id)[..{}] AS taggers,
@@ -892,7 +901,7 @@ pub fn get_global_hot_tags(tags_query: &HotTagsInputDTO) -> Query {
         SKIP $skip LIMIT $limit
         RETURN COLLECT(hot_tag) as hot_tags
     ",
-        input_tagged_type, tags_query.taggers_limit
+        input_tagged_type, ranked_predicate, tags_query.taggers_limit
     );
     Query::new("get_global_hot_tags", &cypher)
         .param("skip", tags_query.skip as i64)

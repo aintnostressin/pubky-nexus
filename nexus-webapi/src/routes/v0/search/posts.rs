@@ -7,6 +7,7 @@ use crate::routes::{Path, Query};
 use crate::Result;
 use axum::Json;
 use nexus_common::models::post::search::{PostsByContentSearch, PostsByTagSearch};
+use nexus_common::models::post::PostStream;
 use nexus_common::types::StreamSorting;
 use serde::Deserialize;
 use tracing::debug;
@@ -55,10 +56,13 @@ pub async fn search_posts_by_tag_handler(
 
     let pagination = query.pagination.to_pagination(query.start, query.end);
 
-    match PostsByTagSearch::get_by_label(&tag, sorting, pagination).await? {
-        Some(posts_list) => Ok(Json(posts_list)),
-        None => Ok(Json(vec![])),
-    }
+    // Search reads the tag index directly, bypassing the stream's
+    // `collect_post_keys`, so the shared-surface rule is applied here.
+    let mut posts_list = PostsByTagSearch::get_by_label(&tag, sorting, pagination)
+        .await?
+        .unwrap_or_default();
+    PostStream::retain_shared_surface(&mut posts_list, |post| post.post_key.as_str()).await;
+    Ok(Json(posts_list))
 }
 
 #[derive(Deserialize)]
@@ -102,7 +106,7 @@ pub async fn search_posts_by_content_handler(
 
     let kind_str = query.kind.as_ref().map(|k| k.to_string());
 
-    let results = PostsByContentSearch::search(
+    let mut results = PostsByContentSearch::search(
         query.q.as_str(),
         query.author.as_deref(),
         kind_str.as_deref(),
@@ -110,6 +114,7 @@ pub async fn search_posts_by_content_handler(
         limit,
     )
     .await?;
+    PostStream::retain_shared_surface(&mut results, |post| post.post_key.as_str()).await;
     Ok(Json(results))
 }
 

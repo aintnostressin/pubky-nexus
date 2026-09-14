@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::{Bookmark, PostCounts, PostDetails, PostView};
@@ -5,6 +7,7 @@ use crate::db::kv::{RedisResult, ScoreAction, SortOrder};
 use crate::db::{get_neo4j_graph, queries, GraphError, GraphResult, RedisOps};
 use crate::models::error::ModelError;
 use crate::models::error::ModelResult;
+use crate::models::user::USER_SOCIAL_GRAPH_KEY_PARTS;
 use crate::models::{
     follow::{Followers, Following, Friends, UserFollows},
     post::search::PostsByTagSearch,
@@ -16,7 +19,7 @@ use pubky_app_specs::{ParsedUri, PubkyAppCollectionContent, PubkyAppPostKind, Re
 use serde::{Deserialize, Serialize};
 use tokio::task::spawn;
 use tokio::time::{timeout, Duration};
-use tracing::warn;
+use tracing::{debug, warn};
 use utoipa::ToSchema;
 
 pub const POST_TIMELINE_KEY_PARTS: [&str; 3] = ["Posts", "Global", "Timeline"];
@@ -25,6 +28,28 @@ pub const POST_PER_USER_KEY_PARTS: [&str; 2] = ["Posts", "AuthorParents"];
 pub const POST_REPLIES_PER_USER_KEY_PARTS: [&str; 2] = ["Posts", "AuthorReplies"];
 pub const POST_REPLIES_PER_POST_KEY_PARTS: [&str; 2] = ["Posts", "PostReplies"];
 const BOOKMARKS_USER_KEY_PARTS: [&str; 2] = ["Bookmarks", "User"];
+
+/// Further windows `get_posts` may examine when a whole fetched window was
+/// hidden by the shared-surface filter, so a flood of hidden posts cannot end
+/// the stream for score-paging clients.
+const HIDDEN_WINDOW_RETRIES: usize = 3;
+
+/// Whether shared surfaces hide root posts by authors absent from the trust
+/// ranking. Read on every page; set once from `[api] hide_unranked_authors`
+/// when the API starts. Defaults on so a process that never reads a config
+/// (a CLI reindex, a test binary) behaves like production.
+static HIDE_UNRANKED_AUTHORS: AtomicBool = AtomicBool::new(true);
+
+/// Turns the shared-surface filter on or off for this process. Off reproduces
+/// the pre-filter behaviour exactly: no extra round trips, no hidden posts.
+pub fn set_hide_unranked_authors(enabled: bool) {
+    HIDE_UNRANKED_AUTHORS.store(enabled, Ordering::Relaxed);
+}
+
+/// Whether the shared-surface filter is on for this process.
+pub fn hide_unranked_authors() -> bool {
+    HIDE_UNRANKED_AUTHORS.load(Ordering::Relaxed)
+}
 
 #[derive(ToSchema, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(tag = "source", rename_all = "snake_case")]
@@ -169,6 +194,35 @@ impl PostKeyStream {
     }
 }
 
+/// The author half of an `author:post` key. A key with no separator is taken
+/// whole, which no ranking contains, so a malformed key is dropped like an
+/// unranked one (hydration would skip it anyway).
+fn author_of(post_key: &str) -> &str {
+    post_key
+        .split_once(':')
+        .map_or(post_key, |(author, _)| author)
+}
+
+/// Deduplicates while keeping first-occurrence order, so the pipelined ranks
+/// line up positionally with the ids they were asked for.
+fn distinct<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut seen = HashSet::new();
+    ids.filter(|id| seen.insert(*id)).collect()
+}
+
+/// Applies the shared-surface rule to one page of `author:post` keys: a key
+/// is kept when its author is in the trust ranking and dropped otherwise.
+/// Order is preserved and nothing is added.
+///
+/// Pure so the rule can be tested without Redis; `ranked_keys` does the I/O.
+fn keep_ranked_authors(post_keys: &[String], ranked_authors: &HashSet<String>) -> Vec<String> {
+    post_keys
+        .iter()
+        .filter(|key| ranked_authors.contains(author_of(key)))
+        .cloned()
+        .collect()
+}
+
 #[derive(Serialize, Deserialize, ToSchema, Debug, Default)]
 pub struct PostStream(pub Vec<PostView>);
 
@@ -187,8 +241,45 @@ impl PostStream {
         tags: Option<Vec<String>>,
         kind: Option<KindFilter>,
     ) -> ModelResult<Option<Self>> {
-        let post_key_stream =
-            Self::collect_post_keys(source, pagination, order, sorting, tags, kind).await?;
+        let mut pagination = pagination;
+        let (mut post_key_stream, mut fetched) = Self::collect_post_keys(
+            source.clone(),
+            pagination,
+            order.clone(),
+            sorting.clone(),
+            tags.clone(),
+            kind.clone(),
+        )
+        .await?;
+
+        // Window advance. This response is a bare array with no cursor, so an
+        // empty page reads as end-of-stream: a fetched window that the
+        // shared-surface filter hid entirely would end `All` for every client.
+        // Advance `skip` by the fetched length (never `start`: `start` is an
+        // inclusive score bound, so moving it would repeat equal-score entries
+        // and need a branch per sort order) and look again, a bounded number of
+        // times. Only an empty page after a non-empty window qualifies: a short
+        // page is never refilled, and a genuinely empty window stops at once.
+        // Skip-paging clients can see one duplicate page after a hidden window;
+        // score-paging clients resume from the last returned score and are exact.
+        let mut retries = 0;
+        while post_key_stream.is_empty()
+            && fetched > 0
+            && retries < HIDDEN_WINDOW_RETRIES
+            && matches!(source, StreamSource::All)
+        {
+            pagination.skip = Some(pagination.skip.unwrap_or(0) + fetched);
+            (post_key_stream, fetched) = Self::collect_post_keys(
+                source.clone(),
+                pagination,
+                order.clone(),
+                sorting.clone(),
+                tags.clone(),
+                kind.clone(),
+            )
+            .await?;
+            retries += 1;
+        }
 
         if post_key_stream.is_empty() {
             return Ok(None);
@@ -205,16 +296,25 @@ impl PostStream {
         tags: Option<Vec<String>>,
         kind: Option<KindFilter>,
     ) -> ModelResult<Option<PostKeyStream>> {
-        let post_key_stream =
+        // No window advance here: the keys response carries `last_post_score`,
+        // the score of the last *fetched* key, so a keys client steps past a
+        // hidden window on its own. That only holds if a fully hidden window is
+        // returned as an empty `post_keys` with the cursor intact, so `None`
+        // (serialized with a null cursor) is reserved for an empty raw window.
+        let (post_key_stream, fetched) =
             Self::collect_post_keys(source, pagination, order, sorting, tags, kind).await?;
 
-        if post_key_stream.is_empty() {
+        if fetched == 0 {
             return Ok(None);
         }
 
         Ok(Some(post_key_stream))
     }
 
+    /// Resolves one page of post keys and applies the shared-surface filter to
+    /// `All`. Returns the page together with the number of keys fetched before
+    /// filtering, which `get_posts` needs to tell a hidden window from the end
+    /// of the stream.
     async fn collect_post_keys(
         source: StreamSource,
         pagination: Pagination,
@@ -222,17 +322,19 @@ impl PostStream {
         sorting: StreamSorting,
         tags: Option<Vec<String>>,
         kind: Option<KindFilter>,
-    ) -> ModelResult<PostKeyStream> {
+    ) -> ModelResult<(PostKeyStream, usize)> {
         // Collection has its own envelope-driven resolution path (neither
         // sorted-set index nor Cypher).
         if let StreamSource::Collection { author_id, post_id } = &source {
-            return Self::get_collection_items_post_keys(
+            let keys = Self::get_collection_items_post_keys(
                 author_id,
                 post_id,
                 pagination.skip,
                 pagination.limit,
             )
-            .await;
+            .await?;
+            let fetched = keys.post_keys.len();
+            return Ok((keys, fetched));
         }
 
         // WoT sources emit observability metrics (spec v3.1). Capture the source
@@ -255,6 +357,7 @@ impl PostStream {
 
         // Decide whether to use index or fallback to graph query
         let use_index = Self::can_use_index(&sorting, &source, &tags, &kind);
+        let shared_surface = matches!(source, StreamSource::All);
 
         let started = std::time::Instant::now();
         let result: ModelResult<PostKeyStream> = match use_index {
@@ -275,7 +378,71 @@ impl PostStream {
             );
         }
 
-        result
+        let mut keys = result?;
+        let fetched = keys.post_keys.len();
+        // `All` is the one shared surface served here, with or without tags,
+        // on either path: the single-tag Redis index and the Cypher fallback
+        // (multi-tag, kind filters) both arrive at this point.
+        if shared_surface {
+            Self::filter_shared_surface(&mut keys).await;
+        }
+        Ok((keys, fetched))
+    }
+
+    /// Hides root posts by authors absent from the trust ranking (see
+    /// [`keep_ranked_authors`]).
+    ///
+    /// Viewer-independent and read-only: the follow is the only thing that
+    /// changes rank, and nothing is written. Fails open: when the ranking was
+    /// never built, or the round trip errors, the page is served untouched.
+    /// `last_post_score` is never changed, so the keys cursor still names the
+    /// last fetched key.
+    pub async fn filter_shared_surface(keys: &mut PostKeyStream) {
+        if !hide_unranked_authors() || keys.post_keys.is_empty() {
+            return;
+        }
+        match Self::ranked_keys(&keys.post_keys).await {
+            Ok(Some(kept)) => keys.post_keys = kept,
+            Ok(None) => debug!("No trust ranking built; serving the shared surface unfiltered"),
+            Err(e) => warn!("Shared-surface filter skipped, serving the page unfiltered: {e}"),
+        }
+    }
+
+    /// Applies the shared-surface rule to any list that carries a post key,
+    /// for callers that bypass [`Self::collect_post_keys`] (search results).
+    pub async fn retain_shared_surface<T>(items: &mut Vec<T>, post_key: impl Fn(&T) -> &str) {
+        if !hide_unranked_authors() || items.is_empty() {
+            return;
+        }
+        let post_keys = items
+            .iter()
+            .map(|item| post_key(item).to_string())
+            .collect();
+        let mut keys = PostKeyStream::new(post_keys, None);
+        Self::filter_shared_surface(&mut keys).await;
+        let kept: HashSet<String> = keys.post_keys.into_iter().collect();
+        items.retain(|item| kept.contains(post_key(item)));
+    }
+
+    /// The keys whose author is ranked, in page order, or `None` when no
+    /// ranking exists. One round trip: the authors' ranks, read together with
+    /// the ranking's size so an unbuilt ranking is told apart from a page of
+    /// unranked authors. A page repeats authors, so they are deduped first.
+    async fn ranked_keys(post_keys: &[String]) -> RedisResult<Option<Vec<String>>> {
+        let authors: Vec<&str> = distinct(post_keys.iter().map(|key| author_of(key)));
+        let (population, ranks) =
+            Self::index_sorted_set_card_and_members(&USER_SOCIAL_GRAPH_KEY_PARTS, &authors, None)
+                .await?;
+        if population == 0 {
+            return Ok(None);
+        }
+        let ranked_authors: HashSet<String> = authors
+            .iter()
+            .zip(&ranks)
+            .filter(|(_, rank)| rank.is_some())
+            .map(|(author, _)| author.to_string())
+            .collect();
+        Ok(Some(keep_ranked_authors(post_keys, &ranked_authors)))
     }
 
     // Determine if we have a quick access sorted set for this combination
@@ -963,5 +1130,70 @@ mod tests {
             &None,
             &None,
         ));
+    }
+
+    // ##### Shared-surface rule #####
+
+    fn keys(list: &[&str]) -> Vec<String> {
+        list.iter().map(|k| k.to_string()).collect()
+    }
+
+    fn set(list: &[&str]) -> HashSet<String> {
+        list.iter().map(|k| k.to_string()).collect()
+    }
+
+    #[test]
+    fn a_ranked_author_is_kept() {
+        let kept = keep_ranked_authors(&keys(&["ranked:p1"]), &set(&["ranked"]));
+
+        assert_eq!(kept, keys(&["ranked:p1"]));
+    }
+
+    #[test]
+    fn an_unranked_author_is_dropped() {
+        let kept = keep_ranked_authors(&keys(&["new:p1"]), &set(&["ranked"]));
+
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn page_order_is_preserved() {
+        let kept = keep_ranked_authors(
+            &keys(&["a:p1", "new:p2", "b:p3", "new:p4", "a:p5"]),
+            &set(&["a", "b"]),
+        );
+
+        assert_eq!(kept, keys(&["a:p1", "b:p3", "a:p5"]));
+    }
+
+    // The same author twice on a page is looked up once but judged per post.
+    #[test]
+    fn duplicate_authors_keep_every_post() {
+        let kept = keep_ranked_authors(&keys(&["a:p1", "new:p2", "a:p3"]), &set(&["a"]));
+
+        assert_eq!(kept, keys(&["a:p1", "a:p3"]));
+    }
+
+    // A key without a separator is taken whole, which no ranking contains.
+    #[test]
+    fn a_malformed_key_is_dropped() {
+        let kept = keep_ranked_authors(&keys(&["nocolon", "a:p1"]), &set(&["a"]));
+
+        assert_eq!(kept, keys(&["a:p1"]));
+    }
+
+    #[test]
+    fn an_empty_page_stays_empty() {
+        let kept = keep_ranked_authors(&[], &set(&["a"]));
+
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn distinct_keeps_first_occurrence_order() {
+        assert_eq!(
+            distinct(["b", "a", "b", "c", "a"].into_iter()),
+            vec!["b", "a", "c"]
+        );
     }
 }
