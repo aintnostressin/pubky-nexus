@@ -31,12 +31,13 @@ pub const POST_REPLIES_PER_POST_KEY_PARTS: [&str; 2] = ["Posts", "PostReplies"];
 const BOOKMARKS_USER_KEY_PARTS: [&str; 2] = ["Bookmarks", "User"];
 
 /// Whether `source=all` hides posts by authors absent from the trust ranking.
-/// Off until `NexusApiBuilder::start` applies `[api] hide_unranked_authors`;
-/// re-settable so tests can flip it. Has no effect until a ranking exists.
-static HIDE_UNRANKED_AUTHORS: AtomicBool = AtomicBool::new(false);
+/// Always on in production; it has no effect until a ranking exists. Tests and
+/// benches turn it off because the shared fixture ranks only three users.
+static HIDE_UNRANKED_AUTHORS: AtomicBool = AtomicBool::new(true);
 
 /// Turns the `source=all` trust filter on or off for this process. Off
 /// reproduces the unfiltered stream exactly: no extra round trips.
+#[cfg(feature = "test-utils")]
 pub fn set_hide_unranked_authors(enabled: bool) {
     HIDE_UNRANKED_AUTHORS.store(enabled, Ordering::Relaxed);
 }

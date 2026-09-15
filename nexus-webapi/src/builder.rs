@@ -13,7 +13,6 @@ use axum_server::Handle;
 use futures_util::TryFutureExt;
 use nexus_common::db::DatabaseConfig;
 use nexus_common::file::ConfigLoader;
-use nexus_common::models::post::set_hide_unranked_authors;
 use nexus_common::types::DynError;
 use nexus_common::utils::create_shutdown_rx;
 use nexus_common::Level;
@@ -89,7 +88,6 @@ impl NexusApiBuilder {
     /// - `shutdown_rx`: optional shutdown signal. If none is provided, a default one will be created, listening for Ctrl-C.
     pub async fn start(self, shutdown_rx: Option<Receiver<bool>>) -> Result<NexusApi, DynError> {
         StackManager::setup(&self.api_context.api_config.stack).await?;
-        set_hide_unranked_authors(self.api_context.api_config.hide_unranked_authors);
         let mut shutdown_rx = shutdown_rx.unwrap_or_else(create_shutdown_rx);
 
         let nexus_api = NexusApi::start(

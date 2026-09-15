@@ -1,15 +1,14 @@
 //! `source=all` trust filter: posts by authors absent from the trust ranking
-//! are hidden (`[api] hide_unranked_authors`), and the stream is served
-//! unfiltered when no ranking exists.
+//! are hidden, and the stream is served unfiltered when no ranking exists.
 //!
 //! Fixture (docker/test-graph/mocks/wot.cypher): D1 0.4, D2 0.2, D1B 0.1 and
 //! nobody else carries trust, so the ranking is exactly three deep. Every wot
 //! fixture post sits in `indexed_at` 1650000000001..=1650000000014, a window
 //! no other fixture uses, so `start`/`end` pin the requests to it.
 //!
-//! The test server starts with the switch off (utils/server.rs): this file
-//! turns it on for its own duration, after `get_test_server()` because any
-//! server start resets the switch from its config. Isolation: it also drops
+//! The test server turns the filter off (utils/server.rs) because the fixture
+//! ranks only three users: this file turns it on for its own duration, after
+//! `get_test_server()`, since a server start switches it off again. It also drops
 //! and rebuilds the ranking, so `.config/nextest.toml` runs it alone. Under
 //! plain `cargo test` the switch is process-global and would filter every
 //! concurrent `source=all` request: run this file with `--test-threads=1`.

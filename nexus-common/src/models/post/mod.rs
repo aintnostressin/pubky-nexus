@@ -12,9 +12,11 @@ pub use counts::PostCounts;
 pub use details::PostDetails;
 pub use relationships::PostRelationships;
 pub use search::PostsByContentSearch;
+#[cfg(feature = "test-utils")]
+pub use stream::set_hide_unranked_authors;
 pub use stream::{
-    set_hide_unranked_authors, KindFilter, PostKeyStream, PostStream, StreamSource,
-    POST_PER_USER_KEY_PARTS, POST_REPLIES_PER_POST_KEY_PARTS, POST_REPLIES_PER_USER_KEY_PARTS,
-    POST_TIMELINE_KEY_PARTS, POST_TOTAL_ENGAGEMENT_KEY_PARTS,
+    KindFilter, PostKeyStream, PostStream, StreamSource, POST_PER_USER_KEY_PARTS,
+    POST_REPLIES_PER_POST_KEY_PARTS, POST_REPLIES_PER_USER_KEY_PARTS, POST_TIMELINE_KEY_PARTS,
+    POST_TOTAL_ENGAGEMENT_KEY_PARTS,
 };
 pub use view::PostView;

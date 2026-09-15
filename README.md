@@ -118,7 +118,7 @@ cron = "0 * * * * *"  # every minute at second 0
 
 ### Trust ranking and the global feed
 
-The `trust-recompute` job (parameters under `[trust_rank]`, seeds required) ranks users by seeded PageRank over the follow graph. Once a ranking exists, `source=all` post streams and the bootstrap timeline hide posts by authors absent from it; a page may come back shorter than `limit`, and clients should page with `start` = `last_post_score` from `/v0/stream/posts/keys` and `skip=1`. Without a ranking every post is served. Set `[api] hide_unranked_authors = false` to serve every post regardless.
+The `trust-recompute` job (parameters under `[trust_rank]`, seeds required) ranks users by seeded PageRank over the follow graph. Once a ranking exists, `source=all` post streams and the bootstrap timeline hide posts by authors absent from it; a page may come back shorter than `limit`, and clients should page with `start` = `last_post_score` from `/v0/stream/posts/keys` and `skip=1`. Without a ranking every post is served.
 
 ## 📈 Observability
 

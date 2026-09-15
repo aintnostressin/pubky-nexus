@@ -1,3 +1,4 @@
+use nexus_common::models::post::set_hide_unranked_authors;
 use nexus_common::{Level, StackConfig, StackManager};
 use std::sync::Once;
 use tokio::runtime::Runtime;
@@ -15,6 +16,9 @@ pub fn run_setup() {
             StackManager::setup(&config)
                 .await
                 .expect("stack setup failed; benches need the docker stack up");
+            // The fixture ranks three users, so `source=all` benches would
+            // measure a near-empty filtered stream (see tests/utils/server.rs).
+            set_hide_unranked_authors(false);
         });
     });
 }
