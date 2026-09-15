@@ -1226,13 +1226,15 @@ pub fn post_stream(
 
     // Apply StreamSorting. `score` is the value the cursor (`last_post_score`) pages
     // on: the post timestamp for Timeline, the engagement count for TotalEngagement.
-    // `p.id` is a deterministic secondary key so equal scores keep a stable order
-    // within a response (pagination across ties is still best-effort: the cursor
+    // Equal scores order by author id then post id, which is how Redis orders the
+    // `author:post` members of its sorted sets, so a page is the same whichever
+    // path serves it (pagination across ties is still best-effort: the cursor
     // carries only the score, not the id).
+    let tie_break = format!("author.id {order_dir}, p.id {order_dir}");
     let (score_expr, order_clause) = match sorting {
         StreamSorting::Timeline => (
             "p.indexed_at",
-            format!("ORDER BY p.indexed_at {order_dir}, p.id {order_dir}"),
+            format!("ORDER BY p.indexed_at {order_dir}, {tie_break}"),
         ),
         StreamSorting::TotalEngagement => {
             // Each engagement count is its own COUNT{} subquery, so they don't
@@ -1268,7 +1270,7 @@ pub fn post_stream(
 
             (
                 "total_engagement",
-                format!("ORDER BY total_engagement {order_dir}, p.id {order_dir}"),
+                format!("ORDER BY total_engagement {order_dir}, {tie_break}"),
             )
         }
     };
