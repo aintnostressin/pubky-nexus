@@ -10,6 +10,14 @@ pub const USER_1: &str = "pyc598poqkdgtx1wc4aeptx67mqg71mmywyh7uzkffzittjmbiuo";
 const USER_4: &str = "r91hi8kc3x6761gwfiigr7yn6nca1z47wm6jadhw1jbx1co93r9y";
 const USER_5: &str = "tkpeqpx3ywoawiw6q8e6kuo9o3egr7fnhx83rudznbrrmqgdmomo";
 
+// mocks/wot.cypher: the observer follows D1, D1B and the mod bot. D1 and D1B
+// carry trust; the mod bot is one of the on-ramp accounts trust.cypher leaves
+// unranked, so its tags are hidden once the ranking exists (it does, db mock
+// builds it from the fixture).
+const WOT_OBSERVER: &str = "y6apowjmcg8rocmd9jirg95fyf3yykwuhqxozzts4mjipk4n7iao";
+const WOT_D1: &str = "qjftuwjog819ki1wktuy5tndebce36bmxxwtjjm3z1fr97jk9yuo";
+const WOT_D1B: &str = "t5ixbtatg4tq5q5ixg16qqrg1bmem75ksg6cweuftuydwzw91pzy";
+
 struct StreamTagMockup {
     label: String,
     tagger_ids: usize,
@@ -557,6 +565,65 @@ async fn test_hot_tags_by_friends_reach_and_all_timeframe() -> Result<()> {
 }
 
 const PUBKY_TAG: &str = "pubky";
+
+// ##### Trust filter #####
+// Reach queries hit the graph on every request, so they observe the filter
+// directly. The global path is covered by the tests above: every hot-tags and
+// skunk tagger is ranked, so their counts are unchanged with the filter on.
+
+#[tokio_shared_rt::test(shared)]
+async fn test_hot_tags_by_reach_hide_unranked_taggers() -> Result<()> {
+    let endpoint =
+        &format!("/v0/tags/hot?user_id={WOT_OBSERVER}&reach=following&timeframe=all_time");
+
+    let body = get_request(endpoint).await?;
+    let tags = body.as_array().expect("Stream tags should be an array");
+    analyse_hot_tags_structure(tags);
+
+    // D1: wmtag1, wmtag2; D1B: wmtag3, wmtag4; both: wotreview. Every label
+    // tags one post, so they order by label. The mod bot's nudity, wotflag and
+    // wmtagflag are gone.
+    let labels: Vec<&str> = tags
+        .iter()
+        .filter_map(|tag| tag["label"].as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        ["wmtag1", "wmtag2", "wmtag3", "wmtag4", "wotreview"],
+        "unranked taggers' labels must be hidden"
+    );
+    compare_unit_hot_tag(
+        &tags[4],
+        StreamTagMockup::new(String::from("wotreview"), 2, 1, 2),
+    );
+    for tag in tags {
+        for tagger in tag["taggers_id"].as_array().expect("taggers_id array") {
+            let tagger = tagger.as_str().unwrap_or_default();
+            assert!(
+                [WOT_D1, WOT_D1B].contains(&tagger),
+                "unranked tagger {tagger} served under {}",
+                tag["label"]
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_hot_tags_label_taggers_by_reach_hide_unranked_taggers() -> Result<()> {
+    // Tagged by D1 and D1B, latest first.
+    let endpoint = &format!("/v0/tags/taggers/wotreview?user_id={WOT_OBSERVER}&reach=following");
+    let body = get_request(endpoint).await?;
+    assert_eq!(body, serde_json::json!([WOT_D1B, WOT_D1]));
+
+    // Tagged by the mod bot only, so nobody is left.
+    let endpoint = &format!("/v0/tags/taggers/wmtagflag?user_id={WOT_OBSERVER}&reach=following");
+    let body = get_request(endpoint).await?;
+    assert_eq!(body, serde_json::json!([]));
+
+    Ok(())
+}
 
 const TAGGERS: [&str; 9] = [
     "y4euc58gnmxun9wo87gwmanu6kztt9pgw1zz1yp1azp7trrsjamy",

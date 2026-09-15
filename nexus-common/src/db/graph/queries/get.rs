@@ -807,12 +807,17 @@ fn reach_attrs(query: Query, reach: &StreamReach) -> Query {
         .telemetry_attr_opt("depth", depth)
 }
 
+/// Taggers of `label` within `user_id`'s reach, latest tag first.
+///
+/// `ranked_only` keeps only taggers with a positive trust score, see
+/// [`hot_tags_trust_predicate`].
 pub fn get_tag_taggers_by_reach(
     label: &str,
     user_id: &str,
     reach: StreamReach,
     skip: usize,
     limit: usize,
+    ranked_only: bool,
 ) -> Query {
     let cypher = format!(
         "
@@ -820,7 +825,7 @@ pub fn get_tag_taggers_by_reach(
             // The tagged node can be generic, representing either a Post, a User, or both.
             // For now, it will be a Post to align with UX requirements.
             MATCH (reach)-[tag:TAGGED]->(tagged:Post)
-            WHERE user.id = $user_id AND tag.label = $label
+            WHERE user.id = $user_id AND tag.label = $label{}
 
             // Get the latest tagged timestamp per `reach` user
             WITH DISTINCT reach, MAX(tag.indexed_at) AS latest_tag_time
@@ -832,7 +837,8 @@ pub fn get_tag_taggers_by_reach(
 
             RETURN COLLECT(row.reach_id) AS tagger_ids
             ",
-        stream_reach_to_graph_subquery(&reach)
+        stream_reach_to_graph_subquery(&reach),
+        hot_tags_trust_predicate("reach", ranked_only),
     );
     reach_attrs(Query::new("get_tag_taggers_by_reach", &cypher), &reach)
         .param("label", label)
@@ -841,10 +847,31 @@ pub fn get_tag_taggers_by_reach(
         .param("limit", limit as i64)
 }
 
+/// The `AND` clause that limits a hot-tags query to taggers with a positive
+/// trust score, or nothing when `ranked_only` is off.
+///
+/// `trust > 0` alone: a user the recompute job never scored has no `trust`
+/// property, `null > 0` is null, and the row drops out. That is deliberate: a
+/// never-computed ranking leaves `trust` null on every user and would then
+/// empty every hot-tags response, so callers pass `true` only after checking
+/// that a ranking exists.
+fn hot_tags_trust_predicate(tagger: &str, ranked_only: bool) -> String {
+    if ranked_only {
+        format!(" AND {tagger}.trust > 0")
+    } else {
+        String::new()
+    }
+}
+
+/// Hot tags within `user_id`'s reach, by distinct tagged count.
+///
+/// `ranked_only` keeps only taggers with a positive trust score, see
+/// [`hot_tags_trust_predicate`].
 pub fn get_hot_tags_by_reach(
     user_id: &str,
     reach: StreamReach,
     tags_query: &HotTagsInputDTO,
+    ranked_only: bool,
 ) -> Query {
     let input_tagged_type = match &tags_query.tagged_type {
         Some(tagged_type) => tagged_type.to_string(),
@@ -856,7 +883,7 @@ pub fn get_hot_tags_by_reach(
         "
         {}
         MATCH (reach)-[tag:TAGGED]->(tagged:{})
-        WHERE user.id = $user_id AND tag.indexed_at >= $from AND tag.indexed_at < $to
+        WHERE user.id = $user_id AND tag.indexed_at >= $from AND tag.indexed_at < $to{}
         WITH
             tag.label AS label,
             COLLECT(DISTINCT reach.id)[..{}] AS taggers,
@@ -874,6 +901,7 @@ pub fn get_hot_tags_by_reach(
     ",
         stream_reach_to_graph_subquery(&reach),
         input_tagged_type,
+        hot_tags_trust_predicate("reach", ranked_only),
         tags_query.taggers_limit
     );
     reach_attrs(Query::new("get_hot_tags_by_reach", &cypher), &reach)
@@ -884,7 +912,11 @@ pub fn get_hot_tags_by_reach(
         .param("to", to)
 }
 
-pub fn get_global_hot_tags(tags_query: &HotTagsInputDTO) -> Query {
+/// Global hot tags, by distinct tagged count.
+///
+/// `ranked_only` keeps only taggers with a positive trust score, see
+/// [`hot_tags_trust_predicate`].
+pub fn get_global_hot_tags(tags_query: &HotTagsInputDTO, ranked_only: bool) -> Query {
     let input_tagged_type = match &tags_query.tagged_type {
         Some(tagged_type) => tagged_type.to_string(),
         None => String::from("Post|User"),
@@ -893,7 +925,7 @@ pub fn get_global_hot_tags(tags_query: &HotTagsInputDTO) -> Query {
     let cypher = format!(
         "
         MATCH (user: User)-[tag:TAGGED]->(tagged:{})
-        WHERE tag.indexed_at >= $from AND tag.indexed_at < $to
+        WHERE tag.indexed_at >= $from AND tag.indexed_at < $to{}
         WITH
             tag.label AS label,
             COLLECT(DISTINCT user.id)[..{}] AS taggers,
@@ -909,7 +941,9 @@ pub fn get_global_hot_tags(tags_query: &HotTagsInputDTO) -> Query {
         SKIP $skip LIMIT $limit
         RETURN COLLECT(hot_tag) as hot_tags
     ",
-        input_tagged_type, tags_query.taggers_limit
+        input_tagged_type,
+        hot_tags_trust_predicate("user", ranked_only),
+        tags_query.taggers_limit
     );
     Query::new("get_global_hot_tags", &cypher)
         .param("skip", tags_query.skip as i64)
@@ -1538,6 +1572,33 @@ mod tests {
     }
 
     #[test]
+    fn hot_tags_queries_hide_unranked_taggers_only_when_asked() {
+        let input = HotTagsInputDTO::new(Timeframe::AllTime, 10, 0, 5, None);
+        let global = |ranked_only| get_global_hot_tags(&input, ranked_only).to_cypher_populated();
+        let by_reach = |ranked_only| {
+            get_hot_tags_by_reach("user", StreamReach::Following, &input, ranked_only)
+                .to_cypher_populated()
+        };
+        let taggers = |ranked_only| {
+            get_tag_taggers_by_reach("label", "user", StreamReach::Following, 0, 5, ranked_only)
+                .to_cypher_populated()
+        };
+
+        // The predicate extends the existing WHERE, so the bound tagger
+        // variable is the one it names: `user` globally, `reach` by reach.
+        assert!(global(true).contains(" AND user.trust > 0\n"));
+        assert!(by_reach(true).contains(" AND reach.trust > 0\n"));
+        assert!(taggers(true).contains("tag.label = 'label' AND reach.trust > 0\n"));
+
+        for cypher in [global(false), by_reach(false), taggers(false)] {
+            assert!(
+                !cypher.contains(".trust"),
+                "unexpected trust predicate:\n{cypher}"
+            );
+        }
+    }
+
+    #[test]
     fn reach_queries_use_base_label_with_reach_and_depth_attrs() {
         let cases = [
             (StreamReach::Followers, vec![("reach", Str("followers"))]),
@@ -1562,12 +1623,12 @@ mod tests {
             assert_eq!(influencers.label(), "get_influencers_by_reach");
             assert_eq!(influencers.telemetry_attrs(), expected.as_slice());
 
-            let taggers = get_tag_taggers_by_reach("tag", "user", reach.clone(), 0, 10);
+            let taggers = get_tag_taggers_by_reach("tag", "user", reach.clone(), 0, 10, false);
             assert_eq!(taggers.label(), "get_tag_taggers_by_reach");
             assert_eq!(taggers.telemetry_attrs(), expected.as_slice());
 
             let hot_tags_input = HotTagsInputDTO::new(Timeframe::AllTime, 10, 0, 5, None);
-            let hot_tags = get_hot_tags_by_reach("user", reach, &hot_tags_input);
+            let hot_tags = get_hot_tags_by_reach("user", reach, &hot_tags_input, false);
             assert_eq!(hot_tags.label(), "get_hot_tags_by_reach");
             assert_eq!(hot_tags.telemetry_attrs(), expected.as_slice());
         }

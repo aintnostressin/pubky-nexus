@@ -1,5 +1,5 @@
 use super::{
-    stream::{HOT_TAGS_CACHE_PREFIX, POST_HOT_TAGS},
+    stream::{hot_tags_key_parts, ranked_taggers_only, HOT_TAGS_CACHE_PREFIX},
     Taggers as TaggersType,
 };
 use crate::db::{fetch_key_from_graph, kv::RedisResult, queries, GraphResult, RedisOps};
@@ -52,8 +52,12 @@ impl Taggers {
     ///
     /// # Arguments
     /// * `timeframe` - A string representing the timeframe for which to retrieve taggers
-    pub async fn get_from_index(timeframe: &str) -> RedisResult<Option<HotTagsTaggers>> {
-        let key_parts = Self::build_key_parts(timeframe);
+    /// * `ranked_only` - Read the cache variant that counts only ranked taggers
+    pub async fn get_from_index(
+        timeframe: &str,
+        ranked_only: bool,
+    ) -> RedisResult<Option<HotTagsTaggers>> {
+        let key_parts = Self::build_key_parts(timeframe, ranked_only);
         HotTagsTaggers::try_from_index_json(&key_parts, Some(HOT_TAGS_CACHE_PREFIX.into())).await
     }
 
@@ -62,9 +66,14 @@ impl Taggers {
     /// # Arguments
     /// * `taggers` - The collection of taggers to be stored
     /// * `timeframe` - The timeframe for which the taggers are indexed, determining the cache key and expiration period
-    pub async fn put_to_index(taggers: HotTagsTaggers, timeframe: &Timeframe) -> RedisResult<()> {
+    /// * `ranked_only` - Write the cache variant that counts only ranked taggers
+    pub async fn put_to_index(
+        taggers: HotTagsTaggers,
+        timeframe: &Timeframe,
+        ranked_only: bool,
+    ) -> RedisResult<()> {
         let timeframe_str = timeframe.to_string();
-        let key_parts = Self::build_key_parts(&timeframe_str);
+        let key_parts = Self::build_key_parts(&timeframe_str, ranked_only);
 
         // Store the taggers as JSON in cache
         taggers
@@ -85,6 +94,9 @@ impl Taggers {
     /// * `skip` - The number of taggers to skip for pagination
     /// * `limit` - The maximum number of taggers to retrieve
     /// * `timeframe` - The timeframe within which to search for taggers (e.g., Today, ThisMonth, AllTime).
+    ///
+    /// Once a trust ranking exists, only taggers with a positive trust score
+    /// are returned, on both paths.
     pub async fn get_global_taggers(
         label: String,
         user_id: Option<String>,
@@ -93,8 +105,11 @@ impl Taggers {
         limit: usize,
         timeframe: Timeframe,
     ) -> ModelResult<Option<TaggersType>> {
+        let ranked_only = ranked_taggers_only().await;
         let result = match user_id {
-            None => Self::get_from_global_timeline(&label, skip, limit, timeframe).await?,
+            None => {
+                Self::get_from_global_timeline(&label, skip, limit, timeframe, ranked_only).await?
+            }
             Some(id) => {
                 Self::get_tag_taggers_by_reach(
                     &label,
@@ -102,6 +117,7 @@ impl Taggers {
                     reach.unwrap_or(StreamReach::Following),
                     skip,
                     limit,
+                    ranked_only,
                 )
                 .await?
             }
@@ -116,14 +132,16 @@ impl Taggers {
     /// * `skip` - The number of taggers to skip for pagination
     /// * `limit` - The maximum number of taggers to retrieve
     /// * `timeframe` - The timeframe within which to search for taggers (e.g., Today, ThisMonth, AllTime)
+    /// * `ranked_only` - Read the cache variant that counts only ranked taggers
     async fn get_from_global_timeline(
         label: &str,
         skip: usize,
         limit: usize,
         timeframe: Timeframe,
+        ranked_only: bool,
     ) -> RedisResult<Option<TaggersType>> {
         let timeframe_str = timeframe.to_string();
-        let taggers_by_timeframe = Self::get_from_index(&timeframe_str).await?;
+        let taggers_by_timeframe = Self::get_from_index(&timeframe_str, ranked_only).await?;
 
         if let Some(taggers_hash_map) = taggers_by_timeframe {
             if let Some(taggers) = taggers_hash_map.get(label) {
@@ -161,14 +179,17 @@ impl Taggers {
     /// * `reach` - The reach context that determines the visibility of taggers (e.g., followers, following, friends)
     /// * `skip` - The number of taggers to skip for pagination
     /// * `limit` - The maximum number of taggers to retrieve
+    /// * `ranked_only` - Return only taggers with a positive trust score
     async fn get_tag_taggers_by_reach(
         label: &str,
         user_id: &str,
         reach: StreamReach,
         skip: usize,
         limit: usize,
+        ranked_only: bool,
     ) -> GraphResult<Option<TaggersType>> {
-        let query = queries::get::get_tag_taggers_by_reach(label, user_id, reach, skip, limit);
+        let query =
+            queries::get::get_tag_taggers_by_reach(label, user_id, reach, skip, limit, ranked_only);
         fetch_key_from_graph::<TaggersType>(query, "tagger_ids").await
     }
 
@@ -176,7 +197,8 @@ impl Taggers {
     ///
     /// # Arguments
     /// * `timeframe` - A string slice representing the timeframe (e.g., "today", "this_month", "all_time")
-    fn build_key_parts(timeframe: &str) -> Vec<&str> {
-        [&POST_HOT_TAGS[..], &[TAGGERS_INDEX], &[timeframe]].concat()
+    /// * `ranked_only` - Select the cache variant that counts only ranked taggers
+    fn build_key_parts(timeframe: &str, ranked_only: bool) -> Vec<&str> {
+        hot_tags_key_parts(ranked_only, &[TAGGERS_INDEX, timeframe])
     }
 }
