@@ -1134,15 +1134,12 @@ pub fn post_stream(
         );
     }
 
-    // Same population as `get_trust_ranked_user_ids`. After the tags MATCH,
-    // so the tag condition opens that clause's WHERE rather than this one.
+    // The population of `get_trust_ranked_user_ids`. After the tags MATCH, so
+    // the tag condition opens that clause's WHERE rather than this one.
     if ranked_only {
         append_condition(
             &mut cypher,
-            &format!(
-                "author.trust > 0 AND author.name <> '{USER_DELETED_SENTINEL}' \
-                 AND NOT coalesce(author.deleted, false)"
-            ),
+            &format!("author.trust > 0 AND author.name <> '{USER_DELETED_SENTINEL}'"),
             &mut where_clause_applied,
         );
     }
@@ -1576,8 +1573,7 @@ mod tests {
             .unwrap()
             .to_cypher_populated()
         };
-        let predicate = "author.trust > 0 AND author.name <> '[DELETED]' \
-                         AND NOT coalesce(author.deleted, false)";
+        let predicate = "author.trust > 0 AND author.name <> '[DELETED]'";
 
         let ranked = build_all(None, true);
         assert!(
