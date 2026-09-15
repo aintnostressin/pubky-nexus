@@ -42,8 +42,20 @@ pub fn set_hide_unranked_authors(enabled: bool) {
     HIDE_UNRANKED_AUTHORS.store(enabled, Ordering::Relaxed);
 }
 
-fn hide_unranked_authors() -> bool {
-    HIDE_UNRANKED_AUTHORS.load(Ordering::Relaxed)
+/// The authors among `authors` the trust ranking holds, or `None` when
+/// nothing is to be hidden: the filter is off, no ranking exists, or Redis
+/// failed (logged; the filter fails open). With no authors it answers
+/// whether the filter applies at all.
+async fn ranked_authors(authors: Vec<String>) -> Option<HashSet<String>> {
+    if !HIDE_UNRANKED_AUTHORS.load(Ordering::Relaxed) {
+        return None;
+    }
+    SocialGraphStatus::ranked_among(&authors)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Trust ranking unavailable, serving source=all unfiltered: {e}");
+            None
+        })
 }
 
 /// Smallest window read per round, so a `limit=1` request still scans enough
@@ -503,7 +515,8 @@ impl PostStream {
         kind: Option<KindFilter>,
     ) -> GraphResult<PostKeyStream> {
         let graph = get_neo4j_graph()?;
-        let ranked_only = matches!(source, StreamSource::All) && Self::trust_filter_active().await;
+        let ranked_only =
+            matches!(source, StreamSource::All) && ranked_authors(Vec::new()).await.is_some();
         let query =
             queries::get::post_stream(source, sorting, order, tags, pagination, kind, ranked_only)?;
 
@@ -536,38 +549,33 @@ impl PostStream {
         .map_err(|_| GraphError::QueryTimeout)?
     }
 
-    /// Whether `source=all` hides unranked authors right now: the switch is on
-    /// and a ranking exists. A Redis error serves the stream unfiltered.
-    async fn trust_filter_active() -> bool {
-        hide_unranked_authors()
-            && SocialGraphStatus::is_built().await.unwrap_or_else(|e| {
-                warn!("Trust ranking unavailable, serving source=all unfiltered: {e}");
-                false
-            })
-    }
-
-    /// One page of a `source=all` sorted set with unranked authors hidden (see
-    /// [`fill_ranked_page`]), or the raw window when the switch is off. A
-    /// Redis error on the rank lookup serves the window whole.
-    async fn ranked_page<F, FFut>(skip: usize, limit: usize, fetch: F) -> RedisResult<PostKeyStream>
-    where
-        F: Fn(usize, usize) -> FFut,
-        FFut: Future<Output = RedisResult<Vec<(String, f64)>>>,
-    {
-        if !hide_unranked_authors() {
-            return Ok(PostKeyStream::from_scored_entries(
-                fetch(skip, limit).await?,
-            ));
-        }
-        fill_ranked_page(skip, limit, fetch, |authors| async move {
-            SocialGraphStatus::ranked_among(&authors)
-                .await
-                .unwrap_or_else(|e| {
-                    warn!("Trust ranking unavailable, serving source=all unfiltered: {e}");
-                    None
-                })
-        })
-        .await
+    /// One page of a `source=all` sorted set with unranked authors hidden
+    /// (see [`fill_ranked_page`]).
+    async fn ranked_index_page(
+        key_parts: &[&str],
+        order: SortOrder,
+        start: Option<f64>,
+        end: Option<f64>,
+        skip: usize,
+        limit: usize,
+    ) -> RedisResult<PostKeyStream> {
+        let fetch = |skip, limit| {
+            let order = order.clone();
+            async move {
+                Ok(Self::try_from_index_sorted_set(
+                    key_parts,
+                    start,
+                    end,
+                    Some(skip),
+                    Some(limit),
+                    order,
+                    None,
+                )
+                .await?
+                .unwrap_or_default())
+            }
+        };
+        fill_ranked_page(skip, limit, fetch, ranked_authors).await
     }
 
     pub async fn get_global_posts_keys(
@@ -584,25 +592,10 @@ impl PostStream {
         };
         // Matches the sorted-set read's own defaults when none are given.
         let (skip, limit) = (skip.unwrap_or(0), limit.unwrap_or(1000));
-        Self::ranked_page(skip, limit, |skip, limit| {
-            let order = order.clone();
-            async move {
-                Ok(Self::try_from_index_sorted_set(
-                    key_parts,
-                    start,
-                    end,
-                    Some(skip),
-                    Some(limit),
-                    order,
-                    None,
-                )
-                .await?
-                .unwrap_or_default())
-            }
-        })
-        .await
+        Self::ranked_index_page(key_parts, order, start, end, skip, limit).await
     }
 
+    /// The tag index is newest first whatever the requested order.
     pub async fn get_posts_keys_by_tag(
         label: &str,
         sorting: StreamSorting,
@@ -611,27 +604,9 @@ impl PostStream {
         skip: Option<usize>,
         limit: Option<usize>,
     ) -> RedisResult<PostKeyStream> {
+        let key_parts = PostsByTagSearch::index_key_parts(label, Some(sorting));
         let (skip, limit) = (skip.unwrap_or(0), limit.unwrap_or(10));
-        Self::ranked_page(skip, limit, |skip, limit| {
-            let sorting = sorting.clone();
-            async move {
-                let pagination = Pagination {
-                    start,
-                    end,
-                    skip: Some(skip),
-                    limit: Some(limit),
-                };
-                Ok(
-                    PostsByTagSearch::get_by_label(label, Some(sorting), pagination)
-                        .await?
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|entry| (entry.post_key, entry.score as f64))
-                        .collect(),
-                )
-            }
-        })
-        .await
+        Self::ranked_index_page(&key_parts, SortOrder::Descending, start, end, skip, limit).await
     }
 
     pub async fn get_author_posts(
@@ -1268,6 +1243,36 @@ mod tests {
         let mut seen = HashSet::new();
         assert!(page.post_keys.iter().all(|key| seen.insert(key)));
         assert_eq!(page.post_keys.len(), 25);
+    }
+
+    // A page that fills exactly at the window boundary reads nothing more.
+    #[tokio::test]
+    async fn a_page_filled_at_the_window_boundary_reads_one_window() {
+        let stream: Vec<(String, f64)> = (0..40)
+            .map(|i| (format!("{RANKED}:p{i}"), 40.0 - i as f64))
+            .collect();
+        let offsets = RefCell::new(Vec::new());
+
+        let page = fill_ranked_page(0, 20, windows_of(&stream, &offsets), ranked_lookup)
+            .await
+            .unwrap();
+
+        assert_eq!(page.post_keys.len(), 20);
+        assert_eq!(page.last_post_score, Some(40 - 19));
+        assert_eq!(*offsets.borrow(), vec![0]);
+    }
+
+    // A key without a separator names no ranked author, so it is hidden.
+    #[tokio::test]
+    async fn a_malformed_key_is_hidden_when_a_ranking_exists() {
+        let stream = vec![("nocolon".to_string(), 2.0), (format!("{RANKED}:p1"), 1.0)];
+        let offsets = RefCell::new(Vec::new());
+
+        let page = fill_ranked_page(0, 10, windows_of(&stream, &offsets), ranked_lookup)
+            .await
+            .unwrap();
+
+        assert_eq!(page.post_keys, vec![format!("{RANKED}:p1")]);
     }
 
     #[test]

@@ -55,38 +55,30 @@ impl PostsByTagSearch {
         Ok(())
     }
 
+    /// Key parts of the per-label index for `sort_by` (timeline by default).
+    pub fn index_key_parts(label: &str, sort_by: Option<StreamSorting>) -> Vec<&str> {
+        let prefix = match sort_by {
+            Some(StreamSorting::TotalEngagement) => &TAG_GLOBAL_POST_ENGAGEMENT[..],
+            _ => &TAG_GLOBAL_POST_TIMELINE[..],
+        };
+        [prefix, &[label]].concat()
+    }
+
     pub async fn get_by_label(
         label: &str,
         sort_by: Option<StreamSorting>,
         pagination: Pagination,
     ) -> RedisResult<Option<Vec<PostsByTagSearch>>> {
-        let post_score_list = match sort_by {
-            Some(StreamSorting::TotalEngagement) => {
-                Self::try_from_index_sorted_set(
-                    &[&TAG_GLOBAL_POST_ENGAGEMENT[..], &[label]].concat(),
-                    pagination.start,
-                    pagination.end,
-                    pagination.skip,
-                    pagination.limit,
-                    SortOrder::Descending,
-                    None,
-                )
-                .await?
-            }
-            // Default case always: SortBy::Timeline
-            _ => {
-                Self::try_from_index_sorted_set(
-                    &[&TAG_GLOBAL_POST_TIMELINE[..], &[label]].concat(),
-                    pagination.start,
-                    pagination.end,
-                    pagination.skip,
-                    pagination.limit,
-                    SortOrder::Descending,
-                    None,
-                )
-                .await?
-            }
-        };
+        let post_score_list = Self::try_from_index_sorted_set(
+            &Self::index_key_parts(label, sort_by),
+            pagination.start,
+            pagination.end,
+            pagination.skip,
+            pagination.limit,
+            SortOrder::Descending,
+            None,
+        )
+        .await?;
 
         match post_score_list {
             Some(list) => Ok(Some(list.into_iter().map(|t| t.into()).collect())),

@@ -23,7 +23,7 @@ use serde_json::Value;
 use std::panic::{resume_unwind, AssertUnwindSafe};
 
 use super::utils::ids_in;
-use super::{KEYS_ROOT_PATH, ROOT_PATH};
+use super::{KEYS_ROOT_PATH, ROOT_PATH, TAG_LABEL_1};
 
 const WOT_D1: &str = "qjftuwjog819ki1wktuy5tndebce36bmxxwtjjm3z1fr97jk9yuo";
 const WOT_D2: &str = "smf4xrqfhx7stnufkjzhbjyu3rbgb3gga64srqmzcyyoyzefse9y";
@@ -49,6 +49,13 @@ async fn posts(start: u64, query: &str) -> Result<Value> {
 
 async fn keys(start: u64, query: &str) -> Result<Value> {
     Ok(get_request(&format!("{KEYS_ROOT_PATH}?{WINDOW}&start={start}&{query}")).await?)
+}
+
+/// The head of a `source=all` index that is not bounded by timestamps.
+async fn head_keys(query: &str) -> Result<Vec<String>> {
+    Ok(post_keys_in(
+        &get_request(&format!("{KEYS_ROOT_PATH}?source=all&limit=50&{query}")).await?,
+    ))
 }
 
 fn author_of(post_key: &str) -> &str {
@@ -88,6 +95,10 @@ async fn test_all_hides_posts_by_unranked_authors() -> Result<()> {
     TestServiceServer::get_test_server().await;
 
     let outcome = AssertUnwindSafe(async {
+        // The other two sorted-set indexes, unfiltered (the server default).
+        let engagement_head = head_keys("sorting=total_engagement").await?;
+        let tag_head = head_keys(&format!("tags={TAG_LABEL_1}")).await?;
+
         set_hide_unranked_authors(true);
 
         // Redis path, Cypher fallback (`kind=`), keys route.
@@ -131,6 +142,31 @@ async fn test_all_hides_posts_by_unranked_authors() -> Result<()> {
             end["last_post_score"].is_null(),
             "end of stream has no cursor: {end}"
         );
+
+        // The engagement and single-tag indexes go through the same filter:
+        // their heads are mostly unranked fixture users.
+        for (path, query, unfiltered) in [
+            (
+                "engagement",
+                "sorting=total_engagement".to_string(),
+                engagement_head,
+            ),
+            ("tag", format!("tags={TAG_LABEL_1}"), tag_head),
+        ] {
+            let filtered = head_keys(&query).await?;
+            let unranked: Vec<&String> = filtered
+                .iter()
+                .filter(|key| !RANKED.contains(&author_of(key)))
+                .collect();
+            assert!(
+                unranked.is_empty(),
+                "{path}: unranked authors served: {unranked:?}"
+            );
+            assert!(
+                filtered.len() < unfiltered.len(),
+                "{path}: the filter hides some of the unfiltered head"
+            );
+        }
 
         // No ranking: nothing is hidden, on either path.
         let ranking_key = format!("Sorted:{}", USER_SOCIAL_GRAPH_KEY_PARTS.join(":"));

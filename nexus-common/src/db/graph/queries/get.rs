@@ -1553,10 +1553,10 @@ mod tests {
 
     #[test]
     fn post_stream_hides_unranked_authors_only_when_asked() {
-        let build_all = |tags: Option<Vec<String>>, ranked_only: bool| {
+        let build_all = |sorting: StreamSorting, tags: Option<Vec<String>>, ranked_only: bool| {
             post_stream(
                 StreamSource::All,
-                StreamSorting::Timeline,
+                sorting,
                 SortOrder::Descending,
                 &tags,
                 Pagination {
@@ -1569,28 +1569,34 @@ mod tests {
             .unwrap()
             .to_cypher_populated()
         };
-        let predicate = "author.trust > 0";
 
-        let ranked = build_all(None, true);
-        assert!(
-            ranked.contains(&format!("WHERE {predicate}")),
-            "ranked_only keeps the ranking's population:\n{ranked}"
-        );
+        // On either sorting the predicate sits with the post conditions,
+        // ahead of the parents-only check.
+        for sorting in [StreamSorting::Timeline, StreamSorting::TotalEngagement] {
+            let ranked = build_all(sorting.clone(), None, true);
+            assert!(
+                ranked.contains("WHERE author.trust > 0\nAND NOT ( (p)-[:REPLIED]->(:Post) )"),
+                "{sorting:?}: ranked_only filters on the author's trust:\n{ranked}"
+            );
+            let unranked = build_all(sorting, None, false);
+            assert!(
+                !unranked.contains("author.trust"),
+                "without ranked_only no trust predicate is emitted:\n{unranked}"
+            );
+        }
 
         // With tags the predicate must follow the tags MATCH, or it would
         // leave that clause opening with AND.
-        let tagged = build_all(Some(vec!["a".into(), "b".into()]), true);
-        assert!(
-            tagged.contains(&format!(
-                "MATCH (:User)-[tag:TAGGED]->(p)\nWHERE tag.label IN ['a', 'b']\nAND {predicate}"
-            )),
-            "the trust predicate follows the tag condition:\n{tagged}"
+        let tagged = build_all(
+            StreamSorting::Timeline,
+            Some(vec!["a".into(), "b".into()]),
+            true,
         );
-
-        let unranked = build_all(None, false);
         assert!(
-            !unranked.contains("author.trust"),
-            "without ranked_only no trust predicate is emitted:\n{unranked}"
+            tagged.contains(
+                "MATCH (:User)-[tag:TAGGED]->(p)\nWHERE tag.label IN ['a', 'b']\nAND author.trust > 0"
+            ),
+            "the trust predicate follows the tag condition:\n{tagged}"
         );
     }
 
