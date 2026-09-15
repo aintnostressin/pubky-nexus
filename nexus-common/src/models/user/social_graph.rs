@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -62,41 +60,14 @@ impl SocialGraphStatus {
         Ok(Self::classify(population, &ranks))
     }
 
-    /// The subset of `user_ids` present in the ranking, or `None` when no
-    /// ranking exists (the recompute job never ran, or found nobody with
-    /// trust). Callers use `None` to serve everyone rather than nobody: an
-    /// unbuilt ranking says nothing about any user. With no ids this still
-    /// tells whether a ranking exists.
-    ///
-    /// One round trip, and the size is read with the ranks so a rebuild landing
-    /// mid-read cannot pair an empty set's `None` slots with a live population.
-    pub async fn ranked_among<T: AsRef<str>>(
-        user_ids: &[T],
-    ) -> RedisResult<Option<HashSet<String>>> {
-        let members: Vec<&str> = user_ids.iter().map(|id| id.as_ref()).collect();
-        let (population, ranks) =
-            Self::index_sorted_set_card_and_members(&USER_SOCIAL_GRAPH_KEY_PARTS, &members, None)
+    /// Whether a ranking has been built. `false` when the recompute job never
+    /// ran, which is production's state with an empty seed set, and after a
+    /// rebuild that found nobody with trust (that drops the key).
+    pub async fn is_built() -> RedisResult<bool> {
+        let (population, _) =
+            Self::index_sorted_set_card_and_members(&USER_SOCIAL_GRAPH_KEY_PARTS, &[], None)
                 .await?;
-        Ok(Self::ranked_subset(population, &members, &ranks))
-    }
-
-    /// The members holding a rank, or `None` when the ranking is unbuilt.
-    fn ranked_subset(
-        population: usize,
-        members: &[&str],
-        ranks: &[Option<isize>],
-    ) -> Option<HashSet<String>> {
-        if population == 0 {
-            return None;
-        }
-        Some(
-            members
-                .iter()
-                .zip(ranks)
-                .filter(|(_, rank)| rank.is_some())
-                .map(|(member, _)| member.to_string())
-                .collect(),
-        )
+        Ok(population > 0)
     }
 
     /// Reads one user's status.
@@ -228,34 +199,6 @@ mod tests {
         let statuses = SocialGraphStatus::classify(0, &[Some(1), None, Some(9)]);
 
         assert_eq!(statuses, vec![None, None, None]);
-    }
-
-    #[test]
-    fn an_unbuilt_ranking_ranks_nobody() {
-        assert_eq!(
-            SocialGraphStatus::ranked_subset(0, &["a", "b"], &[Some(1), None]),
-            None
-        );
-    }
-
-    #[test]
-    fn a_built_ranking_keeps_the_members_with_a_rank() {
-        let ranked =
-            SocialGraphStatus::ranked_subset(3, &["a", "b", "c"], &[Some(1), None, Some(3)]);
-
-        assert_eq!(
-            ranked,
-            Some(HashSet::from(["a".to_string(), "c".to_string()]))
-        );
-    }
-
-    // Asked about nobody, a built ranking still answers that it exists.
-    #[test]
-    fn an_empty_lookup_tells_whether_a_ranking_exists() {
-        assert_eq!(
-            SocialGraphStatus::ranked_subset(3, &[], &[]),
-            Some(HashSet::new())
-        );
     }
 
     // Absent from a built ranking means unreachable from the seeds, or created

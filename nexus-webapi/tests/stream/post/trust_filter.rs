@@ -27,8 +27,8 @@ const D2_POST: &str = "WOTPOSTD20004";
 /// The wot fixture window, newest first: `start` is the upper bound.
 const WINDOW: &str = "source=all&sorting=timeline&end=1650000000001";
 const WINDOW_START: u64 = 1650000000014;
-/// The oldest post in the window, by the unranked observer.
-const OLDEST_SCORE: u64 = 1650000000001;
+/// The oldest ranked post in the window.
+const D1_POST_SCORE: u64 = 1650000000002;
 
 async fn posts(start: u64, query: &str) -> Result<Value> {
     Ok(get_request(&format!("{ROOT_PATH}?{WINDOW}&start={start}&{query}")).await?)
@@ -83,22 +83,21 @@ async fn test_all_hides_posts_by_unranked_authors() -> Result<()> {
         unranked.is_empty(),
         "keys: unranked authors served: {unranked:?}"
     );
-    // The cursor is the last entry examined, hidden or not.
-    assert_eq!(page["last_post_score"], Value::from(OLDEST_SCORE));
+    assert_eq!(page["last_post_score"], Value::from(D1_POST_SCORE));
 
     Ok(())
 }
 
-/// A full page past hidden entries, a disjoint next page by score cursor,
-/// then the end of the stream (no cursor).
+/// A full page of ranked posts, a disjoint next page by score cursor, then
+/// the end of the stream (no cursor).
 #[tokio_shared_rt::test(shared)]
-async fn test_all_fills_pages_and_pages_by_score() -> Result<()> {
+async fn test_all_pages_by_score() -> Result<()> {
     let first = keys(WINDOW_START, "limit=2").await?;
     let first_keys = post_keys_in(&first);
     assert_eq!(
         first_keys.len(),
         2,
-        "the page is filled past hidden entries"
+        "a page is full while ranked posts remain"
     );
 
     let cursor = first["last_post_score"].as_u64().expect("cursor");
