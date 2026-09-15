@@ -5,10 +5,8 @@ use crate::db::kv::{RedisResult, ScoreAction, SortOrder};
 use crate::db::{get_neo4j_graph, queries, GraphError, GraphResult, RedisOps};
 use crate::models::error::ModelError;
 use crate::models::error::ModelResult;
-use crate::models::{
-    follow::{Followers, Following, Friends, UserFollows},
-    post::search::PostsByTagSearch,
-};
+use crate::models::follow::{Followers, Following, Friends, UserFollows};
+use crate::models::user::SocialGraphStatus;
 use crate::types::{DomainTrust, Pagination, StreamSorting, WotDepth};
 use futures::stream::{self, StreamExt};
 use futures::TryStreamExt;
@@ -258,7 +256,7 @@ impl PostStream {
 
         let started = std::time::Instant::now();
         let result: ModelResult<PostKeyStream> = match use_index {
-            true => Self::get_from_index(source, sorting, order, &tags, pagination).await,
+            true => Self::get_from_index(source, order, &tags, pagination).await,
             false => Self::get_from_graph(source, sorting, order, &tags, pagination, kind)
                 .await
                 .map_err(Into::into),
@@ -291,10 +289,9 @@ impl PostStream {
         match (sorting, source, tags) {
             // We have a sorted set for posts by a specific author
             (StreamSorting::Timeline, StreamSource::Author { .. }, None) => true,
-            // We have a sorted set for global for any sorting
-            (_, StreamSource::All, None) => true,
-            // We have a sorted set for posts by tags for any sorting for a single tag
-            (_, StreamSource::All, Some(tags)) if tags.len() == 1 => true,
+            // `All` always queries the graph: the trust filter is a predicate
+            // there, and the Redis sets carry no trust information.
+            (_, StreamSource::All, _) => false,
             // We can use sorted set for posts by source only for timeline
             (StreamSorting::Timeline, StreamSource::Following { .. }, None) => true,
             (StreamSorting::Timeline, StreamSource::Followers { .. }, None) => true,
@@ -313,7 +310,6 @@ impl PostStream {
     // Fetch posts from index
     async fn get_from_index(
         source: StreamSource,
-        sorting: StreamSorting,
         order: SortOrder,
         tags: &Option<Vec<String>>,
         pagination: Pagination,
@@ -324,14 +320,6 @@ impl PostStream {
         let limit = pagination.limit;
 
         let result = match (source, tags) {
-            // Global post streams
-            (StreamSource::All, None) => {
-                Self::get_global_posts_keys(sorting, order, start, end, skip, limit).await?
-            }
-            // Streams by tags
-            (StreamSource::All, Some(tags)) if tags.len() == 1 => {
-                Self::get_posts_keys_by_tag(&tags[0], sorting, start, end, skip, limit).await?
-            }
             // Bookmark streams
             (StreamSource::Bookmarks { observer_id }, None) => {
                 Self::get_bookmarked_posts(&observer_id, order, start, end, skip, limit).await?
@@ -408,7 +396,9 @@ impl PostStream {
         kind: Option<KindFilter>,
     ) -> GraphResult<PostKeyStream> {
         let graph = get_neo4j_graph()?;
-        let query = queries::get::post_stream(source, sorting, order, tags, pagination, kind)?;
+        let ranked_only = matches!(source, StreamSource::All) && Self::trust_filter_active().await;
+        let query =
+            queries::get::post_stream(source, sorting, order, tags, pagination, kind, ranked_only)?;
 
         // The 10-second budget covers execution AND row streaming: execute()
         // only submits the query and the heavy work (ORDER BY materializes at
@@ -439,79 +429,13 @@ impl PostStream {
         .map_err(|_| GraphError::QueryTimeout)?
     }
 
-    pub async fn get_global_posts_keys(
-        sorting: StreamSorting,
-        order: SortOrder,
-        start: Option<f64>,
-        end: Option<f64>,
-        skip: Option<usize>,
-        limit: Option<usize>,
-    ) -> RedisResult<PostKeyStream> {
-        let sorted_set = match sorting {
-            StreamSorting::TotalEngagement => {
-                Self::try_from_index_sorted_set(
-                    &POST_TOTAL_ENGAGEMENT_KEY_PARTS,
-                    start,
-                    end,
-                    skip,
-                    limit,
-                    order,
-                    None,
-                )
-                .await?
-            }
-            StreamSorting::Timeline => {
-                Self::try_from_index_sorted_set(
-                    &POST_TIMELINE_KEY_PARTS,
-                    start,
-                    end,
-                    skip,
-                    limit,
-                    order,
-                    None,
-                )
-                .await?
-            }
-        };
-        Ok(PostKeyStream::from_scored_entries(
-            sorted_set.unwrap_or_default(),
-        ))
-    }
-
-    pub async fn get_posts_keys_by_tag(
-        label: &str,
-        sorting: StreamSorting,
-        start: Option<f64>,
-        end: Option<f64>,
-        skip: Option<usize>,
-        limit: Option<usize>,
-    ) -> RedisResult<PostKeyStream> {
-        let skip = skip.unwrap_or(0);
-        let limit = limit.unwrap_or(10);
-
-        let pag = Pagination {
-            start,
-            end,
-            skip: Some(skip),
-            limit: Some(limit),
-        };
-
-        let post_search_result = PostsByTagSearch::get_by_label(label, Some(sorting), pag).await?;
-
-        let stream = match post_search_result {
-            Some(post_keys) => {
-                // Iterate over PostsByTagSearch structs to extract post keys and capture the last score
-                let last_post_score = post_keys.last().map(|entry| entry.score as u64);
-                let post_keys = post_keys
-                    .into_iter()
-                    .map(|post_score| post_score.post_key)
-                    .collect();
-                PostKeyStream::new(post_keys, last_post_score)
-            }
-            None => PostKeyStream::default(),
-        };
-
-        Ok(stream)
+    /// Whether `source=all` hides unranked authors: a ranking exists. A Redis
+    /// error serves the stream unfiltered.
+    async fn trust_filter_active() -> bool {
+        SocialGraphStatus::is_built().await.unwrap_or_else(|e| {
+            warn!("Trust ranking unavailable, serving source=all unfiltered: {e}");
+            false
+        })
     }
 
     pub async fn get_author_posts(
@@ -918,8 +842,12 @@ mod tests {
 
         // Combinations that would normally return `true` when kind is None.
         let index_eligible_combos = [
-            (StreamSorting::Timeline, StreamSource::All),
-            (StreamSorting::TotalEngagement, StreamSource::All),
+            (
+                StreamSorting::Timeline,
+                StreamSource::Following {
+                    observer_id: "observer".to_string(),
+                },
+            ),
             (
                 StreamSorting::Timeline,
                 StreamSource::Author {
@@ -959,9 +887,30 @@ mod tests {
     fn test_can_use_index_returns_true_for_no_kind_filter() {
         assert!(PostStream::can_use_index(
             &StreamSorting::Timeline,
-            &StreamSource::All,
+            &StreamSource::Author {
+                author_id: "author".to_string(),
+            },
             &None,
             &None,
         ));
+    }
+
+    /// `All` always queries the graph, where the trust predicate lives.
+    #[test]
+    fn test_can_use_index_is_false_for_all() {
+        for sorting in [StreamSorting::Timeline, StreamSorting::TotalEngagement] {
+            assert!(!PostStream::can_use_index(
+                &sorting,
+                &StreamSource::All,
+                &None,
+                &None
+            ));
+            assert!(!PostStream::can_use_index(
+                &sorting,
+                &StreamSource::All,
+                &Some(vec!["tag".to_string()]),
+                &None,
+            ));
+        }
     }
 }
