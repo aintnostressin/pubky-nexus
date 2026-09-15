@@ -116,10 +116,6 @@ cron = "0 * * * * *"  # every minute at second 0
 - The `nexusd run` daemon validates all `[jobs.*]` sections at startup — a typo'd section name fails fast rather than being silently ignored.
 - Running a job on demand with `nexusd jobs run` also validates the config, so a typo'd `[jobs.<name>]` section is caught regardless of how you invoke it.
 
-### Trust ranking and the global feed
-
-The `trust-recompute` job (parameters under `[trust_rank]`, seeds required) ranks users by seeded PageRank over the follow graph. Once a ranking exists, `source=all` post streams and the bootstrap timeline hide posts by authors absent from it; a page may come back shorter than `limit`, and clients should page with `start` = `last_post_score` from `/v0/stream/posts/keys` and `skip=1`. Without a ranking every post is served.
-
 ## 📈 Observability
 
 Nexus exports telemetry over OTLP. For local development, use either the bundled observability stack or a separately installed SigNoz instance.
