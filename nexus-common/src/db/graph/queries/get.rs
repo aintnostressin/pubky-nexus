@@ -1039,10 +1039,10 @@ pub fn get_files_by_ids(key_pair: &[&[&str]]) -> Query {
 // Build the graph query based on parameters
 /// Builds the Cypher fallback for a post stream.
 ///
-/// `ranked_only` keeps only authors the trust ranking holds, with the same
-/// predicate as `get_trust_ranked_user_ids`. A never-computed ranking leaves
-/// `trust` null on every user and would then hide every post: callers pass
-/// `true` only after checking that a ranking exists.
+/// `ranked_only` keeps only authors with a positive trust score. A
+/// never-computed ranking leaves `trust` null on every user and would then
+/// hide every post: callers pass `true` only after checking that a ranking
+/// exists.
 pub fn post_stream(
     source: StreamSource,
     sorting: StreamSorting,
@@ -1134,14 +1134,10 @@ pub fn post_stream(
         );
     }
 
-    // The population of `get_trust_ranked_user_ids`. After the tags MATCH, so
-    // the tag condition opens that clause's WHERE rather than this one.
+    // After the tags MATCH, so the tag condition opens that clause's WHERE
+    // rather than this one.
     if ranked_only {
-        append_condition(
-            &mut cypher,
-            &format!("author.trust > 0 AND author.name <> '{USER_DELETED_SENTINEL}'"),
-            &mut where_clause_applied,
-        );
+        append_condition(&mut cypher, "author.trust > 0", &mut where_clause_applied);
     }
 
     // If source has an author, add where clause. It is related with source pattern matching
@@ -1573,7 +1569,7 @@ mod tests {
             .unwrap()
             .to_cypher_populated()
         };
-        let predicate = "author.trust > 0 AND author.name <> '[DELETED]'";
+        let predicate = "author.trust > 0";
 
         let ranked = build_all(None, true);
         assert!(
