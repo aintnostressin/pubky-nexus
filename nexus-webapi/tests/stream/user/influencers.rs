@@ -359,19 +359,23 @@ async fn test_global_influencers_rejects_skip_past_cache() -> Result<()> {
 /// An in-range skip past the last cached entry is an empty page, not a cache miss. A miss
 /// would refetch from the graph and rewrite the key, which re-arms its TTL; so after the
 /// TTL is pinned low, an empty-window read must leave it low.
+///
+/// `this_month` on purpose: `db mock` warms that cache, so the key exists for the whole
+/// run and every read is a hit. `today` is cold, and a sibling's concurrent first read
+/// would miss and re-arm the TTL between the pin and the check.
 #[tokio_shared_rt::test(shared)]
 async fn test_global_influencers_skip_to_cache_end_is_empty_page() -> Result<()> {
     // Ensure the server is running, so the Redis pool is initialized
     TestServiceServer::get_test_server().await;
     let mut redis_conn = get_redis_conn().await?;
-    let key = "Cache:Influencers:Today";
+    let key = "Cache:Influencers:ThisMonth";
 
-    // Warm the cache so the key exists, then pin its TTL well below the 1h cache period.
-    get_request("/v0/stream/users?source=influencers&timeframe=today&limit=1").await?;
+    // Pin the TTL well below the 24h cache period.
     let pinned_ttl = 600;
     let _: () = redis_conn.expire(key, pinned_ttl).await?;
 
-    let body = get_request("/v0/stream/users?source=influencers&timeframe=today&skip=100").await?;
+    let body =
+        get_request("/v0/stream/users?source=influencers&timeframe=this_month&skip=100").await?;
     assert_eq!(
         body.as_array().map(Vec::len),
         Some(0),
