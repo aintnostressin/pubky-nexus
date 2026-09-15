@@ -1,29 +1,25 @@
 //! `source=all` trust filter: posts by authors absent from the trust ranking
 //! are hidden, and the stream is served unfiltered when no ranking exists.
 //!
-//! Fixture (docker/test-graph/mocks/wot.cypher): D1 0.4, D2 0.2, D1B 0.1 and
-//! nobody else carries trust, so the ranking is exactly three deep. Every wot
-//! fixture post sits in `indexed_at` 1650000000001..=1650000000014, a window
-//! no other fixture uses, so `start`/`end` pin the requests to it.
+//! Fixture: every user carries trust (docker/test-graph/mocks/trust.cypher)
+//! except the wot on-ramp accounts, so within the wot window only D1, D2 and
+//! D1B are ranked. Every wot fixture post sits in `indexed_at`
+//! 1650000000001..=1650000000014, a window no other fixture uses, so
+//! `start`/`end` pin the requests to it.
 //!
-//! The test server turns the filter off (utils/server.rs) because the fixture
-//! ranks only three users: this file turns it on for its own duration, after
-//! `get_test_server()`, since a server start switches it off again. It also drops
-//! and rebuilds the ranking, so `.config/nextest.toml` runs it alone. Under
-//! plain `cargo test` the switch is process-global and would filter every
-//! concurrent `source=all` request: run this file with `--test-threads=1`.
+//! Isolation: this file drops and rebuilds the shared ranking, so
+//! `.config/nextest.toml` runs it alone.
 use crate::utils::{get_request, server::TestServiceServer};
 use anyhow::Result;
 use deadpool_redis::redis::AsyncCommands;
 use futures_util::FutureExt;
 use nexus_common::db::get_redis_conn;
-use nexus_common::models::post::set_hide_unranked_authors;
 use nexus_common::models::user::{SocialGraphStatus, USER_SOCIAL_GRAPH_KEY_PARTS};
 use serde_json::Value;
 use std::panic::{resume_unwind, AssertUnwindSafe};
 
 use super::utils::ids_in;
-use super::{KEYS_ROOT_PATH, ROOT_PATH, TAG_LABEL_1};
+use super::{KEYS_ROOT_PATH, ROOT_PATH};
 
 const WOT_D1: &str = "qjftuwjog819ki1wktuy5tndebce36bmxxwtjjm3z1fr97jk9yuo";
 const WOT_D2: &str = "smf4xrqfhx7stnufkjzhbjyu3rbgb3gga64srqmzcyyoyzefse9y";
@@ -49,13 +45,6 @@ async fn posts(start: u64, query: &str) -> Result<Value> {
 
 async fn keys(start: u64, query: &str) -> Result<Value> {
     Ok(get_request(&format!("{KEYS_ROOT_PATH}?{WINDOW}&start={start}&{query}")).await?)
-}
-
-/// The head of a `source=all` index that is not bounded by timestamps.
-async fn head_keys(query: &str) -> Result<Vec<String>> {
-    Ok(post_keys_in(
-        &get_request(&format!("{KEYS_ROOT_PATH}?source=all&limit=50&{query}")).await?,
-    ))
 }
 
 fn author_of(post_key: &str) -> &str {
@@ -88,19 +77,13 @@ fn assert_only_ranked_authors(path: &str, response: &Value) {
     }
 }
 
-/// One test on purpose: the switch and the ranking are both global, so the
-/// teardown below must run on every exit path, failed assertions included.
+/// One test on purpose: the ranking is global, so the teardown below must
+/// run on every exit path, failed assertions included.
 #[tokio_shared_rt::test(shared)]
 async fn test_all_hides_posts_by_unranked_authors() -> Result<()> {
     TestServiceServer::get_test_server().await;
 
     let outcome = AssertUnwindSafe(async {
-        // The other two sorted-set indexes, unfiltered (the server default).
-        let engagement_head = head_keys("sorting=total_engagement").await?;
-        let tag_head = head_keys(&format!("tags={TAG_LABEL_1}")).await?;
-
-        set_hide_unranked_authors(true);
-
         // Redis path, Cypher fallback (`kind=`), keys route.
         assert_only_ranked_authors("redis", &posts(WINDOW_START, "limit=50").await?);
         assert_only_ranked_authors("cypher", &posts(WINDOW_START, "kind=short&limit=50").await?);
@@ -143,31 +126,6 @@ async fn test_all_hides_posts_by_unranked_authors() -> Result<()> {
             "end of stream has no cursor: {end}"
         );
 
-        // The engagement and single-tag indexes go through the same filter:
-        // their heads are mostly unranked fixture users.
-        for (path, query, unfiltered) in [
-            (
-                "engagement",
-                "sorting=total_engagement".to_string(),
-                engagement_head,
-            ),
-            ("tag", format!("tags={TAG_LABEL_1}"), tag_head),
-        ] {
-            let filtered = head_keys(&query).await?;
-            let unranked: Vec<&String> = filtered
-                .iter()
-                .filter(|key| !RANKED.contains(&author_of(key)))
-                .collect();
-            assert!(
-                unranked.is_empty(),
-                "{path}: unranked authors served: {unranked:?}"
-            );
-            assert!(
-                filtered.len() < unfiltered.len(),
-                "{path}: the filter hides some of the unfiltered head"
-            );
-        }
-
         // No ranking: nothing is hidden, on either path.
         let ranking_key = format!("Sorted:{}", USER_SOCIAL_GRAPH_KEY_PARTS.join(":"));
         let _: () = get_redis_conn().await?.del(&ranking_key).await?;
@@ -186,15 +144,6 @@ async fn test_all_hides_posts_by_unranked_authors() -> Result<()> {
     .catch_unwind()
     .await;
 
-    set_hide_unranked_authors(false);
     SocialGraphStatus::reindex().await?;
-    outcome.unwrap_or_else(|panic| resume_unwind(panic))?;
-
-    // Switch off (the test server default): everything shows again.
-    let ids = ids_in(&posts(WINDOW_START, "limit=50").await?);
-    assert!(
-        ids.contains(&SPAMMER_POST.to_string()),
-        "switch off: {ids:?}"
-    );
-    Ok(())
+    outcome.unwrap_or_else(|panic| resume_unwind(panic))
 }

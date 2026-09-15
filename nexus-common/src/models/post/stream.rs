@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::{Bookmark, PostCounts, PostDetails, PostView};
@@ -30,26 +29,10 @@ pub const POST_REPLIES_PER_USER_KEY_PARTS: [&str; 2] = ["Posts", "AuthorReplies"
 pub const POST_REPLIES_PER_POST_KEY_PARTS: [&str; 2] = ["Posts", "PostReplies"];
 const BOOKMARKS_USER_KEY_PARTS: [&str; 2] = ["Bookmarks", "User"];
 
-/// Whether `source=all` hides posts by authors absent from the trust ranking.
-/// Always on in production; it has no effect until a ranking exists. Tests and
-/// benches turn it off because the shared fixture ranks only three users.
-static HIDE_UNRANKED_AUTHORS: AtomicBool = AtomicBool::new(true);
-
-/// Turns the `source=all` trust filter on or off for this process. Off
-/// reproduces the unfiltered stream exactly: no extra round trips.
-#[cfg(feature = "test-utils")]
-pub fn set_hide_unranked_authors(enabled: bool) {
-    HIDE_UNRANKED_AUTHORS.store(enabled, Ordering::Relaxed);
-}
-
 /// The authors among `authors` the trust ranking holds, or `None` when
-/// nothing is to be hidden: the filter is off, no ranking exists, or Redis
-/// failed (logged; the filter fails open). With no authors it answers
-/// whether the filter applies at all.
+/// nothing is to be hidden: no ranking exists, or Redis failed (logged; the
+/// filter fails open). With no authors it answers whether a ranking exists.
 async fn ranked_authors(authors: Vec<String>) -> Option<HashSet<String>> {
-    if !HIDE_UNRANKED_AUTHORS.load(Ordering::Relaxed) {
-        return None;
-    }
     SocialGraphStatus::ranked_among(&authors)
         .await
         .unwrap_or_else(|e| {

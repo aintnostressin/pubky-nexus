@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 
 use anyhow::Result;
-use nexus_common::models::post::set_hide_unranked_authors;
 use nexus_common::ApiConfig;
 use nexus_webapi::{api_context::ApiContextBuilder, NexusApi, NexusApiBuilder};
 use tempfile::TempDir;
@@ -66,11 +65,6 @@ impl TestServiceServer {
             pubky_listen_socket: SocketAddr::from(([127, 0, 0, 1], 0)),
             ..Default::default()
         };
-        // The fixture ranks three users (docker/test-graph/mocks/wot.cypher),
-        // so with the trust filter on every other fixture post would vanish
-        // from `source=all`. Its own tests (stream/post/trust_filter.rs) switch
-        // it on for their duration.
-        set_hide_unranked_authors(false);
 
         // Separate temp directories: one for config (keypair), one for static files
         let temp_config_dir = TempDir::new()?;
