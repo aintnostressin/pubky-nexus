@@ -1,5 +1,5 @@
 use super::{
-    stream::{HOT_TAGS_CACHE_PREFIX, POST_HOT_TAGS},
+    stream::{hot_tags_key_parts, ranked_taggers_only, HOT_TAGS_CACHE_PREFIX},
     Taggers as TaggersType,
 };
 use crate::db::{fetch_key_from_graph, kv::RedisResult, queries, GraphResult, RedisOps};
@@ -59,28 +59,34 @@ impl Deref for HotTagsTaggers {
 
 impl Taggers {
     /// Cached taggers map for one timeframe
+    ///
+    /// * `ranked_only` - Read the cache variant that counts only ranked taggers
     pub async fn get_from_index(
         timeframe: &Timeframe,
         prefix: &str,
+        ranked_only: bool,
     ) -> RedisResult<Option<HotTagsTaggers>> {
         let timeframe_str = timeframe.to_string();
         HotTagsTaggers::try_from_index_json(
-            &Self::build_key_parts(&timeframe_str),
+            &Self::build_key_parts(&timeframe_str, ranked_only),
             Some(prefix.into()),
         )
         .await
     }
 
     /// Overwrites the timeframe's taggers JSON and arms its TTL.
+    ///
+    /// * `ranked_only` - Write the cache variant that counts only ranked taggers
     pub async fn put_to_index(
         taggers: HotTagsTaggers,
         timeframe: &Timeframe,
         prefix: &str,
+        ranked_only: bool,
     ) -> RedisResult<()> {
         let timeframe_str = timeframe.to_string();
         taggers
             .put_index_json(
-                &Self::build_key_parts(&timeframe_str),
+                &Self::build_key_parts(&timeframe_str, ranked_only),
                 Some(prefix.to_string()),
                 Some(timeframe.to_cache_period()),
             )
@@ -89,6 +95,9 @@ impl Taggers {
 
     /// Global taggers come from the hot-tags cache; reach-scoped taggers hit the graph.
     /// This does not warm the cache: a miss returns `None` until hot tags write it.
+    ///
+    /// Once a trust ranking exists, only taggers with a positive trust score
+    /// are returned, on both paths.
     pub async fn get_global_taggers(
         label: String,
         user_id: Option<String>,
@@ -97,8 +106,11 @@ impl Taggers {
         limit: usize,
         timeframe: Timeframe,
     ) -> ModelResult<Option<TaggersType>> {
+        let ranked_only = ranked_taggers_only().await;
         Ok(match user_id {
-            None => Self::get_from_global_timeline(&label, skip, limit, &timeframe).await?,
+            None => {
+                Self::get_from_global_timeline(&label, skip, limit, &timeframe, ranked_only).await?
+            }
             Some(id) => {
                 Self::get_tag_taggers_by_reach(
                     &label,
@@ -106,6 +118,7 @@ impl Taggers {
                     reach.unwrap_or(StreamReach::Following),
                     skip,
                     limit,
+                    ranked_only,
                 )
                 .await?
             }
@@ -113,13 +126,18 @@ impl Taggers {
     }
 
     /// Page of taggers for `label` from the cached map, if that timeframe key exists.
+    ///
+    /// * `ranked_only` - Read the cache variant that counts only ranked taggers
     async fn get_from_global_timeline(
         label: &str,
         skip: usize,
         limit: usize,
         timeframe: &Timeframe,
+        ranked_only: bool,
     ) -> RedisResult<Option<TaggersType>> {
-        let Some(by_label) = Self::get_from_index(timeframe, HOT_TAGS_CACHE_PREFIX).await? else {
+        let Some(by_label) =
+            Self::get_from_index(timeframe, HOT_TAGS_CACHE_PREFIX, ranked_only).await?
+        else {
             return Ok(None);
         };
         Ok(by_label
@@ -141,18 +159,21 @@ impl Taggers {
             .collect()
     }
 
+    /// `ranked_only` returns only taggers with a positive trust score.
     async fn get_tag_taggers_by_reach(
         label: &str,
         user_id: &str,
         reach: StreamReach,
         skip: usize,
         limit: usize,
+        ranked_only: bool,
     ) -> GraphResult<Option<TaggersType>> {
-        let query = queries::get::get_tag_taggers_by_reach(label, user_id, reach, skip, limit);
+        let query =
+            queries::get::get_tag_taggers_by_reach(label, user_id, reach, skip, limit, ranked_only);
         fetch_key_from_graph::<TaggersType>(query, "tagger_ids").await
     }
 
-    fn build_key_parts(timeframe: &str) -> Vec<&str> {
-        [&POST_HOT_TAGS[..], &[TAGGERS_INDEX], &[timeframe]].concat()
+    fn build_key_parts(timeframe: &str, ranked_only: bool) -> Vec<&str> {
+        hot_tags_key_parts(ranked_only, &[TAGGERS_INDEX, timeframe])
     }
 }

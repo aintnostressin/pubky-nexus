@@ -1,6 +1,7 @@
 use crate::db::kv::{RedisResult, SortOrder};
 use crate::db::{fetch_key_from_graph, queries, RedisOps};
 use crate::models::error::ModelResult;
+use crate::models::user::SocialGraphStatus;
 use crate::types::routes::HotTagsInputDTO;
 use crate::types::{StreamReach, Timeframe};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,30 @@ pub const POST_HOT_TAGS: [&str; 3] = ["Tags", "Post", "Hot"];
 /// Snapshot size per timeframe. A skip past this cannot be filled from cache.
 pub const GLOBAL_HOT_TAGS_CACHE_SIZE: usize = 100;
 const GLOBAL_HOT_TAGS_TAGGERS_LIMIT: usize = 20;
+/// Key segment of the cache variant that counts only ranked taggers.
+pub const RANKED_HOT_TAGS: &str = "Ranked";
+
+/// Whether hot tags count only taggers with a positive trust score: a trust
+/// ranking (`Sorted:Users:SocialGraph`, built by the `trust-recompute` job)
+/// exists. Without one the recompute never ran and nobody carries trust, so
+/// the filter would empty every response. A Redis error serves the tags
+/// unfiltered.
+pub(crate) async fn ranked_taggers_only() -> bool {
+    SocialGraphStatus::is_built().await.unwrap_or_else(|e| {
+        warn!("Trust ranking unavailable, serving hot tags unfiltered: {e}");
+        false
+    })
+}
+
+/// Cache key parts for a hot-tags index: `Tags:Post:Hot[:Ranked]:<rest>`.
+///
+/// The ranked variant lives under its own keys so that a ranking appearing (or
+/// being dropped) switches the served variant on the next request instead of
+/// waiting out the TTL of an entry counted the other way.
+pub(crate) fn hot_tags_key_parts<'a>(ranked_only: bool, rest: &[&'a str]) -> Vec<&'a str> {
+    let variant: &[&str] = if ranked_only { &[RANKED_HOT_TAGS] } else { &[] };
+    [&POST_HOT_TAGS[..], variant, rest].concat()
+}
 
 #[derive(Deserialize, Serialize, ToSchema, Debug, Clone)]
 pub struct HotTag {
@@ -62,16 +87,18 @@ impl HotTags {
         reach: Option<StreamReach>,
         hot_tags_input: &HotTagsInputDTO,
     ) -> ModelResult<Option<HotTags>> {
+        let ranked_only = ranked_taggers_only().await;
         match user_id {
             Some(user_id) => {
                 HotTags::get_hot_tags_by_reach(
                     user_id,
                     reach.unwrap_or(StreamReach::Following),
                     hot_tags_input,
+                    ranked_only,
                 )
                 .await
             }
-            None => HotTags::get_global_hot_tags(hot_tags_input).await,
+            None => HotTags::get_global_hot_tags(hot_tags_input, ranked_only).await,
         }
     }
 
@@ -83,12 +110,19 @@ impl HotTags {
     /// * `user_id` - The ID of the user whose reach is used for filtering hot tags
     /// * `reach` - The `TagStreamReach` parameter that defines the scope of tag retrieval
     /// * `hot_tags_input` - The input parameters received from the API endpoint
+    /// * `ranked_only` - Count only taggers with a positive trust score
     async fn get_hot_tags_by_reach(
         user_id: String,
         reach: StreamReach,
         hot_tags_input: &HotTagsInputDTO,
+        ranked_only: bool,
     ) -> ModelResult<Option<HotTags>> {
-        let query = queries::get::get_hot_tags_by_reach(user_id.as_str(), reach, hot_tags_input);
+        let query = queries::get::get_hot_tags_by_reach(
+            user_id.as_str(),
+            reach,
+            hot_tags_input,
+            ranked_only,
+        );
         fetch_key_from_graph::<HotTags>(query, "hot_tags")
             .await
             .map_err(Into::into)
@@ -96,9 +130,15 @@ impl HotTags {
 
     /// Cache hit, including an empty page. On a missing key, refresh then re-read
     /// so `skip`/`limit`/`taggers_limit` apply to the snapshot, not the graph result.
-    async fn get_global_hot_tags(hot_tags_input: &HotTagsInputDTO) -> ModelResult<Option<HotTags>> {
+    ///
+    /// * `ranked_only` - Count only taggers with a positive trust score; selects the cache variant
+    async fn get_global_hot_tags(
+        hot_tags_input: &HotTagsInputDTO,
+        ranked_only: bool,
+    ) -> ModelResult<Option<HotTags>> {
         if let Some(cached) =
-            HotTags::get_from_global_cache(hot_tags_input, HOT_TAGS_CACHE_PREFIX).await?
+            HotTags::get_from_global_cache(hot_tags_input, HOT_TAGS_CACHE_PREFIX, ranked_only)
+                .await?
         {
             return Ok(Some(cached));
         }
@@ -109,15 +149,24 @@ impl HotTags {
             return Ok(Some(HotTags::default()));
         }
 
-        HotTags::fetch_and_cache(&hot_tags_input.timeframe).await?;
-        HotTags::get_from_global_cache(hot_tags_input, HOT_TAGS_CACHE_PREFIX)
+        HotTags::fetch_and_cache_variant(&hot_tags_input.timeframe, ranked_only).await?;
+        HotTags::get_from_global_cache(hot_tags_input, HOT_TAGS_CACHE_PREFIX, ranked_only)
             .await
             .map_err(Into::into)
     }
 
     /// Scan the top [`GLOBAL_HOT_TAGS_CACHE_SIZE`] post tags and replace the cache.
-    /// A result with no tags leaves the previous ranking in place.
+    ///
+    /// Reads whether a trust ranking exists; callers that already know pass it to
+    /// [`HotTags::fetch_and_cache_variant`] instead.
     pub async fn fetch_and_cache(timeframe: &Timeframe) -> ModelResult<()> {
+        let ranked_only = ranked_taggers_only().await;
+        HotTags::fetch_and_cache_variant(timeframe, ranked_only).await
+    }
+
+    /// Scan and replace one cache variant. A result with no tags leaves the previous
+    /// ranking in place.
+    async fn fetch_and_cache_variant(timeframe: &Timeframe, ranked_only: bool) -> ModelResult<()> {
         let query_input = HotTagsInputDTO::new(
             timeframe.clone(),
             GLOBAL_HOT_TAGS_CACHE_SIZE,
@@ -125,9 +174,10 @@ impl HotTags {
             GLOBAL_HOT_TAGS_TAGGERS_LIMIT,
             Some(TaggedType::Post),
         );
-        let query = queries::get::get_global_hot_tags(&query_input);
+        let query = queries::get::get_global_hot_tags(&query_input, ranked_only);
         let result = fetch_key_from_graph::<HotTags>(query, "hot_tags").await?;
-        HotTags::write_or_preserve_cache(result, timeframe, HOT_TAGS_CACHE_PREFIX).await
+        HotTags::write_or_preserve_cache(result, timeframe, HOT_TAGS_CACHE_PREFIX, ranked_only)
+            .await
     }
 
     /// A result with tags replaces both keys; anything else is a no-op.
@@ -136,11 +186,12 @@ impl HotTags {
         result: Option<HotTags>,
         timeframe: &Timeframe,
         prefix: &str,
+        ranked_only: bool,
     ) -> ModelResult<()> {
         match result {
             Some(hot_tags) if !hot_tags.is_empty() => {
-                debug!(%timeframe, count = hot_tags.len(), "Writing hot tags cache");
-                HotTags::put_to_global_cache(hot_tags, timeframe, prefix).await?;
+                debug!(%timeframe, ranked_only, count = hot_tags.len(), "Writing hot tags cache");
+                HotTags::put_to_global_cache(hot_tags, timeframe, prefix, ranked_only).await?;
             }
             _ => warn!(%timeframe, "Graph returned no hot tags — previous cache left untouched"),
         }
@@ -148,14 +199,18 @@ impl HotTags {
     }
 
     /// `None` if either key is missing. `Some([])` if both exist but this window is empty.
+    ///
+    /// * `ranked_only` - Read the cache variant that counts only ranked taggers
     async fn get_from_global_cache(
         hot_tags_input: &HotTagsInputDTO,
         prefix: &str,
+        ranked_only: bool,
     ) -> RedisResult<Option<HotTags>> {
         let timeframe = hot_tags_input.timeframe.to_string();
-        let key_parts = Self::build_hot_tags_key_parts(&timeframe);
+        let key_parts = Self::build_hot_tags_key_parts(&timeframe, ranked_only);
 
-        let taggers_by_label = Taggers::get_from_index(&hot_tags_input.timeframe, prefix).await?;
+        let taggers_by_label =
+            Taggers::get_from_index(&hot_tags_input.timeframe, prefix, ranked_only).await?;
         let scores = HotTags::try_from_index_sorted_set(
             &key_parts,
             None,
@@ -191,13 +246,16 @@ impl HotTags {
     }
 
     /// Overwrite taggers JSON and atomically replace the score set.
+    ///
+    /// * `ranked_only` - Write the cache variant that counts only ranked taggers
     async fn put_to_global_cache(
         hot_tags_list: HotTags,
         timeframe: &Timeframe,
         prefix: &str,
+        ranked_only: bool,
     ) -> RedisResult<()> {
         let timeframe_str = timeframe.to_string();
-        let key_parts = Self::build_hot_tags_key_parts(&timeframe_str);
+        let key_parts = Self::build_hot_tags_key_parts(&timeframe_str, ranked_only);
         let scores: Vec<(f64, &str)> = hot_tags_list
             .iter()
             .map(|tag| (tag.tagged_count as f64, tag.label.as_str()))
@@ -215,7 +273,7 @@ impl HotTags {
             })
             .collect();
 
-        Taggers::put_to_index(HotTagsTaggers(taggers), timeframe, prefix).await?;
+        Taggers::put_to_index(HotTagsTaggers(taggers), timeframe, prefix, ranked_only).await?;
         HotTags::replace_index_sorted_set(
             &key_parts,
             &scores,
@@ -225,14 +283,15 @@ impl HotTags {
         .await
     }
 
-    fn build_hot_tags_key_parts(timeframe: &str) -> Vec<&str> {
-        [&POST_HOT_TAGS[..], &[timeframe]].concat()
+    fn build_hot_tags_key_parts(timeframe: &str, ranked_only: bool) -> Vec<&str> {
+        hot_tags_key_parts(ranked_only, &[timeframe])
     }
 
     /// Warm AllTime and ThisMonth from the graph.
     pub async fn reindex() -> ModelResult<()> {
-        HotTags::fetch_and_cache(&Timeframe::AllTime).await?;
-        HotTags::fetch_and_cache(&Timeframe::ThisMonth).await
+        let ranked_only = ranked_taggers_only().await;
+        HotTags::fetch_and_cache_variant(&Timeframe::AllTime, ranked_only).await?;
+        HotTags::fetch_and_cache_variant(&Timeframe::ThisMonth, ranked_only).await
     }
 }
 
@@ -243,6 +302,9 @@ mod tests {
 
     /// Off the production `HOT_TAGS_CACHE_PREFIX` keys the API tests share.
     const TEST_PREFIX: &str = "HotTagsCacheTest";
+    /// These cover the cache write/read round trip, which the ranked variant only
+    /// changes by one key segment: [`ranked_hot_tags_live_under_their_own_keys`].
+    const TEST_RANKED_ONLY: bool = false;
 
     #[tokio_shared_rt::test(shared)]
     async fn write_or_preserve_cache_keeps_existing_ranking_on_empty_graph_result(
@@ -256,10 +318,17 @@ mod tests {
             ]),
             &timeframe,
             TEST_PREFIX,
+            TEST_RANKED_ONLY,
         )
         .await?;
 
-        HotTags::write_or_preserve_cache(Some(HotTags::default()), &timeframe, TEST_PREFIX).await?;
+        HotTags::write_or_preserve_cache(
+            Some(HotTags::default()),
+            &timeframe,
+            TEST_PREFIX,
+            TEST_RANKED_ONLY,
+        )
+        .await?;
         assert_cached_labels(&timeframe, &["bitcoin", "nostr"]).await?;
 
         clear_test_cache(&timeframe).await?;
@@ -275,10 +344,11 @@ mod tests {
             HotTags(vec![hot_tag("pubky", 20, &["carol"])]),
             &timeframe,
             TEST_PREFIX,
+            TEST_RANKED_ONLY,
         )
         .await?;
 
-        HotTags::write_or_preserve_cache(None, &timeframe, TEST_PREFIX).await?;
+        HotTags::write_or_preserve_cache(None, &timeframe, TEST_PREFIX, TEST_RANKED_ONLY).await?;
         assert_cached_labels(&timeframe, &["pubky"]).await?;
 
         clear_test_cache(&timeframe).await?;
@@ -297,6 +367,7 @@ mod tests {
             ]),
             &timeframe,
             TEST_PREFIX,
+            TEST_RANKED_ONLY,
         )
         .await?;
 
@@ -304,6 +375,7 @@ mod tests {
             Some(HotTags(vec![hot_tag("fresh", 99, &["frank"])])),
             &timeframe,
             TEST_PREFIX,
+            TEST_RANKED_ONLY,
         )
         .await?;
         assert_cached_labels(&timeframe, &["fresh"]).await?;
@@ -322,7 +394,13 @@ mod tests {
         let timeframe = Timeframe::AllTime;
         let mut tag = hot_tag("bitcoin", 42, &["alice", "bob"]);
         tag.taggers_count = 137;
-        HotTags::put_to_global_cache(HotTags(vec![tag]), &timeframe, TEST_PREFIX).await?;
+        HotTags::put_to_global_cache(
+            HotTags(vec![tag]),
+            &timeframe,
+            TEST_PREFIX,
+            TEST_RANKED_ONLY,
+        )
+        .await?;
 
         let cached = read_raw_taggers(&timeframe)
             .await?
@@ -338,7 +416,7 @@ mod tests {
             GLOBAL_HOT_TAGS_TAGGERS_LIMIT,
             Some(TaggedType::Post),
         );
-        let hot_tags = HotTags::get_from_global_cache(&input, TEST_PREFIX)
+        let hot_tags = HotTags::get_from_global_cache(&input, TEST_PREFIX, TEST_RANKED_ONLY)
             .await?
             .expect("the snapshot must be a cache hit");
         let [read_back] = &hot_tags.0[..] else {
@@ -391,7 +469,7 @@ mod tests {
 
     async fn read_raw_scores(timeframe: &Timeframe) -> RedisResult<Option<Vec<(String, f64)>>> {
         let timeframe_str = timeframe.to_string();
-        let key_parts = HotTags::build_hot_tags_key_parts(&timeframe_str);
+        let key_parts = HotTags::build_hot_tags_key_parts(&timeframe_str, TEST_RANKED_ONLY);
         HotTags::try_from_index_sorted_set(
             &key_parts,
             None,
@@ -405,13 +483,35 @@ mod tests {
     }
 
     async fn read_raw_taggers(timeframe: &Timeframe) -> RedisResult<Option<HotTagsTaggers>> {
-        Taggers::get_from_index(timeframe, TEST_PREFIX).await
+        Taggers::get_from_index(timeframe, TEST_PREFIX, TEST_RANKED_ONLY).await
     }
 
     async fn clear_test_cache(timeframe: &Timeframe) -> RedisResult<()> {
         let timeframe_str = timeframe.to_string();
-        let key_parts = HotTags::build_hot_tags_key_parts(&timeframe_str);
+        let key_parts = HotTags::build_hot_tags_key_parts(&timeframe_str, TEST_RANKED_ONLY);
         HotTags::replace_index_sorted_set(&key_parts, &[], Some(TEST_PREFIX), None).await?;
-        Taggers::put_to_index(HotTagsTaggers(HashMap::new()), timeframe, TEST_PREFIX).await
+        Taggers::put_to_index(
+            HotTagsTaggers(HashMap::new()),
+            timeframe,
+            TEST_PREFIX,
+            TEST_RANKED_ONLY,
+        )
+        .await
+    }
+
+    #[test]
+    fn ranked_hot_tags_live_under_their_own_keys() {
+        assert_eq!(
+            HotTags::build_hot_tags_key_parts("AllTime", false),
+            ["Tags", "Post", "Hot", "AllTime"]
+        );
+        assert_eq!(
+            HotTags::build_hot_tags_key_parts("AllTime", true),
+            ["Tags", "Post", "Hot", "Ranked", "AllTime"]
+        );
+        assert_eq!(
+            hot_tags_key_parts(true, &["Taggers", "AllTime"]),
+            ["Tags", "Post", "Hot", "Ranked", "Taggers", "AllTime"]
+        );
     }
 }
