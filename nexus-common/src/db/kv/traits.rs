@@ -660,6 +660,18 @@ pub trait RedisOps: Serialize + DeserializeOwned + Send + Sync {
         sorted_sets::put_score(SORTED_PREFIX, &key, &member_key, score_mutation).await
     }
 
+    /// Like [`put_score_index_sorted_set`](Self::put_score_index_sorted_set),
+    /// returning the member's new absolute score.
+    async fn incr_score_index_sorted_set(
+        key_parts: &[&str],
+        member: &[&str],
+        score_mutation: ScoreAction,
+    ) -> RedisResult<f64> {
+        let key = key_parts.join(":");
+        let member_key = member.join(":");
+        sorted_sets::incr_score(SORTED_PREFIX, &key, &member_key, score_mutation).await
+    }
+
     /// Atomically derives a sorted-set member's score from a set's
     /// cardinality: the score becomes `SCARD` of the source set, and the
     /// member is removed when the set is empty. Runs as one Lua script, so
@@ -775,6 +787,54 @@ pub trait RedisOps: Serialize + DeserializeOwned + Send + Sync {
         let prefix = prefix.unwrap_or("Sorted");
 
         sorted_sets::get_range(prefix, &key, end, start, skip, limit, sorting).await
+    }
+
+    /// Reads the members ranked `start..=stop` (ascending, 0-based) with
+    /// their scores. Cheap at any offset, unlike a score range with a skip.
+    async fn try_from_index_sorted_set_by_rank(
+        key_parts: &[&str],
+        start: usize,
+        stop: usize,
+        prefix: Option<&str>,
+    ) -> RedisResult<Vec<(String, f64)>> {
+        let key = key_parts.join(":");
+        let prefix = prefix.unwrap_or(SORTED_PREFIX);
+        sorted_sets::get_rank_range(prefix, &key, start as isize, stop as isize).await
+    }
+
+    /// Reads the scores of `members` in one call, `None` where absent.
+    async fn index_sorted_set_scores(
+        key_parts: &[&str],
+        members: &[&str],
+    ) -> RedisResult<Vec<Option<f64>>> {
+        sorted_sets::scores(SORTED_PREFIX, &key_parts.join(":"), members).await
+    }
+
+    /// Whether the sorted set exists.
+    async fn index_sorted_set_exists(key_parts: &[&str]) -> RedisResult<bool> {
+        sorted_sets::exists(SORTED_PREFIX, &key_parts.join(":")).await
+    }
+
+    /// Deletes sorted sets, freeing their memory in the background.
+    async fn unlink_index_sorted_sets(keys: &[&[&str]]) -> RedisResult<()> {
+        let keys: Vec<String> = keys.iter().map(|parts| parts.join(":")).collect();
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        sorted_sets::unlink(SORTED_PREFIX, &keys).await
+    }
+
+    /// Installs `staged` as `live` atomically; see [`sorted_sets::swap_in`].
+    async fn swap_in_index_sorted_set(
+        staged: &[&str],
+        live: &[&str],
+        aside: &[&str],
+    ) -> RedisResult<bool> {
+        sorted_sets::swap_in(
+            SORTED_PREFIX,
+            &staged.join(":"),
+            &live.join(":"),
+            &aside.join(":"),
+        )
+        .await
     }
 
     /// Retrieves a lexicographical range of elements from a Redis sorted set using the provided key parts.
