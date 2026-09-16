@@ -12,7 +12,7 @@ use crate::models::traits::Collection;
 use crate::models::user::{Influencers, SocialGraphStatus, UserDetails, UsersByTagSearch};
 use crate::types::DynError;
 use crate::{
-    models::post::{PostCounts, PostDetails, PostRelationships},
+    models::post::{PostCounts, PostDetails, PostRelationships, PostStream},
     models::user::UserCounts,
 };
 use tokio::task::JoinSet;
@@ -79,6 +79,10 @@ pub async fn sync() {
     SocialGraphStatus::reindex()
         .await
         .expect("Failed to reindex the social graph ranking");
+
+    PostStream::sync_ranked_sets()
+        .await
+        .expect("Failed to sync the ranked post sets");
 
     PostsByTagSearch::reindex()
         .await

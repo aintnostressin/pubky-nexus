@@ -332,6 +332,7 @@ The `source` parameter determines the type of stream. Depending on the `source`,
 
 - *wot*: Requires **observer_id**. Posts from users in the observer's Web of Trust (transitive follows, `depth` 1-3, default 2). Excludes the observer's own posts, including when a follow cycle reaches the observer again.
 - *wot_domain*: Requires **observer_id** and **domain_tags**. Posts by authors whom the observer's Web of Trust has tagged with any of `domain_tags`, all of those authors' posts, not only topic-tagged ones; combine with `tags=` for topic-scoped posts. With `depth=0` the trust set is the observer alone ("Me"): posts by authors the observer tagged directly. Includes the observer's own posts when they themselves are tagged with a matching label.
+- *all*: Every root post. Once nexusd's `trust-recompute` job has built a trust ranking, posts by authors absent from it are hidden. Without a ranking the stream is served unfiltered.
 
 Ensure that you provide the necessary parameters based on the selected `source`. If a required parameter is missing, a 400 Bad Request error will be returned."#
 )]
@@ -405,6 +406,7 @@ The `source` parameter determines the type of stream. Depending on the `source`,
 
 - *wot*: Requires **observer_id**. Posts from users in the observer's Web of Trust (transitive follows, `depth` 1-3, default 2). Excludes the observer's own posts, including when a follow cycle reaches the observer again.
 - *wot_domain*: Requires **observer_id** and **domain_tags**. Posts by authors whom the observer's Web of Trust has tagged with any of `domain_tags`, all of those authors' posts, not only topic-tagged ones; combine with `tags=` for topic-scoped posts. With `depth=0` the trust set is the observer alone ("Me"): posts by authors the observer tagged directly. Includes the observer's own posts when they themselves are tagged with a matching label.
+- *all*: Every root post. Once nexusd's `trust-recompute` job has built a trust ranking, posts by authors absent from it are hidden. Without a ranking the stream is served unfiltered.
 
 Ensure that you provide the necessary parameters based on the selected `source`. If a required parameter is missing, a 400 Bad Request error will be returned."#
 )]

@@ -60,6 +60,25 @@ impl SocialGraphStatus {
         Ok(Self::classify(population, &ranks))
     }
 
+    /// Whether a ranking has been built. `false` when the recompute job never
+    /// ran, which is production's state with an empty seed set, and after a
+    /// rebuild that found nobody with trust (that drops the key).
+    pub async fn is_built() -> RedisResult<bool> {
+        let (population, _) =
+            Self::index_sorted_set_card_and_members(&USER_SOCIAL_GRAPH_KEY_PARTS, &[], None)
+                .await?;
+        Ok(population > 0)
+    }
+
+    /// Whether the ranking holds `user_id`. `false` while no ranking exists.
+    pub async fn is_ranked(user_id: &str) -> RedisResult<bool> {
+        Ok(
+            Self::check_sorted_set_member(None, &USER_SOCIAL_GRAPH_KEY_PARTS, &[user_id])
+                .await?
+                .is_some(),
+        )
+    }
+
     /// Reads one user's status.
     pub async fn get_by_id(user_id: &str) -> RedisResult<Option<SocialGraphStatus>> {
         Ok(Self::get_by_ids(&[user_id])
@@ -94,7 +113,8 @@ impl SocialGraphStatus {
     }
 
     /// Rebuilds the ranking from the trust scores in the graph. Run by the trust
-    /// recompute job and by a full reindex.
+    /// recompute job and by a full reindex, which then rebuild the read models
+    /// that project it.
     ///
     /// # Errors
     /// Returns an error when the graph read or the Redis write fails.

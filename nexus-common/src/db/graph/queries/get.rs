@@ -1105,6 +1105,12 @@ pub fn get_files_by_ids(key_pair: &[&[&str]]) -> Query {
 }
 
 // Build the graph query based on parameters
+/// Builds the Cypher fallback for a post stream.
+///
+/// `ranked_only` keeps only authors with a positive trust score. A
+/// never-computed ranking leaves `trust` null on every user and would then
+/// hide every post: callers pass `true` only after checking that a ranking
+/// exists.
 pub fn post_stream(
     source: StreamSource,
     sorting: StreamSorting,
@@ -1112,6 +1118,7 @@ pub fn post_stream(
     tags: &Option<Vec<String>>,
     pagination: Pagination,
     kind: Option<KindFilter>,
+    ranked_only: bool,
 ) -> GraphResult<Query> {
     // Initialize the cypher query
     let mut cypher = String::new();
@@ -1202,6 +1209,12 @@ pub fn post_stream(
         );
     }
 
+    // After the tags MATCH, so the tag condition opens that clause's WHERE
+    // rather than this one.
+    if ranked_only {
+        append_condition(&mut cypher, "author.trust > 0", &mut where_clause_applied);
+    }
+
     // If source has an author, add where clause. It is related with source pattern matching
     // If the source is Author, it is enough adding where clause. Not need to relate nodes
     if source.get_author().is_some() {
@@ -1288,13 +1301,15 @@ pub fn post_stream(
 
     // Apply StreamSorting. `score` is the value the cursor (`last_post_score`) pages
     // on: the post timestamp for Timeline, the engagement count for TotalEngagement.
-    // `p.id` is a deterministic secondary key so equal scores keep a stable order
-    // within a response (pagination across ties is still best-effort: the cursor
+    // Equal scores order by author id then post id, which is how Redis orders the
+    // `author:post` members of its sorted sets, so a page is the same whichever
+    // path serves it (pagination across ties is still best-effort: the cursor
     // carries only the score, not the id).
+    let tie_break = format!("author.id {order_dir}, p.id {order_dir}");
     let (score_expr, order_clause) = match sorting {
         StreamSorting::Timeline => (
             "p.indexed_at",
-            format!("ORDER BY p.indexed_at {order_dir}, p.id {order_dir}"),
+            format!("ORDER BY p.indexed_at {order_dir}, {tie_break}"),
         ),
         StreamSorting::TotalEngagement => {
             // Each engagement count is its own COUNT{} subquery, so they don't
@@ -1330,7 +1345,7 @@ pub fn post_stream(
 
             (
                 "total_engagement",
-                format!("ORDER BY total_engagement {order_dir}, p.id {order_dir}"),
+                format!("ORDER BY total_engagement {order_dir}, {tie_break}"),
             )
         }
     };
@@ -1613,12 +1628,42 @@ mod tests {
                 ..Default::default()
             },
             None,
+            false,
         )
         .unwrap()
     }
 
     fn build(source: StreamSource) -> String {
         build_query(source).to_cypher_populated()
+    }
+
+    #[test]
+    fn post_stream_hides_unranked_authors_only_when_asked() {
+        let build_all = |tags: Option<Vec<String>>, ranked_only: bool| {
+            post_stream(
+                StreamSource::All,
+                StreamSorting::Timeline,
+                SortOrder::Descending,
+                &tags,
+                Pagination {
+                    limit: Some(10),
+                    ..Default::default()
+                },
+                None,
+                ranked_only,
+            )
+            .unwrap()
+            .to_cypher_populated()
+        };
+
+        // The predicate follows the tags MATCH, or that clause would open with AND.
+        let tagged = build_all(Some(vec!["a".into(), "b".into()]), true);
+        assert!(
+            tagged.contains("WHERE tag.label IN ['a', 'b']\nAND author.trust > 0"),
+            "the trust predicate follows the tag condition:\n{tagged}"
+        );
+
+        assert!(!build_all(None, false).contains("author.trust"));
     }
 
     #[test]

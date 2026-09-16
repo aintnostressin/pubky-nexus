@@ -99,3 +99,7 @@ harness = false
 [[bench]]
 name = "events"
 harness = false
+
+[[bench]]
+name = "ranked_sync"
+harness = false
