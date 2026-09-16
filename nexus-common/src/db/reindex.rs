@@ -68,6 +68,12 @@ pub async fn sync() {
         }
     }
 
+    // Before the hot tags: they hide unranked taggers only once a ranking
+    // exists, so a fresh cache must see it or it warms the unfiltered variant.
+    SocialGraphStatus::reindex()
+        .await
+        .expect("Failed to reindex the social graph ranking");
+
     HotTags::reindex()
         .await
         .expect("Failed to store the global hot tags");
@@ -75,10 +81,6 @@ pub async fn sync() {
     Influencers::reindex()
         .await
         .expect("Failed to reindex influencers");
-
-    SocialGraphStatus::reindex()
-        .await
-        .expect("Failed to reindex the social graph ranking");
 
     PostsByTagSearch::reindex()
         .await

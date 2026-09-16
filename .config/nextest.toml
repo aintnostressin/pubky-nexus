@@ -8,6 +8,7 @@
 
 [test-groups]
 influencers-sorted-set = { max-threads = 1 }
+trust-ranking = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'test(=stream::user::influencers::test_global_influencers) | test(=stream::user::influencers::test_global_influencers_skip_limit) | test(=stream::user::influencers::test_global_influencers_alltime_cache_recovery)'
@@ -25,3 +26,13 @@ test-group = 'influencers-sorted-set'
 [[profile.default.overrides]]
 filter = 'package(nexusd) and binary(cache_setup)'
 threads-required = 'num-test-threads'
+
+# user::views::test_social_graph_status drops and rebuilds the shared trust
+# ranking (Sorted:Users:SocialGraph). The hot-tags trust filter is gated on
+# that ranking existing, so the two reach tests that assert it must not run
+# while the key is gone. A group (declared above), not exclusivity: only these
+# three interact.
+
+[[profile.default.overrides]]
+filter = 'test(=user::views::test_social_graph_status) | test(=tags::hot::test_hot_tags_by_reach_hide_unranked_taggers) | test(=tags::hot::test_hot_tags_label_taggers_by_reach_hide_unranked_taggers)'
+test-group = 'trust-ranking'
