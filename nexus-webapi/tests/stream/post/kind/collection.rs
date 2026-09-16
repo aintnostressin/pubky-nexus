@@ -71,7 +71,8 @@ async fn test_hot_stream_includes_collections() -> Result<()> {
 
 #[tokio_shared_rt::test(shared)]
 async fn test_by_tag_stream_includes_tagged_collection() -> Result<()> {
-    // Redis by-tag path (PostsByTagSearch). Seed tags COL_CAIRO with `api`
+    // Single-tag source=all: the Redis by-tag path (PostsByTagSearch) without a
+    // ranking, Cypher with one (the fixtures carry a ranking). Seed tags COL_CAIRO with `api`
     // (see docker/test-graph/mocks/posts.cypher near the Collection block).
     let path = format!("{ROOT_PATH}?source=all&tags=api&limit=30");
     let body = get_request(&path).await?;

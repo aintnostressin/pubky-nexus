@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use nexus_common::models::post::PostStream;
 use nexus_common::models::user::SocialGraphStatus;
 use nexus_common::types::DynError;
 use nexus_common::TrustRankConfig;
@@ -26,13 +27,15 @@ pub(crate) trait TrustProjection: Send + Sync {
     async fn publish(&self) -> Result<(), DynError>;
 }
 
-/// Rebuilds the Redis ranking that backs the social graph badge.
+/// Rebuilds the Redis ranking that backs the social graph badge, then the
+/// ranked post sets that serve `source=all` from it.
 pub(crate) struct SocialGraphProjection;
 
 #[async_trait]
 impl TrustProjection for SocialGraphProjection {
     async fn publish(&self) -> Result<(), DynError> {
-        SocialGraphStatus::reindex().await.map_err(Into::into)
+        SocialGraphStatus::reindex().await?;
+        PostStream::sync_ranked_sets().await.map_err(Into::into)
     }
 }
 

@@ -175,15 +175,108 @@ pub async fn put_score(
     member: &str,
     score_mutation: ScoreAction,
 ) -> RedisResult<()> {
+    incr_score(prefix, key, member, score_mutation).await?;
+    Ok(())
+}
+
+/// Moves a member's score and returns its new absolute score (`ZINCRBY`).
+pub async fn incr_score(
+    prefix: &str,
+    key: &str,
+    member: &str,
+    score_mutation: ScoreAction,
+) -> RedisResult<f64> {
     let index_key = format!("{prefix}:{key}");
     let mut redis_conn = get_redis_conn().await?;
     let value = match score_mutation {
         ScoreAction::Increment(val) => val,
         ScoreAction::Decrement(val) => -val,
     };
-    let _: () = redis_conn.zincr(&index_key, member, value).await?;
+    let score: f64 = redis_conn.zincr(&index_key, member, value).await?;
+    Ok(score)
+}
 
+/// Reads the members ranked `start..=stop` (ascending, 0-based) with their
+/// scores (`ZRANGE ... WITHSCORES`). O(log N + count), unlike a score range
+/// with an offset. An absent key reads as empty.
+pub async fn get_rank_range(
+    prefix: &str,
+    key: &str,
+    start: isize,
+    stop: isize,
+) -> RedisResult<Vec<(String, f64)>> {
+    let index_key = format!("{prefix}:{key}");
+    let mut redis_conn = get_redis_conn().await?;
+    let elements: Vec<(String, f64)> = redis_conn.zrange_withscores(index_key, start, stop).await?;
+    Ok(elements)
+}
+
+/// Reads the scores of `members`, one slot per member, `None` where absent
+/// (`ZMSCORE`). An absent key reads as all `None`.
+pub async fn scores(prefix: &str, key: &str, members: &[&str]) -> RedisResult<Vec<Option<f64>>> {
+    if members.is_empty() {
+        return Ok(Vec::new());
+    }
+    let index_key = format!("{prefix}:{key}");
+    let mut redis_conn = get_redis_conn().await?;
+    let scores: Vec<Option<f64>> = redis::cmd("ZMSCORE")
+        .arg(index_key)
+        .arg(members)
+        .query_async(&mut redis_conn)
+        .await?;
+    Ok(scores)
+}
+
+/// Whether the key exists.
+pub async fn exists(prefix: &str, key: &str) -> RedisResult<bool> {
+    let mut redis_conn = get_redis_conn().await?;
+    Ok(redis_conn.exists(format!("{prefix}:{key}")).await?)
+}
+
+/// Deletes the keys, freeing their memory in the background (`UNLINK`).
+pub async fn unlink(prefix: &str, keys: &[&str]) -> RedisResult<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let keys: Vec<String> = keys.iter().map(|key| format!("{prefix}:{key}")).collect();
+    let mut redis_conn = get_redis_conn().await?;
+    let _: () = redis_conn.unlink(keys).await?;
     Ok(())
+}
+
+/// Moves the live key aside and the staged key into its place, atomically.
+/// KEYS: staged, live, aside. Returns 1 when the staged key was installed, 0
+/// when there was none (the live key is then only moved aside). RENAME frees
+/// an existing destination synchronously, so `aside` must not exist.
+static SWAP_IN_SCRIPT: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r"if redis.call('exists', KEYS[2]) == 1 then
+              redis.call('rename', KEYS[2], KEYS[3])
+          end
+          if redis.call('exists', KEYS[1]) == 1 then
+              redis.call('rename', KEYS[1], KEYS[2])
+              return 1
+          end
+          return 0",
+    )
+});
+
+/// Installs `staged` as `live` in one step and frees the previous `live` in
+/// the background, so readers see the old set or the new one, never a gap
+/// or a half-built set. With no `staged` key the `live` key is removed.
+/// `aside` is a scratch key, cleared before and after.
+pub async fn swap_in(prefix: &str, staged: &str, live: &str, aside: &str) -> RedisResult<bool> {
+    let aside_key = format!("{prefix}:{aside}");
+    let mut redis_conn = get_redis_conn().await?;
+    let _: () = redis_conn.unlink(&aside_key).await?;
+    let installed: i64 = SWAP_IN_SCRIPT
+        .key(format!("{prefix}:{staged}"))
+        .key(format!("{prefix}:{live}"))
+        .key(&aside_key)
+        .invoke_async(&mut redis_conn)
+        .await?;
+    let _: () = redis_conn.unlink(&aside_key).await?;
+    Ok(installed == 1)
 }
 
 /// Retrieves a range of elements from a Redis sorted set.
