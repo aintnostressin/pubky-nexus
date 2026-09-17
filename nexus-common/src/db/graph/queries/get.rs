@@ -837,6 +837,59 @@ fn stream_reach_to_graph_subquery(reach: &StreamReach) -> String {
     }
 }
 
+/// Up to `limit` distinct users in `user_id`'s `reach`, excluding `user_id`,
+/// the most prolific authors first. The post count matches `UserCounts::posts`
+/// (every authored post, replies included); equal counts break ties by id
+/// descending.
+pub fn get_reach_user_ids_by_posts(user_id: &str, reach: &StreamReach, limit: usize) -> Query {
+    let cypher = format!(
+        "
+        MATCH (user:User {{id: $user_id}})
+        {}
+        WHERE reach.id <> $user_id
+        WITH DISTINCT reach
+        // AUTHORED only ever points at posts, so the unlabelled pattern is a
+        // degree lookup rather than an expansion
+        WITH reach, COUNT {{ (reach)-[:AUTHORED]->() }} AS posts
+        RETURN reach.id AS user_id
+        ORDER BY posts DESC, user_id DESC
+        LIMIT $limit
+        ",
+        stream_reach_to_graph_subquery(reach)
+    );
+    reach_attrs(Query::new("get_reach_user_ids_by_posts", &cypher), reach)
+        .param("user_id", user_id)
+        .param("limit", i64::try_from(limit).unwrap_or(i64::MAX))
+}
+
+/// Whether `target_id` is in `user_id`'s `reach`. `false` for the user itself
+/// and for unknown users.
+pub fn reach_contains_user(user_id: &str, target_id: &str, reach: &StreamReach) -> Query {
+    let check = match reach {
+        StreamReach::Following => "EXISTS { (user)-[:FOLLOWS]->(target) }".to_string(),
+        StreamReach::Followers => "EXISTS { (target)-[:FOLLOWS]->(user) }".to_string(),
+        StreamReach::Friends => {
+            "EXISTS { (user)-[:FOLLOWS]->(target) } AND EXISTS { (target)-[:FOLLOWS]->(user) }"
+                .to_string()
+        }
+        // shortestPath searches from both ends; a variable-length EXISTS runs
+        // as an unpruned expand
+        StreamReach::Wot(depth) => {
+            format!("EXISTS {{ MATCH shortestPath((user)-[:FOLLOWS*1..{depth}]->(target)) }}")
+        }
+    };
+    let cypher = format!(
+        "
+        MATCH (user:User {{id: $user_id}}), (target:User {{id: $target_id}})
+        WHERE target.id <> $user_id
+        RETURN {check} AS reached
+        "
+    );
+    reach_attrs(Query::new("reach_contains_user", &cypher), reach)
+        .param("user_id", user_id)
+        .param("target_id", target_id)
+}
+
 pub fn get_tags_by_label_prefix(label_prefix: &str) -> Query {
     Query::new(
         "get_tags_by_label_prefix",
@@ -1800,6 +1853,27 @@ mod tests {
                 "one WHERE for the reach, one for the tags:\n{cypher}"
             );
         }
+    }
+
+    #[test]
+    fn reach_membership_uses_shortest_path_for_wot() {
+        let wot = reach_contains_user(
+            "user",
+            "target",
+            &StreamReach::Wot(WotDepth::new(3).unwrap()),
+        )
+        .to_cypher_populated();
+        assert!(
+            wot.contains("EXISTS { MATCH shortestPath((user)-[:FOLLOWS*1..3]->(target)) }"),
+            "WoT membership must use shortestPath:\n{wot}"
+        );
+        let friends =
+            reach_contains_user("user", "target", &StreamReach::Friends).to_cypher_populated();
+        assert!(
+            friends.contains("(user)-[:FOLLOWS]->(target)")
+                && friends.contains("(target)-[:FOLLOWS]->(user)"),
+            "friends must check both directions:\n{friends}"
+        );
     }
 
     #[test]

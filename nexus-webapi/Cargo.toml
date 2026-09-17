@@ -92,6 +92,10 @@ name = "search"
 harness = false
 
 [[bench]]
+name = "search_reach"
+harness = false
+
+[[bench]]
 name = "avatar"
 harness = false
 

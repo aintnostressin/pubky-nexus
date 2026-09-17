@@ -5,12 +5,23 @@ use crate::models::{
 use crate::routes::v0::endpoints::{SEARCH_POSTS_BY_CONTENT_ROUTE, SEARCH_POSTS_BY_TAG_ROUTE};
 use crate::routes::{Path, Query};
 use crate::{Error, Result};
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::Json;
-use nexus_common::models::post::search::{PostsByContentSearch, PostsByTagSearch};
+use nexus_common::db::kv::AuthorFilter;
+use nexus_common::models::follow::reach::{reach_contains, reach_user_ids};
+use nexus_common::models::post::search::{
+    PostsByContentSearch, PostsByTagSearch, MAX_REACH_AUTHORS_FT,
+};
 use nexus_common::types::{StreamReach, StreamSorting};
 use serde::Deserialize;
 use tracing::debug;
 use utoipa::OpenApi;
+
+/// Set on reach-scoped content searches: `true` when the reach held more than
+/// [`MAX_REACH_AUTHORS_FT`] users and only the most prolific ones were searched.
+pub const REACH_TRUNCATED_HEADER: HeaderName = HeaderName::from_static("x-reach-truncated");
+/// Set on reach-scoped content searches: how many authors were searched.
+pub const REACH_AUTHORS_HEADER: HeaderName = HeaderName::from_static("x-reach-authors");
 
 #[derive(Deserialize)]
 pub struct SearchPostsQuery {
@@ -83,6 +94,8 @@ pub struct SearchPostsByContentQuery {
     pub q: PostSearchQuery,
     pub author: Option<PubkyId>,
     pub kind: Option<PubkyAppPostKind>,
+    pub user_id: Option<PubkyId>,
+    pub reach: Option<StreamReach>,
     #[serde(flatten)]
     pub pagination: BoundedPagination<1000, 20, 100>,
 }
@@ -96,11 +109,16 @@ pub struct SearchPostsByContentQuery {
         ("q" = PostSearchQuery, Query, description = "Search query (2–30 characters, up to 4 terms)"),
         ("author" = Option<PubkyId>, Query, description = "Optional author Pubky ID to scope results"),
         ("kind" = Option<PubkyAppPostKind>, Query, description = "Optional post kind to filter by: short, long, image, video, link, file, collection"),
+        ("user_id" = Option<PubkyId>, Query, description = "User ID to base reach on. Must be provided together with reach"),
+        ("reach" = Option<StreamReach>, Query, example = "following", description = format!("Reach type: `followers` | `following` | `friends` | `wot` | `wot_1`..`wot_3`. Scopes results to posts authored by users in that reach, never by user_id itself. To apply that, user_id is required. Bare `wot` defaults to depth 2. Combined with `author`, results are that author's posts if the author is in reach, and empty otherwise. A reach of more than {MAX_REACH_AUTHORS_FT} users is trimmed to the {MAX_REACH_AUTHORS_FT} with the most posts")),
         ("skip" = Option<BoundedSkip<1000>>, Query, description = "Skip N results (max 1000)"),
         ("limit" = Option<BoundedLimit<20, 100>>, Query, description = "Limit the number of results (1–100, default 20)")
     ),
     responses(
-        (status = 200, description = "Search results ordered by relevance score", body = Vec<PostsByContentSearch>),
+        (status = 200, description = "Search results ordered by relevance score", body = Vec<PostsByContentSearch>, headers(
+            ("X-Reach-Truncated" = bool, description = "Only with `reach`: `true` when the reach was trimmed to its most prolific authors, so posts by other users in the reach were not searched"),
+            ("X-Reach-Authors" = u64, description = "Only with `reach`: how many authors were searched"),
+        )),
         (status = 400, description = "Invalid query or limit parameter"),
         (status = 429, description = "Rate limit exceeded", headers(("Retry-After" = u64, description = "Seconds until retry"))),
         (status = 500, description = "Internal server error")
@@ -108,26 +126,63 @@ pub struct SearchPostsByContentQuery {
 )]
 pub async fn search_posts_by_content_handler(
     Query(query): Query<SearchPostsByContentQuery>,
-) -> Result<Json<Vec<PostsByContentSearch>>> {
+) -> Result<(HeaderMap, Json<Vec<PostsByContentSearch>>)> {
     let skip = query.pagination.skip_value();
     let limit = query.pagination.limit_value();
 
     debug!(
-        "GET {SEARCH_POSTS_BY_CONTENT_ROUTE} q:{}, author:{:?}, kind:{:?}, skip:{skip}, limit:{limit}",
-        query.q, query.author, query.kind
+        "GET {SEARCH_POSTS_BY_CONTENT_ROUTE} q:{}, author:{:?}, kind:{:?}, user_id:{:?}, reach:{:?}, skip:{skip}, limit:{limit}",
+        query.q, query.author, query.kind, query.user_id, query.reach
     );
+
+    if query.user_id.is_some() ^ query.reach.is_some() {
+        return Err(Error::invalid_input(
+            "user_id and reach should be both provided together",
+        ));
+    }
 
     let kind_str = query.kind.as_ref().map(|k| k.to_string());
 
-    let results = PostsByContentSearch::search(
-        query.q.as_str(),
-        query.author.as_deref(),
-        kind_str.as_deref(),
-        skip,
-        limit,
-    )
-    .await?;
-    Ok(Json(results))
+    let mut headers = HeaderMap::new();
+    let reach_ids;
+    let author = match (query.author.as_ref(), query.user_id, query.reach) {
+        (author, Some(user_id), Some(reach)) => match author {
+            // author and reach intersect: the author's posts, if in reach
+            Some(author) => {
+                if !reach_contains(&user_id, &reach, author).await? {
+                    set_reach_headers(&mut headers, false, 0);
+                    return Ok((headers, Json(vec![])));
+                }
+                set_reach_headers(&mut headers, false, 1);
+                Some(AuthorFilter::One(author))
+            }
+            None => {
+                // Over the cap, the most prolific authors are kept
+                let reach_users = reach_user_ids(&user_id, &reach, MAX_REACH_AUTHORS_FT).await?;
+                set_reach_headers(
+                    &mut headers,
+                    reach_users.truncated,
+                    reach_users.user_ids.len(),
+                );
+                reach_ids = reach_users.user_ids;
+                Some(AuthorFilter::AnyOf(&reach_ids))
+            }
+        },
+        (author, _, _) => author.map(AuthorFilter::One),
+    };
+
+    let results =
+        PostsByContentSearch::search(query.q.as_str(), author, kind_str.as_deref(), skip, limit)
+            .await?;
+    Ok((headers, Json(results)))
+}
+
+fn set_reach_headers(headers: &mut HeaderMap, truncated: bool, authors: usize) {
+    headers.insert(
+        REACH_TRUNCATED_HEADER,
+        HeaderValue::from_static(if truncated { "true" } else { "false" }),
+    );
+    headers.insert(REACH_AUTHORS_HEADER, HeaderValue::from(authors));
 }
 
 #[derive(OpenApi)]
@@ -163,6 +218,22 @@ mod tests {
     #[test]
     fn author_invalid_format_rejected() {
         assert!(parse_query("q=bitcoin&author=not-a-pubky").is_err());
+    }
+
+    #[test]
+    fn reach_parses_with_user_id() {
+        let q = parse_query(
+            "q=bitcoin&user_id=wnhrmj3b1tt3n6fr7fhedgak4q11e9i1uxm4dmiactgeobyu9wpy&reach=wot_3",
+        )
+        .expect("valid reach must parse");
+        assert!(q.user_id.is_some());
+        assert!(matches!(q.reach, Some(StreamReach::Wot(depth)) if depth.get() == 3));
+    }
+
+    #[test]
+    fn reach_invalid_rejected() {
+        assert!(parse_query("q=bitcoin&reach=wot_4").is_err());
+        assert!(parse_query("q=bitcoin&reach=everyone").is_err());
     }
 
     #[test]
