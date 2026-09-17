@@ -3,7 +3,9 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::body::Body;
 use axum::extract::Path;
-use axum::http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_LENGTH, ORIGIN};
+use axum::http::header::{
+    ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS, CONTENT_LENGTH, ORIGIN,
+};
 use axum::http::{Method, Request, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
@@ -167,6 +169,41 @@ async fn test_body_size_limit_response_has_cors_header() -> Result<()> {
         "cross-origin clients need CORS headers to read the 413 response"
     );
 
+    Ok(())
+}
+
+/// Browsers hide custom response headers from cross-origin clients unless
+/// CORS exposes them, which would make the reach search headers unreadable.
+#[tokio::test]
+async fn test_cors_exposes_reach_search_headers() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let state = AppState::new(
+        temp_dir.path().to_path_buf(),
+        default_ingestor_tests(),
+        MediaPermits::new(1),
+        default_subprocess_tests(),
+    );
+    let routes = Router::new().route("/ok", get(ok_handler));
+    let app = build_app(routes, state, 30, 1024 * 1024);
+
+    let req = Request::builder()
+        .uri("/ok")
+        .header(ORIGIN, "https://example.com")
+        .body(Body::empty())?;
+    let response = app.oneshot(req).await?;
+
+    let exposed = response
+        .headers()
+        .get(ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    for header in ["x-reach-truncated", "x-reach-authors"] {
+        assert!(
+            exposed.split(',').any(|h| h.trim() == header),
+            "{header} must be exposed, got: {exposed:?}"
+        );
+    }
     Ok(())
 }
 

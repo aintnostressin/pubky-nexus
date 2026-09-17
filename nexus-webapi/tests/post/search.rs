@@ -1,5 +1,7 @@
 use anyhow::Result;
 use axum::http::StatusCode;
+use deadpool_redis::redis::AsyncCommands;
+use nexus_common::db::get_redis_conn;
 use nexus_common::models::post::PostDetails;
 use nexus_webapi::models::ErrorResponsePayload;
 use nexus_webapi::routes::v0::endpoints::{
@@ -10,12 +12,13 @@ use serde_json::Value;
 use crate::{
     stream::post::TAG_LABEL_2,
     utils::{
-        get_request, invalid_get_request,
+        get_request, get_response, invalid_get_request,
         search_reach::{
-            post_key, D2, FOLLOWED, FOLLOWER, FRIEND, OBS, POST_D2, POST_FOLLOWED, POST_FOLLOWER,
-            POST_FRIEND, POST_FRIEND_REPLY, POST_OBS, POST_STRANGER, POST_TAG, STRANGER,
-            UNKNOWN_USER,
+            post_key, CONTENT_TERM, D2, FOLLOWED, FOLLOWER, FRIEND, OBS, POST_D2, POST_FOLLOWED,
+            POST_FOLLOWER, POST_FRIEND, POST_FRIEND_REPLY, POST_OBS, POST_STRANGER, POST_TAG,
+            STRANGER, UNKNOWN_USER,
         },
+        server::TestServiceServer,
     },
 };
 
@@ -602,6 +605,276 @@ async fn test_post_search_by_tag_reach_requires_both_params() -> Result<()> {
     .await?;
     invalid_get_request(
         &tag_reach_url(&format!("user_id={OBS}&reach=wot_4")),
+        StatusCode::BAD_REQUEST,
+    )
+    .await?;
+    Ok(())
+}
+
+// ── Reach-filtered content search tests ───────────────────────────────────────
+
+fn content_reach_url(query: &str) -> String {
+    format!("{}&{query}", content_search_url(CONTENT_TERM))
+}
+
+fn result_scores(body: &Value) -> Vec<f64> {
+    body.as_array()
+        .expect("Search results should be an array")
+        .iter()
+        .map(|row| row["score"].as_f64().expect("score should be a number"))
+        .collect()
+}
+
+fn sorted(mut keys: Vec<String>) -> Vec<String> {
+    keys.sort();
+    keys
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_content_search_reach_scopes_authors() -> Result<()> {
+    let cases = [
+        (
+            "following",
+            vec![
+                post_key(FRIEND, POST_FRIEND),
+                post_key(FOLLOWED, POST_FOLLOWED),
+            ],
+        ),
+        (
+            "followers",
+            vec![
+                post_key(FRIEND, POST_FRIEND),
+                post_key(FOLLOWER, POST_FOLLOWER),
+            ],
+        ),
+        ("friends", vec![post_key(FRIEND, POST_FRIEND)]),
+        (
+            "wot_2",
+            vec![
+                post_key(FRIEND, POST_FRIEND),
+                post_key(FOLLOWED, POST_FOLLOWED),
+                post_key(D2, POST_D2),
+            ],
+        ),
+    ];
+    for (reach, expected) in cases {
+        let body = get_request(&content_reach_url(&format!("user_id={OBS}&reach={reach}"))).await?;
+        // The observer's own post and the stranger's posts never show up
+        assert_eq!(sorted(post_keys(&body)), sorted(expected), "reach={reach}");
+        let scores = result_scores(&body);
+        assert!(
+            scores.windows(2).all(|w| w[0] >= w[1]),
+            "reach={reach} must keep relevance order: {scores:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_content_search_reach_small_network_first_page() -> Result<()> {
+    // Unscoped, the stranger's repeated-term posts take the whole first page
+    let unscoped =
+        post_keys(&get_request(&format!("{}&limit=3", content_search_url(CONTENT_TERM))).await?);
+    assert_eq!(unscoped.len(), 3);
+    assert!(
+        unscoped.iter().all(|key| key.starts_with(STRANGER)),
+        "fixture must rank out-of-reach posts first: {unscoped:?}"
+    );
+
+    // The reach is applied inside the search, not to an already cut page
+    let body = get_request(&content_reach_url(&format!(
+        "user_id={OBS}&reach=following&limit=2"
+    )))
+    .await?;
+    assert_eq!(
+        sorted(post_keys(&body)),
+        sorted(vec![
+            post_key(FRIEND, POST_FRIEND),
+            post_key(FOLLOWED, POST_FOLLOWED)
+        ])
+    );
+
+    // Pagination stays exact within the reach
+    let first = get_request(&content_reach_url(&format!(
+        "user_id={OBS}&reach=following&limit=1"
+    )))
+    .await?;
+    let second = get_request(&content_reach_url(&format!(
+        "user_id={OBS}&reach=following&limit=1&skip=1"
+    )))
+    .await?;
+    assert_eq!(
+        [post_keys(&first), post_keys(&second)].concat(),
+        post_keys(&body)
+    );
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_content_search_reach_with_author() -> Result<()> {
+    // In reach: the author's posts only
+    let body = get_request(&content_reach_url(&format!(
+        "user_id={OBS}&reach=following&author={FRIEND}"
+    )))
+    .await?;
+    assert_eq!(post_keys(&body), vec![post_key(FRIEND, POST_FRIEND)]);
+
+    let body = get_request(&content_reach_url(&format!(
+        "user_id={OBS}&reach=wot_2&author={D2}"
+    )))
+    .await?;
+    assert_eq!(post_keys(&body), vec![post_key(D2, POST_D2)]);
+
+    // Out of reach, or the observer: empty
+    for (reach, author) in [
+        ("following", STRANGER),
+        ("following", FOLLOWER),
+        ("friends", FOLLOWED),
+        ("wot_1", D2),
+        ("wot_2", OBS),
+        ("followers", OBS),
+    ] {
+        let body = get_request(&content_reach_url(&format!(
+            "user_id={OBS}&reach={reach}&author={author}"
+        )))
+        .await?;
+        assert!(
+            post_keys(&body).is_empty(),
+            "reach={reach} author={author} should be empty"
+        );
+    }
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_content_search_reach_empty() -> Result<()> {
+    // D2 follows nobody; UNKNOWN_USER does not exist
+    for (user_id, reach) in [
+        (D2, "following"),
+        (D2, "wot_3"),
+        (UNKNOWN_USER, "followers"),
+        (UNKNOWN_USER, "wot_2"),
+    ] {
+        let body = get_request(&content_reach_url(&format!(
+            "user_id={user_id}&reach={reach}"
+        )))
+        .await?;
+        assert!(
+            post_keys(&body).is_empty(),
+            "user_id={user_id} reach={reach} should be empty"
+        );
+    }
+    Ok(())
+}
+
+/// `(X-Reach-Truncated, X-Reach-Authors)` of a content search response.
+async fn reach_headers(url: &str) -> Result<(Option<String>, Option<String>)> {
+    let res = get_response(url).await?;
+    Ok((
+        res.header("x-reach-truncated"),
+        res.header("x-reach-authors"),
+    ))
+}
+
+fn complete(authors: usize) -> (Option<String>, Option<String>) {
+    (Some("false".to_string()), Some(authors.to_string()))
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_content_search_reach_headers() -> Result<()> {
+    // Unscoped searches carry no reach headers
+    assert_eq!(
+        reach_headers(&content_search_url(CONTENT_TERM)).await?,
+        (None, None)
+    );
+    assert_eq!(
+        reach_headers(&content_reach_url(&format!("author={FRIEND}"))).await?,
+        (None, None)
+    );
+
+    // Reaches under the cap are searched in full
+    for (source, authors) in [("following", 2), ("friends", 1), ("wot_2", 3)] {
+        assert_eq!(
+            reach_headers(&content_reach_url(&format!("user_id={OBS}&reach={source}"))).await?,
+            complete(authors),
+            "reach={source}"
+        );
+    }
+    assert_eq!(
+        reach_headers(&content_reach_url(&format!("user_id={D2}&reach=following"))).await?,
+        complete(0)
+    );
+
+    // With an author, only that author is searched, if in reach
+    assert_eq!(
+        reach_headers(&content_reach_url(&format!(
+            "user_id={OBS}&reach=following&author={FRIEND}"
+        )))
+        .await?,
+        complete(1)
+    );
+    assert_eq!(
+        reach_headers(&content_reach_url(&format!(
+            "user_id={OBS}&reach=following&author={STRANGER}"
+        )))
+        .await?,
+        complete(0)
+    );
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_content_search_reach_ignores_stale_follow_cache() {
+    // FOLLOWER follows OBS only. A stale cached follow set that also lists
+    // STRANGER must not change either answer: membership comes from the graph.
+    // FOLLOWER is the observer in this test only.
+    TestServiceServer::get_test_server().await;
+    let key = format!("Following:{FOLLOWER}");
+    let mut redis_conn = get_redis_conn().await.unwrap();
+    let _: () = redis_conn.sadd(&key, STRANGER).await.unwrap();
+
+    let checks = async {
+        let scoped = get_request(&content_reach_url(&format!(
+            "user_id={FOLLOWER}&reach=following"
+        )))
+        .await?;
+        let with_stranger = get_request(&content_reach_url(&format!(
+            "user_id={FOLLOWER}&reach=following&author={STRANGER}"
+        )))
+        .await?;
+        let with_obs = get_request(&content_reach_url(&format!(
+            "user_id={FOLLOWER}&reach=following&author={OBS}"
+        )))
+        .await?;
+        anyhow::Ok((
+            post_keys(&scoped),
+            post_keys(&with_stranger),
+            post_keys(&with_obs),
+        ))
+    }
+    .await;
+
+    // Restore the cache before asserting, so a failure can't leak into others
+    let _: () = redis_conn.srem(&key, STRANGER).await.unwrap();
+
+    let (scoped, with_stranger, with_obs) = checks.unwrap();
+    assert_eq!(scoped, vec![post_key(OBS, POST_OBS)]);
+    assert!(
+        with_stranger.is_empty(),
+        "author filter must agree with the reach listing: {with_stranger:?}"
+    );
+    assert_eq!(with_obs, scoped);
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_content_search_reach_requires_both_params() -> Result<()> {
+    invalid_get_request(
+        &content_reach_url("reach=following"),
+        StatusCode::BAD_REQUEST,
+    )
+    .await?;
+    invalid_get_request(
+        &content_reach_url(&format!("user_id={OBS}")),
         StatusCode::BAD_REQUEST,
     )
     .await?;
