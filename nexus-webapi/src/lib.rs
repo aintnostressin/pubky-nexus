@@ -9,6 +9,8 @@
 //!   ensuring high performance and scalability.
 //! - **Database interactions:** Integrates with underlying data stores such as Neo4j for
 //!   graph-based data and Redis for caching and key-value storage.
+//! - **Endpoint payloads:** Composes response views that exist for one endpoint only, such as
+//!   the bootstrap payload, out of the shared `nexus-common` models.
 //! - **Media processing:** Derives file variants (resized images, and eventually video) on
 //!   demand, bounded by a shared permit pool so conversions cannot swamp the server.
 //! - **Middleware and observability:** Provides middleware for logging and tracing (via OpenTelemetry)

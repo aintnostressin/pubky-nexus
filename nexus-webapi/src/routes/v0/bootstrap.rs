@@ -1,4 +1,4 @@
-use crate::models::PubkyId;
+use crate::models::{Bootstrap, PubkyId, ViewType};
 use crate::routes::v0::endpoints::BOOTSTRAP_ROUTE;
 use crate::routes::v0::endpoints::INGEST_USER_ROUTE;
 use crate::routes::AppState;
@@ -9,7 +9,6 @@ use axum::extract::State;
 use axum::routing::{get, put};
 use axum::Json;
 use axum::Router;
-use nexus_common::models::bootstrap::{Bootstrap, ViewType};
 use tracing::debug;
 use utoipa::OpenApi;
 

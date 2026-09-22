@@ -1,25 +1,19 @@
 use std::collections::HashSet;
 
-use crate::db::kv::SortOrder;
-use crate::models::notification::Notification;
-use crate::models::tag::stream::{HotTag, HotTags};
-use crate::models::tag::TaggedType;
-use crate::types::routes::HotTagsInputDTO;
-use crate::types::{Pagination, StreamSorting, Timeframe};
-use futures::stream::{self, StreamExt};
-
-use super::error::ModelResult;
-
-use crate::models::{
-    file::FileDetails,
-    post::{PostStream, StreamSource},
-    traits::Collection,
-    user::{Influencers, UserStream},
-};
+use futures_util::stream::{self, StreamExt};
+use nexus_common::db::kv::SortOrder;
+use nexus_common::models::error::ModelResult;
+use nexus_common::models::file::FileDetails;
+use nexus_common::models::notification::Notification;
+use nexus_common::models::post::{PostStream, StreamSource};
+use nexus_common::models::tag::stream::{HotTag, HotTags};
+use nexus_common::models::tag::TaggedType;
+use nexus_common::models::traits::Collection;
+use nexus_common::models::user::{Influencers, UserDetails, UserStream};
+use nexus_common::types::routes::HotTagsInputDTO;
+use nexus_common::types::{Pagination, StreamSorting, Timeframe};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-
-use super::user::UserDetails;
 
 const BOOTSTRAP_NOTIFICATIONS_LIMIT: usize = 30;
 pub const BOOTSTRAP_HOT_TAGS_LIMIT: usize = 5;

@@ -8,6 +8,7 @@
 //! - **Media Vocabulary:** Naming file variants and the table of which ones a content type has
 //!   (deriving them lives in `nexus-webapi`, the only service that does it).
 //! - **Data Models:** Defining common models for files, users, posts, tags, notifications, and follow relationships.
+//!   Payloads composed for a single endpoint, such as the bootstrap view, live in `nexus-webapi` beside their route.
 //! - **Indexing and Caching:** Offering utilities for indexing data in Redis and retrieving it using cache-first strategies.
 //! - **Shared Types and Traits:** Exposing common types (e.g. pagination, timeframe, stream sorting) and traits
 //!   used throughout the Nexus stack.

@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use crate::utils::get_request;
 use anyhow::Result;
-use nexus_common::models::bootstrap::{Bootstrap, BOOTSTRAP_HOT_TAGS_LIMIT};
 use nexus_common::models::notification::Notification;
 use nexus_common::models::notification::NotificationBody;
+use nexus_webapi::models::bootstrap::{Bootstrap, BOOTSTRAP_HOT_TAGS_LIMIT};
 
 #[tokio_shared_rt::test(shared)]
 async fn test_bootstrap_user() -> Result<()> {

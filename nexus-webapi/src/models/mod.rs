@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod error_response;
 pub mod info;
 pub mod post;
@@ -20,6 +21,7 @@ use std::ops::Deref;
 use serde::Deserialize;
 use utoipa::ToSchema;
 
+pub use bootstrap::{Bootstrap, ViewType};
 pub use bounded_limit::BoundedLimit;
 pub use bounded_pagination::BoundedPagination;
 pub use bounded_skip::BoundedSkip;
