@@ -29,10 +29,14 @@ threads-required = 'num-test-threads'
 
 # user::views::test_social_graph_status drops and rebuilds the shared trust
 # ranking (Sorted:Users:SocialGraph). The hot-tags trust filter is gated on
-# that ranking existing, so the two reach tests that assert it must not run
-# while the key is gone. A group (declared above), not exclusivity: only these
-# three interact.
+# that ranking existing, so no test that reads a hot-tags surface may run while
+# the key is gone: the two reach tests would see the filter off and get the
+# unranked taggers back, and the two global taggers tests would read the
+# unranked cache variant, which reindex never warms (db mock builds the ranking
+# first) and which the global taggers path never fills on a miss, so they would
+# get an empty list. A group (declared above), not exclusivity: only these five
+# interact.
 
 [[profile.default.overrides]]
-filter = 'test(=user::views::test_social_graph_status) | test(=tags::hot::test_hot_tags_by_reach_hide_unranked_taggers) | test(=tags::hot::test_hot_tags_label_taggers_by_reach_hide_unranked_taggers)'
+filter = 'test(=user::views::test_social_graph_status) | test(=tags::hot::test_hot_tags_by_reach_hide_unranked_taggers) | test(=tags::hot::test_hot_tags_label_taggers_by_reach_hide_unranked_taggers) | test(=tags::hot::test_hot_tags_label_taggers) | test(=tags::hot::test_hot_tags_label_taggers_with_skip_limit_and_timeframe)'
 test-group = 'trust-ranking'
