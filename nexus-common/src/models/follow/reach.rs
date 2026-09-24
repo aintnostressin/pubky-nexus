@@ -1,6 +1,5 @@
 use crate::db::{fetch_all_rows_from_graph, fetch_key_from_graph, queries, GraphError};
 use crate::models::error::ModelResult;
-use crate::models::follow::metrics::record_reach_resolution;
 use crate::types::StreamReach;
 use pubky_app_specs::PubkyId;
 use tokio::time::{timeout, Duration};
@@ -14,17 +13,13 @@ pub struct ReachUsers {
     /// At most `limit` users, the most prolific authors first.
     pub user_ids: Vec<PubkyId>,
     /// The reach held more than `limit` users, so `user_ids` is a subset.
-    pub truncated: bool,
+    pub met_limit: bool,
 }
 
 /// Resolves up to `limit` users in `observer_id`'s `reach`, never including the
 /// observer. A larger reach is trimmed to the users with the most posts, so a
 /// scoped search keeps the authors most likely to match, and the result is
-/// flagged as truncated. An unknown observer has an empty reach.
-///
-/// Every resolution is recorded under `search.reach.users` /
-/// `search.reach.truncated`, so how often the limit bites is visible without
-/// the caller reporting it.
+/// flagged with `met_limit`. An unknown observer has an empty reach.
 ///
 /// # Errors
 /// Returns an error when the graph read fails, including
@@ -45,7 +40,7 @@ pub async fn reach_user_ids(
         .map(|row| row.get::<String>("user_id"))
         .collect::<Result<Vec<_>, _>>()
         .map_err(GraphError::from)?;
-    let truncated = ids.len() > limit;
+    let met_limit = ids.len() > limit;
     // Graph ids come from validated events; one that doesn't parse is dropped
     // rather than failing the whole search
     let user_ids: Vec<PubkyId> = ids
@@ -59,10 +54,9 @@ pub async fn reach_user_ids(
             }
         })
         .collect();
-    record_reach_resolution(reach, user_ids.len(), truncated);
     Ok(ReachUsers {
         user_ids,
-        truncated,
+        met_limit,
     })
 }
 
@@ -129,7 +123,7 @@ mod tests {
         for (reach, expected) in cases {
             let users = reach_user_ids(OBS, &reach, 1_000).await?;
             assert_eq!(as_strs(&users.user_ids), expected, "{reach:?}");
-            assert!(!users.truncated, "{reach:?}");
+            assert!(!users.met_limit, "{reach:?}");
         }
         Ok(())
     }
@@ -144,7 +138,7 @@ mod tests {
                 .iter()
                 .map(|id| PubkyId::try_from(id).expect("valid Pubky id"))
                 .collect(),
-            truncated: true,
+            met_limit: true,
         };
         assert_eq!(
             reach_user_ids(OBS, &wot(2), 2).await?,
@@ -156,7 +150,7 @@ mod tests {
         let exact = reach_user_ids(OBS, &wot(2), 3).await?;
         assert_eq!(as_strs(&exact.user_ids), vec![FRIEND, D2, FOLLOWED]);
         assert!(
-            !exact.truncated,
+            !exact.met_limit,
             "a reach of exactly `limit` users is complete"
         );
         Ok(())

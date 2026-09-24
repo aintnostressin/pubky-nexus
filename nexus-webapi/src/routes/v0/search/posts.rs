@@ -12,7 +12,10 @@ use nexus_common::models::post::search::{
     PostsByContentSearch, PostsByTagSearch, MAX_REACH_AUTHORS_FT,
 };
 use nexus_common::types::{StreamReach, StreamSorting};
+use opentelemetry::metrics::{Histogram, Meter};
+use opentelemetry::{global, KeyValue};
 use serde::Deserialize;
+use std::sync::LazyLock;
 use tracing::debug;
 use utoipa::OpenApi;
 
@@ -82,6 +85,48 @@ pub async fn search_posts_by_tag_handler(
     }
 }
 
+const METER_NAME: &str = "search.posts.by_content";
+
+/// How large the reaches a full-text content search resolves are, and how often
+/// `MAX_REACH_AUTHORS_FT` cut one short. The instrument is a no-op when no
+/// `SdkMeterProvider` is registered (i.e. when OTLP is not configured), so
+/// there is zero overhead in that case.
+struct ContentSearchMetrics {
+    reach_users: Histogram<u64>,
+}
+
+impl ContentSearchMetrics {
+    fn new(meter: &Meter) -> Self {
+        Self {
+            reach_users: meter
+                .u64_histogram("search.posts.by_content.reach.users")
+                .with_description(
+                    "Users a content search's reach resolved to, by reach/depth/met_limit",
+                )
+                .with_unit("{user}")
+                .build(),
+        }
+    }
+
+    /// `reach`/`depth` are the attributes the reach graph queries already
+    /// carry, so a reach can be followed across both. `met_limit` splits off the
+    /// searches that only saw part of the reach.
+    fn record_reach_resolution(&self, reach: &StreamReach, users: usize, met_limit: bool) {
+        let (name, depth) = reach.telemetry_dimensions();
+        let mut attrs = vec![
+            KeyValue::new("reach", name),
+            KeyValue::new("met_limit", met_limit),
+        ];
+        if let Some(depth) = depth {
+            attrs.push(KeyValue::new("depth", i64::from(depth)));
+        }
+        self.reach_users.record(users as u64, &attrs);
+    }
+}
+
+static METRICS: LazyLock<ContentSearchMetrics> =
+    LazyLock::new(|| ContentSearchMetrics::new(&global::meter(METER_NAME)));
+
 #[derive(Deserialize)]
 pub struct SearchPostsByContentQuery {
     pub q: PostSearchQuery,
@@ -144,10 +189,11 @@ pub async fn search_posts_by_content_handler(
                 Some(AuthorFilter::One(author))
             }
             None => {
-                // Over the cap, the most prolific authors are kept. How often
-                // that happens is in the `search.reach.truncated` metric
+                // Over the cap, the most prolific authors are kept; how often
+                // that happens is in the `met_limit` attribute of the metric
                 let reach_users = reach_user_ids(&user_id, &reach, MAX_REACH_AUTHORS_FT).await?;
                 reach_ids = reach_users.user_ids;
+                METRICS.record_reach_resolution(&reach, reach_ids.len(), reach_users.met_limit);
                 Some(AuthorFilter::AnyOf(&reach_ids))
             }
         },
@@ -176,6 +222,10 @@ pub struct SearchPostsApiDocs;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nexus_common::types::WotDepth;
+    use opentelemetry::metrics::MeterProvider;
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, Metric, MetricData};
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 
     fn parse_query(
         s: &str,
@@ -228,5 +278,74 @@ mod tests {
         let q =
             parse_query("q=bitcoin&kind=not-a-kind").expect("lenient kind parsing must not error");
         assert_eq!(q.kind, Some(PubkyAppPostKind::Unknown));
+    }
+
+    /// `attr=value` pairs of a data point, sorted, so the assertions don't
+    /// depend on the order the SDK keeps them in.
+    fn attrs(point: impl Iterator<Item = KeyValue>) -> Vec<String> {
+        let mut attrs: Vec<String> = point.map(|kv| format!("{}={}", kv.key, kv.value)).collect();
+        attrs.sort();
+        attrs
+    }
+
+    /// Every point of `name` as `(attributes, sum)`, sorted by sum.
+    fn points(exported: &[&Metric], name: &str) -> Vec<(Vec<String>, u64)> {
+        let data = exported
+            .iter()
+            .find(|m| m.name() == name)
+            .unwrap_or_else(|| panic!("{name} must be exported"))
+            .data();
+        let mut points: Vec<_> = match data {
+            AggregatedMetrics::U64(MetricData::Histogram(h)) => h
+                .data_points()
+                .map(|p| (attrs(p.attributes().cloned()), p.sum()))
+                .collect(),
+            other => panic!("unexpected aggregation for {name}: {other:?}"),
+        };
+        points.sort_by_key(|(_, sum)| *sum);
+        points
+    }
+
+    /// Asserts on the exported points, not on the calls: an instrument renamed
+    /// or an attribute dropped is what breaks the dashboards.
+    #[test]
+    fn records_reach_size_and_whether_the_limit_was_met() {
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        let metrics = ContentSearchMetrics::new(&provider.meter(METER_NAME));
+        let wot_3 = StreamReach::Wot(WotDepth::new(3).expect("valid depth"));
+
+        metrics.record_reach_resolution(&StreamReach::Following, 7, false);
+        metrics.record_reach_resolution(&wot_3, MAX_REACH_AUTHORS_FT, true);
+        provider.force_flush().expect("flush must succeed");
+
+        let collected = exporter.get_finished_metrics().expect("metrics collected");
+        let exported: Vec<&Metric> = collected
+            .iter()
+            .flat_map(|rm| rm.scope_metrics())
+            .flat_map(|sm| sm.metrics())
+            .collect();
+
+        // met_limit splits the searches that missed part of the reach off the
+        // same instrument, so no second one is needed to tell them apart
+        assert_eq!(
+            points(&exported, "search.posts.by_content.reach.users"),
+            vec![
+                (
+                    vec!["met_limit=false".to_string(), "reach=following".to_string()],
+                    7
+                ),
+                (
+                    vec![
+                        "depth=3".to_string(),
+                        "met_limit=true".to_string(),
+                        "reach=wot".to_string()
+                    ],
+                    MAX_REACH_AUTHORS_FT as u64
+                ),
+            ]
+        );
     }
 }
