@@ -1,6 +1,7 @@
 mod followers;
 mod following;
 mod friends;
+mod metrics;
 pub mod reach;
 mod traits;
 

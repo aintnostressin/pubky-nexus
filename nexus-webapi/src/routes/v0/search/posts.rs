@@ -5,7 +5,6 @@ use crate::models::{
 use crate::routes::v0::endpoints::{SEARCH_POSTS_BY_CONTENT_ROUTE, SEARCH_POSTS_BY_TAG_ROUTE};
 use crate::routes::{Path, Query};
 use crate::{Error, Result};
-use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::Json;
 use nexus_common::db::kv::AuthorFilter;
 use nexus_common::models::follow::reach::{reach_contains, reach_user_ids};
@@ -16,12 +15,6 @@ use nexus_common::types::{StreamReach, StreamSorting};
 use serde::Deserialize;
 use tracing::debug;
 use utoipa::OpenApi;
-
-/// Set on reach-scoped content searches: `true` when the reach held more than
-/// [`MAX_REACH_AUTHORS_FT`] users and only the most prolific ones were searched.
-pub const REACH_TRUNCATED_HEADER: HeaderName = HeaderName::from_static("x-reach-truncated");
-/// Set on reach-scoped content searches: how many authors were searched.
-pub const REACH_AUTHORS_HEADER: HeaderName = HeaderName::from_static("x-reach-authors");
 
 #[derive(Deserialize)]
 pub struct SearchPostsQuery {
@@ -115,10 +108,7 @@ pub struct SearchPostsByContentQuery {
         ("limit" = Option<BoundedLimit<20, 100>>, Query, description = "Limit the number of results (1–100, default 20)")
     ),
     responses(
-        (status = 200, description = "Search results ordered by relevance score", body = Vec<PostsByContentSearch>, headers(
-            ("X-Reach-Truncated" = bool, description = "Only with `reach`: `true` when the reach was trimmed to its most prolific authors, so posts by other users in the reach were not searched"),
-            ("X-Reach-Authors" = u64, description = "Only with `reach`: how many authors were searched"),
-        )),
+        (status = 200, description = "Search results ordered by relevance score", body = Vec<PostsByContentSearch>),
         (status = 400, description = "Invalid query or limit parameter"),
         (status = 429, description = "Rate limit exceeded", headers(("Retry-After" = u64, description = "Seconds until retry"))),
         (status = 500, description = "Internal server error")
@@ -126,7 +116,7 @@ pub struct SearchPostsByContentQuery {
 )]
 pub async fn search_posts_by_content_handler(
     Query(query): Query<SearchPostsByContentQuery>,
-) -> Result<(HeaderMap, Json<Vec<PostsByContentSearch>>)> {
+) -> Result<Json<Vec<PostsByContentSearch>>> {
     let skip = query.pagination.skip_value();
     let limit = query.pagination.limit_value();
 
@@ -143,27 +133,20 @@ pub async fn search_posts_by_content_handler(
 
     let kind_str = query.kind.as_ref().map(|k| k.to_string());
 
-    let mut headers = HeaderMap::new();
     let reach_ids;
     let author = match (query.author.as_ref(), query.user_id, query.reach) {
         (author, Some(user_id), Some(reach)) => match author {
             // author and reach intersect: the author's posts, if in reach
             Some(author) => {
                 if !reach_contains(&user_id, &reach, author).await? {
-                    set_reach_headers(&mut headers, false, 0);
-                    return Ok((headers, Json(vec![])));
+                    return Ok(Json(vec![]));
                 }
-                set_reach_headers(&mut headers, false, 1);
                 Some(AuthorFilter::One(author))
             }
             None => {
-                // Over the cap, the most prolific authors are kept
+                // Over the cap, the most prolific authors are kept. How often
+                // that happens is in the `search.reach.truncated` metric
                 let reach_users = reach_user_ids(&user_id, &reach, MAX_REACH_AUTHORS_FT).await?;
-                set_reach_headers(
-                    &mut headers,
-                    reach_users.truncated,
-                    reach_users.user_ids.len(),
-                );
                 reach_ids = reach_users.user_ids;
                 Some(AuthorFilter::AnyOf(&reach_ids))
             }
@@ -174,15 +157,7 @@ pub async fn search_posts_by_content_handler(
     let results =
         PostsByContentSearch::search(query.q.as_str(), author, kind_str.as_deref(), skip, limit)
             .await?;
-    Ok((headers, Json(results)))
-}
-
-fn set_reach_headers(headers: &mut HeaderMap, truncated: bool, authors: usize) {
-    headers.insert(
-        REACH_TRUNCATED_HEADER,
-        HeaderValue::from_static(if truncated { "true" } else { "false" }),
-    );
-    headers.insert(REACH_AUTHORS_HEADER, HeaderValue::from(authors));
+    Ok(Json(results))
 }
 
 #[derive(OpenApi)]

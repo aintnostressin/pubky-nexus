@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::{
     stream::post::TAG_LABEL_2,
     utils::{
-        get_request, get_response, invalid_get_request,
+        get_request, invalid_get_request,
         search_reach::{
             post_key, CONTENT_TERM, D2, FOLLOWED, FOLLOWER, FRIEND, OBS, POST_D2, POST_FOLLOWED,
             POST_FOLLOWER, POST_FRIEND, POST_FRIEND_REPLY, POST_OBS, POST_STRANGER, POST_TAG,
@@ -761,62 +761,6 @@ async fn test_content_search_reach_empty() -> Result<()> {
             "user_id={user_id} reach={reach} should be empty"
         );
     }
-    Ok(())
-}
-
-/// `(X-Reach-Truncated, X-Reach-Authors)` of a content search response.
-async fn reach_headers(url: &str) -> Result<(Option<String>, Option<String>)> {
-    let res = get_response(url).await?;
-    Ok((
-        res.header("x-reach-truncated"),
-        res.header("x-reach-authors"),
-    ))
-}
-
-fn complete(authors: usize) -> (Option<String>, Option<String>) {
-    (Some("false".to_string()), Some(authors.to_string()))
-}
-
-#[tokio_shared_rt::test(shared)]
-async fn test_content_search_reach_headers() -> Result<()> {
-    // Unscoped searches carry no reach headers
-    assert_eq!(
-        reach_headers(&content_search_url(CONTENT_TERM)).await?,
-        (None, None)
-    );
-    assert_eq!(
-        reach_headers(&content_reach_url(&format!("author={FRIEND}"))).await?,
-        (None, None)
-    );
-
-    // Reaches under the cap are searched in full
-    for (source, authors) in [("following", 2), ("friends", 1), ("wot_2", 3)] {
-        assert_eq!(
-            reach_headers(&content_reach_url(&format!("user_id={OBS}&reach={source}"))).await?,
-            complete(authors),
-            "reach={source}"
-        );
-    }
-    assert_eq!(
-        reach_headers(&content_reach_url(&format!("user_id={D2}&reach=following"))).await?,
-        complete(0)
-    );
-
-    // With an author, only that author is searched, if in reach
-    assert_eq!(
-        reach_headers(&content_reach_url(&format!(
-            "user_id={OBS}&reach=following&author={FRIEND}"
-        )))
-        .await?,
-        complete(1)
-    );
-    assert_eq!(
-        reach_headers(&content_reach_url(&format!(
-            "user_id={OBS}&reach=following&author={STRANGER}"
-        )))
-        .await?,
-        complete(0)
-    );
     Ok(())
 }
 

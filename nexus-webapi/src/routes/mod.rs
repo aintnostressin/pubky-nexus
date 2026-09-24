@@ -190,12 +190,7 @@ pub fn build_app(
     let cors = CorsLayer::new()
         .allow_origin(Any) // Allow all origins
         .allow_methods(Any) // Allow all HTTP methods
-        .allow_headers(Any) // Allow all headers
-        // Custom response headers are hidden from browser clients unless listed
-        .expose_headers([
-            v0::search::posts::REACH_TRUNCATED_HEADER,
-            v0::search::posts::REACH_AUTHORS_HEADER,
-        ]);
+        .allow_headers(Any); // Allow all headers
 
     // Layer the request limits innermost, so that tracing and CORS still apply to the
     // 408/413 responses they short-circuit with (bypassing the rest of the stack).

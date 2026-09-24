@@ -23,15 +23,6 @@ pub async fn get_request(endpoint: &str) -> Result<Value, httpc_test::Error> {
     Ok(body)
 }
 
-/// GET that returns the whole response, for tests that inspect headers.
-pub async fn get_response(endpoint: &str) -> Result<httpc_test::Response, httpc_test::Error> {
-    let url = host_url().await;
-    let client = httpc_test::new_client("")?;
-    let res = client.do_get(&format!("{url}{endpoint}")).await?;
-    assert_eq!(res.status(), 200, "Expected HTTP status 200 OK");
-    Ok(res)
-}
-
 pub async fn invalid_get_request(
     endpoint: &str,
     error_code: StatusCode,

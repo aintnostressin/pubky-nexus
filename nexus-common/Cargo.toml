@@ -39,6 +39,8 @@ url = { workspace = true }
 utoipa = { workspace = true }
 
 [dev-dependencies]
+# `testing` adds the in-memory metric exporter the telemetry tests read points from
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
 tokio-shared-rt = { workspace = true }
 tracing-test = { workspace = true }

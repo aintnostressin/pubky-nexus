@@ -1,5 +1,6 @@
 use crate::db::{fetch_all_rows_from_graph, fetch_key_from_graph, queries, GraphError};
 use crate::models::error::ModelResult;
+use crate::models::follow::metrics::record_reach_resolution;
 use crate::types::StreamReach;
 use pubky_app_specs::PubkyId;
 use tokio::time::{timeout, Duration};
@@ -20,6 +21,10 @@ pub struct ReachUsers {
 /// observer. A larger reach is trimmed to the users with the most posts, so a
 /// scoped search keeps the authors most likely to match, and the result is
 /// flagged as truncated. An unknown observer has an empty reach.
+///
+/// Every resolution is recorded under `search.reach.users` /
+/// `search.reach.truncated`, so how often the limit bites is visible without
+/// the caller reporting it.
 ///
 /// # Errors
 /// Returns an error when the graph read fails, including
@@ -43,7 +48,7 @@ pub async fn reach_user_ids(
     let truncated = ids.len() > limit;
     // Graph ids come from validated events; one that doesn't parse is dropped
     // rather than failing the whole search
-    let user_ids = ids
+    let user_ids: Vec<PubkyId> = ids
         .into_iter()
         .take(limit)
         .filter_map(|id| match PubkyId::try_from(&id) {
@@ -54,6 +59,7 @@ pub async fn reach_user_ids(
             }
         })
         .collect();
+    record_reach_resolution(reach, user_ids.len(), truncated);
     Ok(ReachUsers {
         user_ids,
         truncated,
