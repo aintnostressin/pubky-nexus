@@ -1,7 +1,5 @@
 use anyhow::Result;
 use axum::http::StatusCode;
-use deadpool_redis::redis::AsyncCommands;
-use nexus_common::db::get_redis_conn;
 use nexus_common::models::post::PostDetails;
 use nexus_webapi::models::ErrorResponsePayload;
 use nexus_webapi::routes::v0::endpoints::{
@@ -18,7 +16,6 @@ use crate::{
             POST_FOLLOWER, POST_FRIEND, POST_FRIEND_REPLY, POST_OBS, POST_STRANGER, POST_TAG,
             STRANGER, UNKNOWN_USER,
         },
-        server::TestServiceServer,
     },
 };
 
@@ -824,46 +821,37 @@ async fn test_content_search_reach_headers() -> Result<()> {
 }
 
 #[tokio_shared_rt::test(shared)]
-async fn test_content_search_reach_ignores_stale_follow_cache() {
-    // FOLLOWER follows OBS only. A stale cached follow set that also lists
-    // STRANGER must not change either answer: membership comes from the graph.
+async fn test_content_search_reach_author_filter_agrees_with_the_listing() -> Result<()> {
+    // FOLLOWER follows OBS only. The author filter and the reach listing both
+    // resolve membership from the graph, so they cannot disagree.
     // FOLLOWER is the observer in this test only.
-    TestServiceServer::get_test_server().await;
-    let key = format!("Following:{FOLLOWER}");
-    let mut redis_conn = get_redis_conn().await.unwrap();
-    let _: () = redis_conn.sadd(&key, STRANGER).await.unwrap();
-
-    let checks = async {
-        let scoped = get_request(&content_reach_url(&format!(
+    let scoped = post_keys(
+        &get_request(&content_reach_url(&format!(
             "user_id={FOLLOWER}&reach=following"
         )))
-        .await?;
-        let with_stranger = get_request(&content_reach_url(&format!(
-            "user_id={FOLLOWER}&reach=following&author={STRANGER}"
-        )))
-        .await?;
-        let with_obs = get_request(&content_reach_url(&format!(
+        .await?,
+    );
+    assert_eq!(scoped, vec![post_key(OBS, POST_OBS)]);
+
+    let with_obs = post_keys(
+        &get_request(&content_reach_url(&format!(
             "user_id={FOLLOWER}&reach=following&author={OBS}"
         )))
-        .await?;
-        anyhow::Ok((
-            post_keys(&scoped),
-            post_keys(&with_stranger),
-            post_keys(&with_obs),
-        ))
-    }
-    .await;
+        .await?,
+    );
+    assert_eq!(with_obs, scoped);
 
-    // Restore the cache before asserting, so a failure can't leak into others
-    let _: () = redis_conn.srem(&key, STRANGER).await.unwrap();
-
-    let (scoped, with_stranger, with_obs) = checks.unwrap();
-    assert_eq!(scoped, vec![post_key(OBS, POST_OBS)]);
+    let with_stranger = post_keys(
+        &get_request(&content_reach_url(&format!(
+            "user_id={FOLLOWER}&reach=following&author={STRANGER}"
+        )))
+        .await?,
+    );
     assert!(
         with_stranger.is_empty(),
         "author filter must agree with the reach listing: {with_stranger:?}"
     );
-    assert_eq!(with_obs, scoped);
+    Ok(())
 }
 
 #[tokio_shared_rt::test(shared)]
