@@ -168,11 +168,19 @@ async fn test_all_ranked_sets_hide_unranked_authors() -> Result<()> {
         "the unranked artist1 post was served"
     );
 
+    // A user absent from an existing ranking classifies as `New`, and `None`
+    // means no ranking at all, so both must fail here: only the ranked tiers
+    // may appear.
     let statuses = SocialGraphStatus::get_by_ids(&authors).await?;
     let unranked: Vec<&String> = authors
         .iter()
         .zip(&statuses)
-        .filter(|(_, status)| status.is_none())
+        .filter(|(_, status)| {
+            !matches!(
+                status,
+                Some(SocialGraphStatus::Established | SocialGraphStatus::Networked)
+            )
+        })
         .map(|(author, _)| author)
         .collect();
     assert!(unranked.is_empty(), "unranked authors served: {unranked:?}");
