@@ -103,7 +103,7 @@ pub struct SearchPostsByContentQuery {
         ("author" = Option<PubkyId>, Query, description = "Optional author Pubky ID to scope results"),
         ("kind" = Option<PubkyAppPostKind>, Query, description = "Optional post kind to filter by: short, long, image, video, link, file, collection"),
         ("user_id" = Option<PubkyId>, Query, description = "User ID to base reach on. Must be provided together with reach"),
-        ("reach" = Option<StreamReach>, Query, example = "following", description = format!("Reach type: `followers` | `following` | `friends` | `wot` | `wot_1`..`wot_3`. Scopes results to posts authored by users in that reach, never by user_id itself. To apply that, user_id is required. Bare `wot` defaults to depth 2. Combined with `author`, results are that author's posts if the author is in reach, and empty otherwise. A reach of more than {MAX_REACH_AUTHORS_FT} users is trimmed to the {MAX_REACH_AUTHORS_FT} with the most posts")),
+        ("reach" = Option<StreamReach>, Query, example = "following", description = "Reach type: `followers` | `following` | `friends` | `wot` | `wot_1`..`wot_3`. Scopes results to posts authored by users in that reach, never by user_id itself. To apply that, user_id is required. Bare `wot` defaults to depth 2. Combined with `author`, results are that author's posts if the author is in reach, and empty otherwise"),
         ("skip" = Option<BoundedSkip<1000>>, Query, description = "Skip N results (max 1000)"),
         ("limit" = Option<BoundedLimit<20, 100>>, Query, description = "Limit the number of results (1–100, default 20)")
     ),
