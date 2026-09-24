@@ -1650,6 +1650,11 @@ mod tests {
             assert_eq!(taggers.label(), "get_tag_taggers_by_reach");
             assert_eq!(taggers.telemetry_attrs(), expected.as_slice());
 
+            let user_tag_search =
+                search_users_by_tags_with_reach(&["label".into()], "user", &reach, None, None);
+            assert_eq!(user_tag_search.label(), "search_users_by_tags_with_reach");
+            assert_eq!(user_tag_search.telemetry_attrs(), expected.as_slice());
+
             let hot_tags_input = HotTagsInputDTO::new(Timeframe::AllTime, 10, 0, 5, None);
             let hot_tags = get_hot_tags_by_reach("user", reach, &hot_tags_input);
             assert_eq!(hot_tags.label(), "get_hot_tags_by_reach");
