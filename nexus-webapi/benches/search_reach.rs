@@ -21,7 +21,7 @@ use deadpool_redis::redis::{self, AsyncCommands};
 use nexus_common::{
     db::{get_neo4j_graph, get_redis_conn, graph::Query, kv::AuthorFilter},
     models::{
-        follow::reach::reach_user_ids,
+        follow::reach::reach_authors,
         post::search::{PostsByContentSearch, MAX_REACH_AUTHORS_FT},
     },
     types::{StreamReach, WotDepth},
@@ -380,7 +380,7 @@ fn reach_cases() -> Vec<(String, StreamReach)> {
     ]
 }
 
-/// Prints how many users each benched reach resolves to (uncapped), so the
+/// Prints how many authors each benched reach resolves to (uncapped), so the
 /// timings can be read against the reach size.
 async fn print_reach_sizes() {
     println!("Reach sizes before trimming to {MAX_REACH_AUTHORS_FT}:");
@@ -388,10 +388,10 @@ async fn print_reach_sizes() {
         let id = observer_id(observer);
         let mut sizes = Vec::new();
         for (name, reach) in reach_cases() {
-            let size = reach_user_ids(&id, &reach, usize::MAX - 1)
+            let size = reach_authors(&id, &reach, usize::MAX - 1)
                 .await
                 .unwrap()
-                .user_ids
+                .author_ids
                 .len();
             sizes.push(format!("{name}={size}"));
         }
@@ -402,7 +402,7 @@ async fn print_reach_sizes() {
 // ── Benchmarks ────────────────────────────────────────────────────────────────
 
 /// Reach resolution alone: the graph query that picks the `MAX_REACH_AUTHORS_FT`
-/// most prolific users in reach.
+/// most prolific authors in reach.
 fn bench_resolve_reach(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     dataset(&rt);
@@ -413,7 +413,7 @@ fn bench_resolve_reach(c: &mut Criterion) {
         for (name, reach) in reach_cases() {
             group.bench_function(BenchmarkId::new(name, observer), |b| {
                 b.to_async(&rt).iter(|| async {
-                    let ids = reach_user_ids(&id, &reach, MAX_REACH_AUTHORS_FT)
+                    let ids = reach_authors(&id, &reach, MAX_REACH_AUTHORS_FT)
                         .await
                         .unwrap();
                     std::hint::black_box(ids);
@@ -497,10 +497,10 @@ fn bench_end_to_end(c: &mut Criterion) {
             for (name, reach) in reach_cases() {
                 group.bench_function(BenchmarkId::new(&name, observer), |b| {
                     b.to_async(&rt).iter(|| async {
-                        let ids = reach_user_ids(&id, &reach, MAX_REACH_AUTHORS_FT)
+                        let ids = reach_authors(&id, &reach, MAX_REACH_AUTHORS_FT)
                             .await
                             .unwrap()
-                            .user_ids;
+                            .author_ids;
                         let r = PostsByContentSearch::search(
                             term,
                             Some(AuthorFilter::AnyOf(&ids)),

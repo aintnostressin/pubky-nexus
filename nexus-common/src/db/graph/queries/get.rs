@@ -835,11 +835,13 @@ fn stream_reach_to_graph_subquery(reach: &StreamReach) -> String {
     }
 }
 
-/// Up to `limit` distinct users in `user_id`'s `reach`, excluding `user_id`,
-/// the most prolific authors first. The post count matches `UserCounts::posts`
-/// (every authored post, replies included); equal counts break ties by id
-/// descending.
-pub fn get_reach_user_ids_by_posts(user_id: &str, reach: &StreamReach, limit: usize) -> Query {
+/// Up to `limit` distinct users in `user_id`'s `reach` who authored at least
+/// one post, excluding `user_id`, the most prolific first. Users without posts
+/// are left out: they cannot match a post search, so keeping them would spend
+/// `limit` on authors that match nothing. The post count matches
+/// `UserCounts::posts` (every authored post, replies included); equal counts
+/// break ties by id descending.
+pub fn get_reach_authors_by_posts(user_id: &str, reach: &StreamReach, limit: usize) -> Query {
     let cypher = format!(
         "
         MATCH (user:User {{id: $user_id}})
@@ -849,13 +851,14 @@ pub fn get_reach_user_ids_by_posts(user_id: &str, reach: &StreamReach, limit: us
         // AUTHORED only ever points at posts, so the unlabelled pattern is a
         // degree lookup rather than an expansion
         WITH reach, COUNT {{ (reach)-[:AUTHORED]->() }} AS posts
-        RETURN reach.id AS user_id
-        ORDER BY posts DESC, user_id DESC
+        WHERE posts > 0
+        RETURN reach.id AS author_id
+        ORDER BY posts DESC, author_id DESC
         LIMIT $limit
         ",
         stream_reach_to_graph_subquery(reach)
     );
-    reach_attrs(Query::new("get_reach_user_ids_by_posts", &cypher), reach)
+    reach_attrs(Query::new("get_reach_authors_by_posts", &cypher), reach)
         .param("user_id", user_id)
         .param("limit", i64::try_from(limit).unwrap_or(i64::MAX))
 }

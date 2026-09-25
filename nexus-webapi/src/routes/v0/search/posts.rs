@@ -7,7 +7,7 @@ use crate::routes::{Path, Query};
 use crate::{Error, Result};
 use axum::Json;
 use nexus_common::db::kv::AuthorFilter;
-use nexus_common::models::follow::reach::{reach_contains, reach_user_ids};
+use nexus_common::models::follow::reach::{reach_authors, reach_contains};
 use nexus_common::models::post::search::{
     PostsByContentSearch, PostsByTagSearch, MAX_REACH_AUTHORS_FT,
 };
@@ -87,21 +87,21 @@ pub async fn search_posts_by_tag_handler(
 
 const METER_NAME: &str = "search.posts.by_content";
 
-/// How large the reaches a full-text content search resolves are, and how often
-/// `MAX_REACH_AUTHORS_FT` cut one short. The instrument is a no-op when no
-/// `SdkMeterProvider` is registered (i.e. when OTLP is not configured), so
-/// there is zero overhead in that case.
+/// How many authors the reaches a full-text content search resolves hold, and
+/// how often `MAX_REACH_AUTHORS_FT` cut one short. The instrument is a no-op
+/// when no `SdkMeterProvider` is registered (i.e. when OTLP is not configured),
+/// so there is zero overhead in that case.
 struct ContentSearchMetrics {
-    reach_users: Histogram<u64>,
+    reach_authors: Histogram<u64>,
 }
 
 impl ContentSearchMetrics {
     fn new(meter: &Meter) -> Self {
         Self {
-            reach_users: meter
-                .u64_histogram("search.posts.by_content.reach.users")
+            reach_authors: meter
+                .u64_histogram("search.posts.by_content.reach.authors")
                 .with_description(
-                    "Users a content search's reach resolved to, by reach/depth/met_limit",
+                    "Authors a content search's reach resolved to, by reach/depth/met_limit",
                 )
                 .with_unit("{user}")
                 .build(),
@@ -111,7 +111,7 @@ impl ContentSearchMetrics {
     /// `reach`/`depth` are the attributes the reach graph queries already
     /// carry, so a reach can be followed across both. `met_limit` splits off the
     /// searches that only saw part of the reach.
-    fn record_reach_resolution(&self, reach: &StreamReach, users: usize, met_limit: bool) {
+    fn record_reach_resolution(&self, reach: &StreamReach, authors: usize, met_limit: bool) {
         let (name, depth) = reach.telemetry_dimensions();
         let mut attrs = vec![
             KeyValue::new("reach", name),
@@ -120,7 +120,7 @@ impl ContentSearchMetrics {
         if let Some(depth) = depth {
             attrs.push(KeyValue::new("depth", i64::from(depth)));
         }
-        self.reach_users.record(users as u64, &attrs);
+        self.reach_authors.record(authors as u64, &attrs);
     }
 }
 
@@ -178,7 +178,7 @@ pub async fn search_posts_by_content_handler(
 
     let kind_str = query.kind.as_ref().map(|k| k.to_string());
 
-    let reach_ids;
+    let author_ids;
     let author = match (query.author.as_ref(), query.user_id, query.reach) {
         (author, Some(user_id), Some(reach)) => match author {
             // author and reach intersect: the author's posts, if in reach
@@ -191,10 +191,10 @@ pub async fn search_posts_by_content_handler(
             None => {
                 // Over the cap, the most prolific authors are kept; how often
                 // that happens is in the `met_limit` attribute of the metric
-                let reach_users = reach_user_ids(&user_id, &reach, MAX_REACH_AUTHORS_FT).await?;
-                reach_ids = reach_users.user_ids;
-                METRICS.record_reach_resolution(&reach, reach_ids.len(), reach_users.met_limit);
-                Some(AuthorFilter::AnyOf(&reach_ids))
+                let authors = reach_authors(&user_id, &reach, MAX_REACH_AUTHORS_FT).await?;
+                author_ids = authors.author_ids;
+                METRICS.record_reach_resolution(&reach, author_ids.len(), authors.met_limit);
+                Some(AuthorFilter::AnyOf(&author_ids))
             }
         },
         (author, _, _) => author.map(AuthorFilter::One),
@@ -331,7 +331,7 @@ mod tests {
         // met_limit splits the searches that missed part of the reach off the
         // same instrument, so no second one is needed to tell them apart
         assert_eq!(
-            points(&exported, "search.posts.by_content.reach.users"),
+            points(&exported, "search.posts.by_content.reach.authors"),
             vec![
                 (
                     vec!["met_limit=false".to_string(), "reach=following".to_string()],
