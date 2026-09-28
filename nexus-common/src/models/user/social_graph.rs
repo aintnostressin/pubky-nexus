@@ -60,6 +60,16 @@ impl SocialGraphStatus {
         Ok(Self::classify(population, &ranks))
     }
 
+    /// Whether a ranking has been built. `false` when the recompute job never
+    /// ran, which is production's state with an empty seed set, and after a
+    /// rebuild that found nobody with trust (that drops the key).
+    pub async fn is_built() -> RedisResult<bool> {
+        let (population, _) =
+            Self::index_sorted_set_card_and_members(&USER_SOCIAL_GRAPH_KEY_PARTS, &[], None)
+                .await?;
+        Ok(population > 0)
+    }
+
     /// Reads one user's status.
     pub async fn get_by_id(user_id: &str) -> RedisResult<Option<SocialGraphStatus>> {
         Ok(Self::get_by_ids(&[user_id])

@@ -8,6 +8,7 @@
 
 [test-groups]
 influencers-sorted-set = { max-threads = 1 }
+trust-ranking = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'test(=stream::user::influencers::test_global_influencers) | test(=stream::user::influencers::test_global_influencers_skip_limit) | test(=stream::user::influencers::test_global_influencers_alltime_cache_recovery)'
@@ -25,3 +26,19 @@ test-group = 'influencers-sorted-set'
 [[profile.default.overrides]]
 filter = 'package(nexusd) and binary(cache_setup)'
 threads-required = 'num-test-threads'
+
+# user::views::test_social_graph_status and
+# tags::hot::test_global_hot_tags_fill_the_variant_a_ranking_flip_selects drop
+# and rebuild the shared trust ranking (Sorted:Users:SocialGraph). The hot-tags
+# trust filter is gated on that ranking existing, so no test that tells the
+# filter on from off may run while the key is gone: the two reach tests and the
+# two global trust-filter tests would see the filter off and get the unranked
+# taggers back. The flip test also deletes the global all_time cache keys, and
+# asserts what the next request writes there, so the two global taggers tests
+# stay with it, as does the other test dropping the ranking: either one would
+# switch the variant the flip test is probing. A group (declared above), not
+# exclusivity: only these eight interact.
+
+[[profile.default.overrides]]
+filter = 'test(=user::views::test_social_graph_status) | test(=tags::hot::test_global_hot_tags_fill_the_variant_a_ranking_flip_selects) | test(=tags::hot::test_hot_tags_by_reach_hide_unranked_taggers) | test(=tags::hot::test_hot_tags_label_taggers_by_reach_hide_unranked_taggers) | test(=tags::hot::test_global_hot_tags_hide_unranked_taggers) | test(=tags::hot::test_global_hot_tags_label_taggers_hide_unranked_taggers) | test(=tags::hot::test_hot_tags_label_taggers) | test(=tags::hot::test_hot_tags_label_taggers_with_skip_limit_and_timeframe)'
+test-group = 'trust-ranking'

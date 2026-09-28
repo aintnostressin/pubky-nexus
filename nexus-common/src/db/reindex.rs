@@ -68,6 +68,21 @@ pub async fn sync() {
         }
     }
 
+    warm_up().await;
+
+    info!("Reindexing completed successfully.");
+}
+
+/// Rebuilds the global indexes that do not hang off one user or post. The
+/// order matters: the hot tags read the ranking built before them.
+#[tracing::instrument(name = "reindex.warm_up", skip_all)]
+pub async fn warm_up() {
+    // Before the hot tags: they hide unranked taggers only once a ranking
+    // exists, so a fresh cache must see it or it warms the unfiltered variant.
+    SocialGraphStatus::reindex()
+        .await
+        .expect("Failed to reindex the social graph ranking");
+
     HotTags::reindex()
         .await
         .expect("Failed to store the global hot tags");
@@ -75,10 +90,6 @@ pub async fn sync() {
     Influencers::reindex()
         .await
         .expect("Failed to reindex influencers");
-
-    SocialGraphStatus::reindex()
-        .await
-        .expect("Failed to reindex the social graph ranking");
 
     PostsByTagSearch::reindex()
         .await
@@ -91,8 +102,6 @@ pub async fn sync() {
     TagSearch::reindex()
         .await
         .expect("Failed to store the global tags");
-
-    info!("Reindexing completed successfully.");
 }
 
 pub async fn reindex_user(user_id: &str) -> Result<(), DynError> {

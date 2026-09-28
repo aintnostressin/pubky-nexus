@@ -1,7 +1,14 @@
 use anyhow::Result;
 use axum::http::StatusCode;
+use deadpool_redis::redis::AsyncCommands;
+use nexus_common::db::get_redis_conn;
+use nexus_common::models::tag::global::TAGGERS_INDEX;
+use nexus_common::models::tag::stream::{hot_tags_key_parts, HOT_TAGS_CACHE_PREFIX};
+use nexus_common::models::user::{SocialGraphStatus, USER_SOCIAL_GRAPH_KEY_PARTS};
+use nexus_common::types::Timeframe;
 use serde_json::Value;
 
+use crate::utils::server::TestServiceServer;
 use crate::utils::{get_request, invalid_get_request};
 
 const PEER_PUBKY: &str = "o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo";
@@ -9,6 +16,18 @@ const PEER_PUBKY: &str = "o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo";
 pub const USER_1: &str = "pyc598poqkdgtx1wc4aeptx67mqg71mmywyh7uzkffzittjmbiuo";
 const USER_4: &str = "r91hi8kc3x6761gwfiigr7yn6nca1z47wm6jadhw1jbx1co93r9y";
 const USER_5: &str = "tkpeqpx3ywoawiw6q8e6kuo9o3egr7fnhx83rudznbrrmqgdmomo";
+
+// mocks/wot.cypher: the observer follows D1, D1B and the mod bot. D1 and D1B
+// carry trust; the mod bot is one of the on-ramp accounts trust.cypher leaves
+// unranked, so its tags are hidden once the ranking exists (it does, db mock
+// builds it from the fixture).
+const WOT_OBSERVER: &str = "y6apowjmcg8rocmd9jirg95fyf3yykwuhqxozzts4mjipk4n7iao";
+const WOT_D1: &str = "qjftuwjog819ki1wktuy5tndebce36bmxxwtjjm3z1fr97jk9yuo";
+const WOT_D1B: &str = "t5ixbtatg4tq5q5ixg16qqrg1bmem75ksg6cweuftuydwzw91pzy";
+const WOT_MODBOT: &str = "qsfngw6xm9kk7yp99xustjfj8mu9auufkixas5f8goeujuxt45ao";
+// A label the global snapshot serves, tagged by ranked skunk users and, on one
+// more post, by the mod bot.
+const MODBOT_HOT_LABEL: &str = "sentimental";
 
 struct StreamTagMockup {
     label: String,
@@ -581,6 +600,118 @@ async fn test_hot_tags_by_friends_reach_and_all_timeframe() -> Result<()> {
 
 const PUBKY_TAG: &str = "pubky";
 
+// ##### Trust filter #####
+// Reach queries hit the graph on every request, so they observe the filter
+// directly. The global tests above hold with the filter on or off, because
+// every hot-tags and skunk tagger is ranked; only the mod bot's labels tell
+// the two apart on the global path.
+
+#[tokio_shared_rt::test(shared)]
+async fn test_global_hot_tags_hide_unranked_taggers() -> Result<()> {
+    // The whole snapshot, page by page.
+    let mut tags: Vec<Value> = Vec::new();
+    for skip in (0..100).step_by(40) {
+        let endpoint = &format!("/v0/tags/hot?timeframe=all_time&skip={skip}&limit=40");
+        let body = get_request(endpoint).await?;
+        tags.extend(
+            body.as_array()
+                .expect("Stream tags should be an array")
+                .iter()
+                .cloned(),
+        );
+    }
+    analyse_hot_tags_structure(&tags);
+
+    // The snapshot serves `MODBOT_HOT_LABEL`, so its unranked tagger can only
+    // be missing because of the filter.
+    let hot_tag = tags
+        .iter()
+        .find(|tag| tag["label"] == MODBOT_HOT_LABEL)
+        .expect("the hot label should be served");
+    let taggers = hot_tag["taggers_id"].as_array().expect("taggers_id array");
+    assert!(!taggers.is_empty());
+    assert!(
+        !taggers.iter().any(|tagger| tagger == WOT_MODBOT),
+        "unranked tagger served under {MODBOT_HOT_LABEL}"
+    );
+    // The taggers fit in the sample, so the count has nobody else to cover.
+    assert_eq!(
+        hot_tag["taggers_count"],
+        taggers.len(),
+        "unranked tagger counted under {MODBOT_HOT_LABEL}"
+    );
+
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_global_hot_tags_label_taggers_hide_unranked_taggers() -> Result<()> {
+    let body = get_request(&format!("/v0/tags/taggers/{MODBOT_HOT_LABEL}")).await?;
+    let taggers = body.as_array().expect("Taggers ids should be an array");
+
+    assert!(!taggers.is_empty(), "the ranked taggers should be served");
+    assert!(
+        !taggers.iter().any(|tagger| tagger == WOT_MODBOT),
+        "unranked tagger served under {MODBOT_HOT_LABEL}"
+    );
+
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_hot_tags_by_reach_hide_unranked_taggers() -> Result<()> {
+    let endpoint =
+        &format!("/v0/tags/hot?user_id={WOT_OBSERVER}&reach=following&timeframe=all_time");
+
+    let body = get_request(endpoint).await?;
+    let tags = body.as_array().expect("Stream tags should be an array");
+    analyse_hot_tags_structure(tags);
+
+    // D1: wmtag1, wmtag2; D1B: wmtag3, wmtag4; both: wotreview. Every label
+    // tags one post, so they order by label. The mod bot's nudity, wotflag and
+    // wmtagflag are gone.
+    let labels: Vec<&str> = tags
+        .iter()
+        .filter_map(|tag| tag["label"].as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        ["wmtag1", "wmtag2", "wmtag3", "wmtag4", "wotreview"],
+        "unranked taggers' labels must be hidden"
+    );
+    compare_unit_hot_tag(
+        &tags[4],
+        StreamTagMockup::new(String::from("wotreview"), 2, 1, 2),
+    );
+    for tag in tags {
+        for tagger in tag["taggers_id"].as_array().expect("taggers_id array") {
+            let tagger = tagger.as_str().unwrap_or_default();
+            assert!(
+                [WOT_D1, WOT_D1B].contains(&tagger),
+                "unranked tagger {tagger} served under {}",
+                tag["label"]
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_hot_tags_label_taggers_by_reach_hide_unranked_taggers() -> Result<()> {
+    // Tagged by D1 and D1B, latest first.
+    let endpoint = &format!("/v0/tags/taggers/wotreview?user_id={WOT_OBSERVER}&reach=following");
+    let body = get_request(endpoint).await?;
+    assert_eq!(body, serde_json::json!([WOT_D1B, WOT_D1]));
+
+    // Tagged by the mod bot only, so nobody is left.
+    let endpoint = &format!("/v0/tags/taggers/wmtagflag?user_id={WOT_OBSERVER}&reach=following");
+    let body = get_request(endpoint).await?;
+    assert_eq!(body, serde_json::json!([]));
+
+    Ok(())
+}
+
 const TAGGERS: [&str; 9] = [
     "y4euc58gnmxun9wo87gwmanu6kztt9pgw1zz1yp1azp7trrsjamy",
     "s1empmp4x6owkewyijcbnn1faejhhu536w8i7n9oqh57om9qjfho",
@@ -625,6 +756,129 @@ async fn test_hot_tags_label_taggers() -> Result<()> {
     for (index, tagger) in taggers_with_filters.iter().enumerate() {
         assert_eq!(&skip_and_limit_taggers[index], tagger);
     }
+    Ok(())
+}
+
+/// Redis keys of one global all_time cache variant: the score set and the
+/// taggers map.
+fn global_all_time_cache_keys(ranked_only: bool) -> [String; 2] {
+    let timeframe = Timeframe::AllTime.to_string();
+    [
+        hot_tags_key_parts(ranked_only, &[&timeframe]),
+        hot_tags_key_parts(ranked_only, &[TAGGERS_INDEX, &timeframe]),
+    ]
+    .map(|key_parts| format!("{HOT_TAGS_CACHE_PREFIX}:{}", key_parts.join(":")))
+}
+
+/// What the global readers serve from a cold cache variant.
+struct ColdVariantProbe {
+    taggers: Value,
+    /// Whether the taggers request left the score set and the taggers map written.
+    keys_written: [bool; 2],
+    /// Taggers of the label only the unranked variant serves the mod bot under.
+    modbot_label_taggers: Value,
+    hot_tags: Value,
+}
+
+async fn probe_cold_variant(ranked_only: bool) -> Result<ColdVariantProbe> {
+    let mut redis_conn = get_redis_conn().await?;
+    let keys = global_all_time_cache_keys(ranked_only);
+
+    let _: () = redis_conn.del(&keys).await?;
+    let endpoint = &format!("/v0/tags/taggers/{PUBKY_TAG}?timeframe=all_time");
+    let taggers = get_request(endpoint).await?;
+    let mut keys_written = [false; 2];
+    for (written, key) in keys_written.iter_mut().zip(&keys) {
+        *written = redis_conn.exists(key).await?;
+    }
+    let endpoint = &format!("/v0/tags/taggers/{MODBOT_HOT_LABEL}?timeframe=all_time");
+    let modbot_label_taggers = get_request(endpoint).await?;
+
+    let _: () = redis_conn.del(&keys).await?;
+    let hot_tags = get_request("/v0/tags/hot?timeframe=all_time").await?;
+
+    Ok(ColdVariantProbe {
+        taggers,
+        keys_written,
+        modbot_label_taggers,
+        hot_tags,
+    })
+}
+
+fn assert_cold_variant_was_filled(probe: ColdVariantProbe, ranked_only: bool) {
+    let variant = if ranked_only { "ranked" } else { "unranked" };
+    let mut taggers: Vec<&str> = probe
+        .taggers
+        .as_array()
+        .expect("Taggers ids should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    taggers.sort_unstable();
+    let mut expected = TAGGERS;
+    expected.sort_unstable();
+    assert_eq!(
+        taggers, expected,
+        "the taggers route must fill the cold {variant} variant"
+    );
+    assert_eq!(
+        probe.keys_written,
+        [true, true],
+        "the taggers route must write the {variant} score set and taggers map"
+    );
+    // The mod bot is unranked, so it tells the content of the two variants apart.
+    let modbot_label_taggers = probe
+        .modbot_label_taggers
+        .as_array()
+        .expect("Taggers ids should be an array");
+    assert!(!modbot_label_taggers.is_empty());
+    assert_eq!(
+        modbot_label_taggers
+            .iter()
+            .any(|tagger| tagger == WOT_MODBOT),
+        !ranked_only,
+        "the taggers route must fill the cold {variant} variant with {variant} taggers"
+    );
+
+    let hot_tags = probe
+        .hot_tags
+        .as_array()
+        .expect("Stream tags should be an array");
+    assert!(
+        hot_tags.iter().any(|tag| tag["label"] == PUBKY_TAG),
+        "the hot tags route must fill the cold {variant} variant"
+    );
+    let modbot_hot_tag = hot_tags
+        .iter()
+        .find(|tag| tag["label"] == MODBOT_HOT_LABEL)
+        .expect("the hot label should be served");
+    let taggers = modbot_hot_tag["taggers_id"]
+        .as_array()
+        .expect("taggers_id array");
+    assert_eq!(
+        taggers.iter().any(|tagger| tagger == WOT_MODBOT),
+        !ranked_only,
+        "the hot tags route must fill the cold {variant} variant with {variant} taggers"
+    );
+}
+
+/// A ranking appearing or being dropped selects a cache variant nothing has
+/// warmed. Every global reader has to fill it on the miss.
+#[tokio_shared_rt::test(shared)]
+async fn test_global_hot_tags_fill_the_variant_a_ranking_flip_selects() -> Result<()> {
+    TestServiceServer::get_test_server().await;
+    let mut redis_conn = get_redis_conn().await?;
+    let ranking_key = format!("Sorted:{}", USER_SOCIAL_GRAPH_KEY_PARTS.join(":"));
+    let _: () = redis_conn.del(&ranking_key).await?;
+
+    // Probed without `?` so an error between the delete and the rebuild cannot
+    // strand the ranking for every other test.
+    let unranked = probe_cold_variant(false).await;
+    SocialGraphStatus::reindex().await?;
+    assert_cold_variant_was_filled(unranked?, false);
+
+    assert_cold_variant_was_filled(probe_cold_variant(true).await?, true);
+
     Ok(())
 }
 

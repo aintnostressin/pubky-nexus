@@ -4,3 +4,4 @@ pub mod lists;
 pub mod search;
 pub mod sets;
 pub mod sorted_sets;
+pub mod strings;

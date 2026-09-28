@@ -190,3 +190,18 @@ MATCH (u:User {id: $d1b}), (p:Post {id: "WOTPOSTMODF01"}) MERGE (u)-[:TAGGED {la
 MATCH (u:User {id: $d1b}), (p:Post {id: "WOTPOSTMODF01"}) MERGE (u)-[:TAGGED {label: "wmtag4", id: "WOTTAGMOD0004", indexed_at: 1224534096203}]->(p);
 MATCH (u:User {id: $d2}), (p:Post {id: "WOTPOSTMODF01"}) MERGE (u)-[:TAGGED {label: "wmtag5", id: "WOTTAGMOD0005", indexed_at: 1224534096204}]->(p);
 MATCH (u:User {id: $modbot}), (p:Post {id: "WOTPOSTMODF01"}) MERGE (u)-[:TAGGED {label: "wmtagflag", id: "WOTTAGMOD0006", indexed_at: 1224534096205}]->(p);
+
+// ##################################
+// ##### Global hot-tags filter #####
+// ##################################
+// The mod bot's other labels tag one post each, which leaves them below the
+// 100-label hot-tags snapshot whether or not unranked taggers count, and the
+// same holds for `wotreview`. So the mod bot (unranked, see trust.cypher) also
+// tags a label the snapshot serves, `sentimental`: the global hot-tags tests
+// then see a label that loses a tagger and a post to the trust filter. A reply
+// by the spammer with a year-2008 tag timestamp, so it stays out of the
+// timeline, engagement and timeframe assertions.
+MERGE (p:Post {id: "WOTPOSTHOTF01"}) SET p.content = "reply tagged with a hot label", p.kind = "short", p.indexed_at = 1650000000015;
+MATCH (u:User {id: $spammer}), (p:Post {id: "WOTPOSTHOTF01"}) MERGE (u)-[:AUTHORED]->(p);
+MATCH (parent:Post {id: "WOTPOSTTAGS01"}), (reply:Post {id: "WOTPOSTHOTF01"}) MERGE (reply)-[:REPLIED]->(parent);
+MATCH (u:User {id: $modbot}), (p:Post {id: "WOTPOSTHOTF01"}) MERGE (u)-[:TAGGED {label: "sentimental", id: "WOTTAGHOTF001", indexed_at: 1224534096206}]->(p);
