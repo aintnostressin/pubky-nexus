@@ -7,10 +7,12 @@
 //! exact: a page is only short at the real end of the stream, which matters
 //! because pubky-app treats a short page as the end of the feed.
 //!
-//! Writes mirror into the ranked sets as they happen, and every ranking
-//! publish rebuilds them in full ([`rebuild`]), so drift lasts at most until
-//! the next recompute. Readers only trust the ranked sets once a complete
-//! rebuild has run (`built_at`); before that they serve the unfiltered sets.
+//! Every write to a source set goes through [`add`] and [`remove`], which
+//! update the ranked copy in the same atomic step. Every ranking publish
+//! rebuilds the copies in full ([`RankedLayout::rebuild`]), so drift lasts at
+//! most until the next recompute. Readers only trust the ranked sets once a
+//! complete rebuild has run (`built_at`); before that they serve the unfiltered
+//! sets.
 //!
 //! The scripts take several keys, so they assume a single Redis instance (not
 //! Redis Cluster), as the rest of Nexus does.
@@ -19,6 +21,7 @@ use std::collections::BTreeSet;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use deadpool_redis::Connection;
 use opentelemetry::global;
 use opentelemetry::metrics::Counter;
 use redis::{AsyncCommands, Script};
@@ -26,7 +29,7 @@ use redis::{AsyncCommands, Script};
 use super::search::TAG_GLOBAL_POST_TIMELINE;
 use super::stream::POST_TIMELINE_KEY_PARTS;
 use crate::db::get_redis_conn;
-use crate::db::kv::{release_lock, try_acquire_lock, RedisError, RedisResult};
+use crate::db::kv::{release_lock, try_acquire_lock, RedisError, RedisResult, SORTED_PREFIX};
 use crate::models::user::USER_SOCIAL_GRAPH_KEY_PARTS;
 
 /// Ranked copy of the global timeline: `Sorted:Posts:Global:Timeline:Ranked`.
@@ -35,13 +38,11 @@ pub const POST_RANKED_TIMELINE_KEY_PARTS: [&str; 4] = ["Posts", "Global", "Timel
 /// A different third segment from the source sets, so a scan for one never matches the other.
 pub const TAG_RANKED_POST_TIMELINE: [&str; 4] = ["Tags", "Ranked", "Post", "Timeline"];
 
-const SORTED: &str = "Sorted";
-
 /// Sets up to this size are rebuilt by one atomic script.
 const ATOMIC_MAX: usize = 500;
-/// Members per `ZSCAN` page and per copy script in a staged build. Sized so a
-/// script stays well under 10 ms of Redis time: at a million root posts a
-/// 1,000-member batch occasionally took just over 10 ms.
+/// Members per `ZSCAN` page in a staged build. Sized so a script stays well
+/// under 10 ms of Redis time: at a million root posts a 1,000-member batch
+/// occasionally took just over 10 ms.
 const BATCH: usize = 500;
 /// Keys per `SCAN` page when listing labels; cheap per key, so larger.
 const SCAN_COUNT: usize = 1_000;
@@ -60,7 +61,6 @@ const LOCK_POLL: Duration = Duration::from_secs(1);
 
 /// Every key the ranked sets touch, so tests and benchmarks can run in a
 /// private namespace.
-#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct RankedLayout {
     /// The trust ranking: users with a positive trust score.
@@ -71,7 +71,8 @@ pub struct RankedLayout {
     pub tag_source_prefix: String,
     pub tag_ranked_prefix: String,
     pub tag_staging_prefix: String,
-    pub tag_old_prefix: String,
+    /// `SCAN` pattern covering the three per-label families.
+    pub tag_scan_pattern: String,
     /// Set once a complete rebuild has run; readers trust the ranked sets only then.
     pub built_at: String,
     /// Serializes rebuilds.
@@ -79,44 +80,43 @@ pub struct RankedLayout {
 }
 
 /// One source set and the keys of its ranked copy.
-#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RankedSet {
     pub source: String,
     pub ranked: String,
     /// Where a staged build writes before the swap.
     pub staging: String,
-    /// Where the swap moves the previous ranked set before freeing it.
-    pub old: String,
 }
 
 static PRODUCTION: LazyLock<RankedLayout> = LazyLock::new(|| {
-    let global_source = format!("{SORTED}:{}", POST_TIMELINE_KEY_PARTS.join(":"));
-    let global_ranked = format!("{SORTED}:{}", POST_RANKED_TIMELINE_KEY_PARTS.join(":"));
+    let global_source = format!("{SORTED_PREFIX}:{}", POST_TIMELINE_KEY_PARTS.join(":"));
     let [tags, ranked, post, timeline] = TAG_RANKED_POST_TIMELINE;
     RankedLayout {
-        trust: format!("{SORTED}:{}", USER_SOCIAL_GRAPH_KEY_PARTS.join(":")),
+        trust: format!("{SORTED_PREFIX}:{}", USER_SOCIAL_GRAPH_KEY_PARTS.join(":")),
         global: RankedSet {
+            ranked: format!(
+                "{SORTED_PREFIX}:{}",
+                POST_RANKED_TIMELINE_KEY_PARTS.join(":")
+            ),
             staging: format!("{global_source}:RankedStaging"),
-            old: format!("{global_source}:RankedOld"),
             source: global_source,
-            ranked: global_ranked,
         },
-        tag_source_prefix: format!("{SORTED}:{}:", TAG_GLOBAL_POST_TIMELINE.join(":")),
-        tag_ranked_prefix: format!("{SORTED}:{tags}:{ranked}:{post}:{timeline}:"),
-        tag_staging_prefix: format!("{SORTED}:{tags}:{ranked}Staging:{post}:{timeline}:"),
-        tag_old_prefix: format!("{SORTED}:{tags}:{ranked}Old:{post}:{timeline}:"),
+        tag_source_prefix: format!("{SORTED_PREFIX}:{}:", TAG_GLOBAL_POST_TIMELINE.join(":")),
+        tag_ranked_prefix: format!("{SORTED_PREFIX}:{tags}:{ranked}:{post}:{timeline}:"),
+        tag_staging_prefix: format!("{SORTED_PREFIX}:{tags}:{ranked}Staging:{post}:{timeline}:"),
+        tag_scan_pattern: format!("{SORTED_PREFIX}:{tags}:*:{post}:{timeline}:*"),
         built_at: "Ranked:Timeline:BuiltAt".to_string(),
         lock: "lock:ranked-timeline-rebuild".to_string(),
     }
 });
 
 impl RankedLayout {
-    pub fn production() -> &'static RankedLayout {
+    pub(crate) fn production() -> &'static RankedLayout {
         &PRODUCTION
     }
 
     /// The same key shapes as production under `ns`, so scans behave the same.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn namespaced(ns: &str) -> RankedLayout {
         RankedLayout {
             trust: format!("{ns}:Trust"),
@@ -124,12 +124,11 @@ impl RankedLayout {
                 source: format!("{ns}:Timeline"),
                 ranked: format!("{ns}:Timeline:Ranked"),
                 staging: format!("{ns}:Timeline:RankedStaging"),
-                old: format!("{ns}:Timeline:RankedOld"),
             },
             tag_source_prefix: format!("{ns}:Tags:Global:"),
             tag_ranked_prefix: format!("{ns}:Tags:Ranked:"),
             tag_staging_prefix: format!("{ns}:Tags:RankedStaging:"),
-            tag_old_prefix: format!("{ns}:Tags:RankedOld:"),
+            tag_scan_pattern: format!("{ns}:Tags:*"),
             built_at: format!("{ns}:BuiltAt"),
             lock: format!("{ns}:Lock"),
         }
@@ -141,9 +140,135 @@ impl RankedLayout {
             source: format!("{}{label}", self.tag_source_prefix),
             ranked: format!("{}{label}", self.tag_ranked_prefix),
             staging: format!("{}{label}", self.tag_staging_prefix),
-            old: format!("{}{label}", self.tag_old_prefix),
         }
     }
+
+    /// Rebuilds every ranked set from the current ranking, or drops them all
+    /// when there is no ranking. Waits for a rebuild already running, so the
+    /// last ranking publish is always followed by a complete rebuild.
+    pub async fn rebuild(&self) -> RedisResult<RankedRebuildStats> {
+        let token = lock_token();
+        let deadline = Instant::now() + LOCK_WAIT;
+        while !try_acquire_lock(&self.lock, &token, LOCK_TTL_SECS).await? {
+            if Instant::now() >= deadline {
+                return Err(RedisError::CommandFailed(
+                    "timed out waiting for another ranked-set rebuild to finish".into(),
+                ));
+            }
+            tokio::time::sleep(LOCK_POLL).await;
+        }
+
+        let result = async {
+            let mut conn = get_redis_conn().await?;
+            self.rebuild_locked(&mut conn).await
+        }
+        .await;
+        let released = release_lock(&self.lock, &token).await;
+        let stats = result?;
+        released?;
+        Ok(stats)
+    }
+
+    async fn rebuild_locked(&self, conn: &mut Connection) -> RedisResult<RankedRebuildStats> {
+        let mut stats = RankedRebuildStats::default();
+        let trust_exists: bool = conn.exists(&self.trust).await?;
+        if !trust_exists {
+            self.drop_all(conn).await?;
+            stats.dropped = true;
+            return Ok(stats);
+        }
+
+        let tags = self.scan_tag_keys(conn).await?;
+        rebuild_set(conn, &self.trust, &self.global, &mut stats).await?;
+        for label in &tags.sources {
+            rebuild_set(conn, &self.trust, &self.tag(label), &mut stats).await?;
+        }
+
+        // A ranked set normally empties, and so vanishes, with its source; one that
+        // outlived its source drifted. Re-checked here, as a label may have been
+        // tagged again since the scan.
+        for label in tags.ranked.difference(&tags.sources) {
+            let set = self.tag(label);
+            let source_exists: bool = conn.exists(&set.source).await?;
+            if !source_exists {
+                let _: () = conn.unlink(&set.ranked).await?;
+                stats.orphans += 1;
+            }
+        }
+        // Left by a build that crashed; the lock guarantees none is running now.
+        let leftovers = tags
+            .staging
+            .iter()
+            .map(|label| format!("{}{label}", self.tag_staging_prefix));
+        unlink_keys(conn, leftovers).await?;
+
+        let built_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default();
+        let _: () = conn.set(&self.built_at, built_at).await?;
+        Ok(stats)
+    }
+
+    /// Drops every ranked set. The ready marker goes first, so readers fall back
+    /// to the unfiltered sets before any ranked set disappears.
+    async fn drop_all(&self, conn: &mut Connection) -> RedisResult<()> {
+        let _: () = conn.del(&self.built_at).await?;
+        let _: () = conn
+            .unlink(&[&self.global.ranked, &self.global.staging])
+            .await?;
+        let tags = self.scan_tag_keys(conn).await?;
+        let ranked = tags
+            .ranked
+            .iter()
+            .map(|label| format!("{}{label}", self.tag_ranked_prefix));
+        let staging = tags
+            .staging
+            .iter()
+            .map(|label| format!("{}{label}", self.tag_staging_prefix));
+        unlink_keys(conn, ranked.chain(staging)).await
+    }
+
+    /// The labels of every per-label family, from one pass over the keyspace:
+    /// `SCAN` costs the whole keyspace however few keys match, so the families
+    /// share it. Collected up front: a rebuild only writes keys of families it
+    /// has already listed, and the sets absorb the repeats `SCAN` may return.
+    async fn scan_tag_keys(&self, conn: &mut Connection) -> RedisResult<TagKeys> {
+        let mut tags = TagKeys::default();
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&self.tag_scan_pattern)
+                .arg("COUNT")
+                .arg(SCAN_COUNT)
+                .query_async(conn)
+                .await?;
+            for key in keys {
+                if let Some(label) = key.strip_prefix(self.tag_source_prefix.as_str()) {
+                    tags.sources.insert(label.to_string());
+                } else if let Some(label) = key.strip_prefix(self.tag_ranked_prefix.as_str()) {
+                    tags.ranked.insert(label.to_string());
+                } else if let Some(label) = key.strip_prefix(self.tag_staging_prefix.as_str()) {
+                    tags.staging.insert(label.to_string());
+                }
+            }
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(tags)
+    }
+}
+
+/// The labels found for each per-label family.
+#[derive(Debug, Default)]
+struct TagKeys {
+    sources: BTreeSet<String>,
+    ranked: BTreeSet<String>,
+    staging: BTreeSet<String>,
 }
 
 /// How the trust ranking applies to one in-scope request.
@@ -158,49 +283,34 @@ pub(crate) enum TrustMode {
     Unbuilt,
 }
 
-/// Trust-ranking state for one request, read in one round trip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RankedState {
-    pub trust_exists: bool,
-    pub built: bool,
-    /// Whether the viewer is in the ranking; `None` when the request has no viewer.
-    pub viewer_ranked: Option<bool>,
-}
-
-impl RankedState {
+impl TrustMode {
+    /// Reads the ranking state for one request in one round trip.
     pub async fn load(layout: &RankedLayout, viewer_id: Option<&str>) -> RedisResult<Self> {
         let mut pipe = redis::pipe();
         pipe.exists(&layout.trust).exists(&layout.built_at);
         let mut conn = get_redis_conn().await?;
-        match viewer_id {
+        let (trust_exists, built, viewer_ranked) = match viewer_id {
             Some(viewer_id) => {
                 pipe.zscore(&layout.trust, viewer_id);
-                let (trust_exists, built, viewer_score): (bool, bool, Option<f64>) =
+                let (trust_exists, built, score): (bool, bool, Option<f64>) =
                     pipe.query_async(&mut conn).await?;
-                Ok(Self {
-                    trust_exists,
-                    built,
-                    viewer_ranked: Some(viewer_score.is_some()),
-                })
+                (trust_exists, built, Some(score.is_some()))
             }
             None => {
                 let (trust_exists, built): (bool, bool) = pipe.query_async(&mut conn).await?;
-                Ok(Self {
-                    trust_exists,
-                    built,
-                    viewer_ranked: None,
-                })
+                (trust_exists, built, None)
             }
-        }
+        };
+        Ok(Self::decide(trust_exists, built, viewer_ranked))
     }
 
     /// No ranking means no filtering at all. A viewer outside the ranking,
-    /// including one Nexus does not know, gets the unfiltered stream.
-    pub fn mode(&self) -> TrustMode {
-        if !self.trust_exists || self.viewer_ranked == Some(false) {
-            return TrustMode::Off;
-        }
-        if self.built {
+    /// including one Nexus does not know, gets the unfiltered stream;
+    /// `viewer_ranked` is `None` when the request has no viewer.
+    pub fn decide(trust_exists: bool, built: bool, viewer_ranked: Option<bool>) -> Self {
+        if !trust_exists || viewer_ranked == Some(false) {
+            TrustMode::Off
+        } else if built {
             TrustMode::Ranked
         } else {
             TrustMode::Unbuilt
@@ -222,42 +332,36 @@ pub(crate) fn record_unbuilt() {
     UNBUILT_REQUESTS.add(1, &[]);
 }
 
-/// Mirrors a member just written to a source set into its ranked copy, and into
-/// the staging set while a build runs, when its author is in the ranking. The
-/// score is read from the source set, so a retry or a late call can never write
-/// a stale score.
-static MIRROR_ADD: LazyLock<Script> = LazyLock::new(|| {
+/// Writes a member to a source set (when a score is given) and, when its author
+/// is in the ranking, to the ranked copy and a running build's staging set, at
+/// the source's score. One atomic step, so the copy never disagrees with the
+/// source.
+static ADD: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
-        r"local score = redis.call('ZSCORE', KEYS[1], ARGV[2])
+        r"if ARGV[2] ~= '' then redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1]) end
+          local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
           if not score then return 0 end
-          if not redis.call('ZSCORE', KEYS[2], ARGV[1]) then return 0 end
-          redis.call('ZADD', KEYS[3], score, ARGV[2])
+          local sep = string.find(ARGV[1], ':', 1, true)
+          if not sep or not redis.call('ZSCORE', KEYS[2], string.sub(ARGV[1], 1, sep - 1)) then
+              return 0
+          end
+          redis.call('ZADD', KEYS[3], score, ARGV[1])
           if redis.call('EXISTS', KEYS[4]) == 1 then
-              redis.call('ZADD', KEYS[4], score, ARGV[2])
+              redis.call('ZADD', KEYS[4], score, ARGV[1])
           end
           return 1",
     )
 });
 
-/// Removes a member from a ranked set and its staging set in one step, so a
-/// swap cannot land between the two removals and keep the member.
-static MIRROR_REMOVE: LazyLock<Script> = LazyLock::new(|| {
-    Script::new(
-        r"redis.call('ZREM', KEYS[1], ARGV[1])
-          redis.call('ZREM', KEYS[2], ARGV[1])
-          return 1",
-    )
-});
-
-/// Rebuilds a small set in one atomic step, dropping any staging or old set a
-/// crashed build left behind. Returns -1 when the source has grown past
-/// `ARGV[1]` since it was sized, so the caller stages it instead.
+/// Rebuilds a small set in one atomic step, dropping any staging set a crashed
+/// build left behind. Returns `{size, copied}`, with `copied = -1` when the
+/// source is larger than `ARGV[1]` and must be staged instead.
 static REBUILD_SMALL: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
-        r"if redis.call('ZCARD', KEYS[1]) > tonumber(ARGV[1]) then return -1 end
-          redis.call('UNLINK', KEYS[4], KEYS[5])
+        r"local size = redis.call('ZCARD', KEYS[1])
+          if size > tonumber(ARGV[1]) then return {size, -1} end
+          redis.call('UNLINK', KEYS[3], KEYS[4])
           local entries = redis.call('ZRANGE', KEYS[1], 0, -1, 'WITHSCORES')
-          redis.call('DEL', KEYS[3])
           local copied = 0
           for i = 1, #entries, 2 do
               local member = entries[i]
@@ -267,41 +371,38 @@ static REBUILD_SMALL: LazyLock<Script> = LazyLock::new(|| {
                   copied = copied + 1
               end
           end
-          return copied",
+          return {size, copied}",
     )
 });
 
-/// Copies one batch of a staged build. Members deleted from the source since
-/// they were scanned are skipped, and each score is re-read from the source.
+/// Copies one `ZSCAN` page of a staged build, at the scores the scan read in the
+/// same atomic step. Returns `{next cursor, scanned, copied}`.
 static COPY_BATCH: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
-        r"local copied = 0
-          for i = 2, #ARGV do
-              local member = ARGV[i]
-              local score = redis.call('ZSCORE', KEYS[1], member)
-              if score then
-                  local sep = string.find(member, ':', 1, true)
-                  if sep and redis.call('ZSCORE', KEYS[2], string.sub(member, 1, sep - 1)) then
-                      redis.call('ZADD', KEYS[3], score, member)
-                      copied = copied + 1
-                  end
+        r"local page = redis.call('ZSCAN', KEYS[1], ARGV[1], 'COUNT', ARGV[2])
+          local entries = page[2]
+          local copied = 0
+          for i = 1, #entries, 2 do
+              local member = entries[i]
+              local sep = string.find(member, ':', 1, true)
+              if sep and redis.call('ZSCORE', KEYS[2], string.sub(member, 1, sep - 1)) then
+                  redis.call('ZADD', KEYS[3], entries[i + 1], member)
+                  copied = copied + 1
               end
           end
-          redis.call('EXPIRE', KEYS[3], ARGV[1])
-          return copied",
+          redis.call('EXPIRE', KEYS[3], ARGV[3])
+          return {page[1], #entries / 2, copied}",
     )
 });
 
-/// Installs a finished staging set: drops the sentinel, moves the current
-/// ranked set aside (the caller frees it with `UNLINK`, off the main thread),
-/// and renames the staging set into place. A staging set left empty means no
-/// ranked member, so the ranked set ends up absent.
+/// Installs a finished staging set: drops the sentinel and the current ranked
+/// set (`UNLINK` frees it off the main thread), then renames the staging set
+/// into place. A staging set left empty means no ranked member, so the ranked
+/// set ends up absent.
 static SWAP: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r"redis.call('ZREM', KEYS[1], ARGV[1])
-          if redis.call('EXISTS', KEYS[2]) == 1 then
-              redis.call('RENAME', KEYS[2], KEYS[3])
-          end
+          redis.call('UNLINK', KEYS[2])
           if redis.call('EXISTS', KEYS[1]) == 1 then
               redis.call('RENAME', KEYS[1], KEYS[2])
               redis.call('PERSIST', KEYS[2])
@@ -310,34 +411,41 @@ static SWAP: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-/// Mirrors `member` (`author:post`), just written to `set.source`, into the ranked copy.
-pub(crate) async fn mirror_add(
+/// Adds `member` (`author:post`) to `set.source` at `score`, mirroring it into
+/// the ranked copy. With `score` `None` only the mirror runs, from the score
+/// already in the source, so a retry repairs a copy a crash left behind.
+pub(crate) async fn add(
     trust: &str,
     set: &RankedSet,
-    author_id: &str,
     member: &str,
+    score: Option<f64>,
 ) -> RedisResult<()> {
     let mut conn = get_redis_conn().await?;
-    let _: i64 = MIRROR_ADD
+    let _: i64 = ADD
         .key(&set.source)
         .key(trust)
         .key(&set.ranked)
         .key(&set.staging)
-        .arg(author_id)
         .arg(member)
+        .arg(score.map(|score| score.to_string()).unwrap_or_default())
         .invoke_async(&mut conn)
         .await?;
     Ok(())
 }
 
-/// Removes `member`, just removed from `set.source`, from the ranked copy.
-pub(crate) async fn mirror_remove(set: &RankedSet, member: &str) -> RedisResult<()> {
+/// Removes `member` from `set.source`, its ranked copy and a running build's
+/// staging set in one transaction, so a swap cannot land between the removals.
+pub(crate) async fn remove(set: &RankedSet, member: &str) -> RedisResult<()> {
     let mut conn = get_redis_conn().await?;
-    let _: i64 = MIRROR_REMOVE
-        .key(&set.ranked)
-        .key(&set.staging)
-        .arg(member)
-        .invoke_async(&mut conn)
+    let _: () = redis::pipe()
+        .atomic()
+        .zrem(&set.source, member)
+        .ignore()
+        .zrem(&set.ranked, member)
+        .ignore()
+        .zrem(&set.staging, member)
+        .ignore()
+        .query_async(&mut conn)
         .await?;
     Ok(())
 }
@@ -357,29 +465,6 @@ pub struct RankedRebuildStats {
     pub dropped: bool,
 }
 
-/// Rebuilds every ranked set from the current ranking, or drops them all when
-/// there is no ranking. Waits for a rebuild already running, so the last
-/// ranking publish is always followed by a complete rebuild.
-#[doc(hidden)]
-pub async fn rebuild(layout: &RankedLayout) -> RedisResult<RankedRebuildStats> {
-    let token = lock_token();
-    let deadline = Instant::now() + LOCK_WAIT;
-    while !try_acquire_lock(&layout.lock, &token, LOCK_TTL_SECS).await? {
-        if Instant::now() >= deadline {
-            return Err(RedisError::CommandFailed(
-                "timed out waiting for another ranked-set rebuild to finish".into(),
-            ));
-        }
-        tokio::time::sleep(LOCK_POLL).await;
-    }
-
-    let result = rebuild_locked(layout).await;
-    let released = release_lock(&layout.lock, &token).await;
-    let stats = result?;
-    released?;
-    Ok(stats)
-}
-
 /// Unique per call: the lock only lets the holder of its token release it.
 fn lock_token() -> String {
     let nanos = SystemTime::now()
@@ -389,216 +474,93 @@ fn lock_token() -> String {
     format!("{}:{nanos}", std::process::id())
 }
 
-async fn rebuild_locked(layout: &RankedLayout) -> RedisResult<RankedRebuildStats> {
-    let mut stats = RankedRebuildStats::default();
-    let mut conn = get_redis_conn().await?;
-
-    let trust_exists: bool = conn.exists(&layout.trust).await?;
-    if !trust_exists {
-        drop_all(layout).await?;
-        stats.dropped = true;
-        return Ok(stats);
-    }
-
-    let tags = scan_tag_keys(layout).await?;
-    rebuild_set(&layout.trust, &layout.global, &mut stats).await?;
-    for label in &tags.sources {
-        rebuild_set(&layout.trust, &layout.tag(label), &mut stats).await?;
-    }
-
-    // A ranked set normally empties, and so vanishes, with its source; one that
-    // outlived its source drifted. Re-checked here, as a label may have been
-    // tagged again since the scan.
-    for label in tags.ranked.difference(&tags.sources) {
-        let set = layout.tag(label);
-        let source_exists: bool = conn.exists(&set.source).await?;
-        if !source_exists {
-            let _: () = conn.unlink(&set.ranked).await?;
-            stats.orphans += 1;
-        }
-    }
-    // Left by a build that crashed; the lock guarantees none is running now.
-    unlink_keys(tags.leftovers).await?;
-
-    let built_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or_default();
-    let _: () = conn.set(&layout.built_at, built_at).await?;
-    Ok(stats)
-}
-
 async fn rebuild_set(
+    conn: &mut Connection,
     trust: &str,
     set: &RankedSet,
     stats: &mut RankedRebuildStats,
 ) -> RedisResult<()> {
-    let mut conn = get_redis_conn().await?;
     stats.sets += 1;
-
-    let size: usize = conn.zcard(&set.source).await?;
-    if size == 0 {
-        let _: () = conn.unlink(&[&set.ranked, &set.staging, &set.old]).await?;
+    if let Some((scanned, copied)) = rebuild_small(conn, trust, set).await? {
+        stats.scanned += scanned;
+        stats.copied += copied;
         return Ok(());
     }
 
-    if size <= ATOMIC_MAX {
-        let copied: i64 = REBUILD_SMALL
-            .key(&set.source)
-            .key(trust)
-            .key(&set.ranked)
-            .key(&set.staging)
-            .key(&set.old)
-            .arg(ATOMIC_MAX)
-            .invoke_async(&mut conn)
-            .await?;
-        if copied >= 0 {
-            stats.scanned += size;
-            stats.copied += copied as usize;
-            return Ok(());
-        }
-        // Grew past the limit since it was sized: stage it instead.
-    }
-
+    // Too big for one atomic step: build into the staging set, then swap.
     let _: () = redis::pipe()
-        .unlink(&[&set.staging, &set.old])
+        .unlink(&set.staging)
         .ignore()
         .zadd(&set.staging, SENTINEL, 0)
         .ignore()
         .expire(&set.staging, STAGING_LEASE_SECS as i64)
         .ignore()
-        .query_async(&mut conn)
+        .query_async(conn)
         .await?;
-
     let mut cursor: u64 = 0;
     loop {
-        let (next, entries): (u64, Vec<String>) = redis::cmd("ZSCAN")
-            .arg(&set.source)
-            .arg(cursor)
-            .arg("COUNT")
-            .arg(BATCH)
-            .query_async(&mut conn)
-            .await?;
-        // ZSCAN replies member, score, member, score...
-        let members: Vec<&String> = entries.iter().step_by(2).collect();
-        if !members.is_empty() {
-            let copied: i64 = COPY_BATCH
-                .key(&set.source)
-                .key(trust)
-                .key(&set.staging)
-                .arg(STAGING_LEASE_SECS)
-                .arg(&members)
-                .invoke_async(&mut conn)
-                .await?;
-            stats.scanned += members.len();
-            stats.copied += copied as usize;
-        }
+        let (next, scanned, copied) = copy_batch(conn, trust, set, cursor).await?;
+        stats.scanned += scanned;
+        stats.copied += copied;
         if next == 0 {
             break;
         }
         cursor = next;
     }
+    swap(conn, set).await
+}
 
+/// `Some((scanned, copied))` once rebuilt, `None` when the set is too big.
+async fn rebuild_small(
+    conn: &mut Connection,
+    trust: &str,
+    set: &RankedSet,
+) -> RedisResult<Option<(usize, usize)>> {
+    let (size, copied): (i64, i64) = REBUILD_SMALL
+        .key(&set.source)
+        .key(trust)
+        .key(&set.ranked)
+        .key(&set.staging)
+        .arg(ATOMIC_MAX)
+        .invoke_async(conn)
+        .await?;
+    Ok((copied >= 0).then_some((size as usize, copied as usize)))
+}
+
+/// `(next cursor, scanned, copied)` for the page at `cursor`.
+async fn copy_batch(
+    conn: &mut Connection,
+    trust: &str,
+    set: &RankedSet,
+    cursor: u64,
+) -> RedisResult<(u64, usize, usize)> {
+    let (next, scanned, copied): (u64, i64, i64) = COPY_BATCH
+        .key(&set.source)
+        .key(trust)
+        .key(&set.staging)
+        .arg(cursor)
+        .arg(BATCH)
+        .arg(STAGING_LEASE_SECS)
+        .invoke_async(conn)
+        .await?;
+    Ok((next, scanned as usize, copied as usize))
+}
+
+async fn swap(conn: &mut Connection, set: &RankedSet) -> RedisResult<()> {
     let _: i64 = SWAP
         .key(&set.staging)
         .key(&set.ranked)
-        .key(&set.old)
         .arg(SENTINEL)
-        .invoke_async(&mut conn)
+        .invoke_async(conn)
         .await?;
-    let _: () = conn.unlink(&set.old).await?;
     Ok(())
 }
 
-/// Drops every ranked set. The ready marker goes first, so readers fall back
-/// to the unfiltered sets before any ranked set disappears.
-async fn drop_all(layout: &RankedLayout) -> RedisResult<()> {
-    let mut conn = get_redis_conn().await?;
-    let _: () = conn.del(&layout.built_at).await?;
-    let global = &layout.global;
-    let _: () = conn
-        .unlink(&[&global.ranked, &global.staging, &global.old])
-        .await?;
-
-    let tags = scan_tag_keys(layout).await?;
-    let ranked = tags
-        .ranked
-        .iter()
-        .map(|label| format!("{}{label}", layout.tag_ranked_prefix));
-    unlink_keys(ranked.chain(tags.leftovers)).await
-}
-
-/// The per-label keys of every family, from one pass over the keyspace: `SCAN`
-/// costs the whole keyspace however few keys match, so the families share it.
-#[derive(Debug, Default)]
-struct TagKeys {
-    /// Labels with a timeline.
-    sources: BTreeSet<String>,
-    /// Labels with a ranked timeline.
-    ranked: BTreeSet<String>,
-    /// Full keys of staging and old sets.
-    leftovers: BTreeSet<String>,
-}
-
-/// Collected up front: a rebuild only writes keys of families it has already
-/// listed, and a deduplicating set absorbs the repeats `SCAN` may return.
-async fn scan_tag_keys(layout: &RankedLayout) -> RedisResult<TagKeys> {
-    let families = [
-        layout.tag_source_prefix.as_str(),
-        layout.tag_ranked_prefix.as_str(),
-        layout.tag_staging_prefix.as_str(),
-        layout.tag_old_prefix.as_str(),
-    ];
-    let pattern = format!("{}*", common_prefix(&families));
-    let mut conn = get_redis_conn().await?;
-    let mut tags = TagKeys::default();
-    let mut cursor: u64 = 0;
-    loop {
-        let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(&pattern)
-            .arg("COUNT")
-            .arg(SCAN_COUNT)
-            .query_async(&mut conn)
-            .await?;
-        for key in keys {
-            if let Some(label) = key.strip_prefix(families[0]) {
-                tags.sources.insert(label.to_string());
-            } else if let Some(label) = key.strip_prefix(families[1]) {
-                tags.ranked.insert(label.to_string());
-            } else if key.starts_with(families[2]) || key.starts_with(families[3]) {
-                tags.leftovers.insert(key);
-            }
-        }
-        if next == 0 {
-            break;
-        }
-        cursor = next;
-    }
-    Ok(tags)
-}
-
-/// The longest prefix all of `prefixes` share, kept on a character boundary.
-fn common_prefix<'a>(prefixes: &[&'a str]) -> &'a str {
-    let first = prefixes.first().copied().unwrap_or_default();
-    let mut len = prefixes.iter().fold(first.len(), |len, prefix| {
-        first
-            .bytes()
-            .zip(prefix.bytes())
-            .take(len)
-            .take_while(|(a, b)| a == b)
-            .count()
-    });
-    while !first.is_char_boundary(len) {
-        len -= 1;
-    }
-    &first[..len]
-}
-
-async fn unlink_keys(keys: impl IntoIterator<Item = String>) -> RedisResult<()> {
+async fn unlink_keys(
+    conn: &mut Connection,
+    keys: impl IntoIterator<Item = String>,
+) -> RedisResult<()> {
     let keys: Vec<String> = keys.into_iter().collect();
-    let mut conn = get_redis_conn().await?;
     for chunk in keys.chunks(SCAN_COUNT) {
         let _: () = conn.unlink(chunk).await?;
     }
@@ -609,50 +571,27 @@ async fn unlink_keys(keys: impl IntoIterator<Item = String>) -> RedisResult<()> 
 mod tests {
     use super::*;
 
-    fn state(trust_exists: bool, built: bool, viewer_ranked: Option<bool>) -> RankedState {
-        RankedState {
-            trust_exists,
-            built,
-            viewer_ranked,
-        }
-    }
-
     #[test]
-    fn mode_is_off_without_a_ranking() {
+    fn decide_is_off_without_a_ranking() {
         for built in [false, true] {
             for viewer in [None, Some(false), Some(true)] {
-                assert_eq!(state(false, built, viewer).mode(), TrustMode::Off);
+                assert_eq!(TrustMode::decide(false, built, viewer), TrustMode::Off);
             }
         }
     }
 
     #[test]
-    fn mode_is_off_for_a_viewer_outside_the_ranking() {
-        assert_eq!(state(true, true, Some(false)).mode(), TrustMode::Off);
-        assert_eq!(state(true, false, Some(false)).mode(), TrustMode::Off);
+    fn decide_is_off_for_a_viewer_outside_the_ranking() {
+        assert_eq!(TrustMode::decide(true, true, Some(false)), TrustMode::Off);
+        assert_eq!(TrustMode::decide(true, false, Some(false)), TrustMode::Off);
     }
 
     #[test]
-    fn mode_filters_anonymous_and_ranked_viewers() {
+    fn decide_filters_anonymous_and_ranked_viewers() {
         for viewer in [None, Some(true)] {
-            assert_eq!(state(true, true, viewer).mode(), TrustMode::Ranked);
-            assert_eq!(state(true, false, viewer).mode(), TrustMode::Unbuilt);
+            assert_eq!(TrustMode::decide(true, true, viewer), TrustMode::Ranked);
+            assert_eq!(TrustMode::decide(true, false, viewer), TrustMode::Unbuilt);
         }
-    }
-
-    #[test]
-    fn common_prefix_spans_every_tag_family() {
-        let layout = RankedLayout::production();
-        let families = [
-            layout.tag_source_prefix.as_str(),
-            layout.tag_ranked_prefix.as_str(),
-            layout.tag_staging_prefix.as_str(),
-            layout.tag_old_prefix.as_str(),
-        ];
-        assert_eq!(common_prefix(&families), "Sorted:Tags:");
-        assert_eq!(common_prefix(&["abc", "abd"]), "ab");
-        assert_eq!(common_prefix(&["é1", "é2"]), "é");
-        assert_eq!(common_prefix(&["x"]), "x");
     }
 
     #[test]
@@ -668,13 +607,12 @@ mod tests {
             tag.staging,
             "Sorted:Tags:RankedStaging:Post:Timeline:bitcoin"
         );
-        assert_eq!(tag.old, "Sorted:Tags:RankedOld:Post:Timeline:bitcoin");
+        assert_eq!(layout.tag_scan_pattern, "Sorted:Tags:*:Post:Timeline:*");
         // Scanning one family of keys must never match another.
         let prefixes = [
             &layout.tag_source_prefix,
             &layout.tag_ranked_prefix,
             &layout.tag_staging_prefix,
-            &layout.tag_old_prefix,
         ];
         for (i, a) in prefixes.iter().enumerate() {
             for (j, b) in prefixes.iter().enumerate() {
@@ -698,7 +636,7 @@ mod tests {
             StackManager::setup(&StackConfig::default()).await?;
             let mut conn = get_redis_conn().await?;
             let keys: Vec<String> = conn.keys(format!("{ns}:*")).await?;
-            unlink_keys(keys).await?;
+            unlink_keys(&mut conn, keys).await?;
             Ok(RankedLayout::namespaced(ns))
         }
 
@@ -725,16 +663,19 @@ mod tests {
         }
 
         #[tokio_shared_rt::test(shared)]
-        async fn mirror_add_copies_ranked_authors_only() -> TestResult {
-            let l = setup("Test:Ranked:MirrorAdd").await?;
+        async fn add_mirrors_ranked_authors_only() -> TestResult {
+            let l = setup("Test:Ranked:Add").await?;
             zadd(&l.trust, &[(1.0, "alice")]).await?;
-            zadd(&l.global.source, &[(10.0, "alice:p1"), (20.0, "bob:p2")]).await?;
 
-            mirror_add(&l.trust, &l.global, "alice", "alice:p1").await?;
-            mirror_add(&l.trust, &l.global, "bob", "bob:p2").await?;
-            // Not in the source: nothing to mirror.
-            mirror_add(&l.trust, &l.global, "alice", "alice:gone").await?;
+            add(&l.trust, &l.global, "alice:p1", Some(10.0)).await?;
+            add(&l.trust, &l.global, "bob:p2", Some(20.0)).await?;
+            // Neither in the source nor written: nothing to mirror.
+            add(&l.trust, &l.global, "alice:gone", None).await?;
 
+            assert_eq!(
+                members(&l.global.source).await?,
+                owned(&[("alice:p1", 10.0), ("bob:p2", 20.0)])
+            );
             assert_eq!(
                 members(&l.global.ranked).await?,
                 owned(&[("alice:p1", 10.0)])
@@ -744,25 +685,43 @@ mod tests {
             Ok(())
         }
 
+        /// Without a score only the mirror runs, from the source's own score.
         #[tokio_shared_rt::test(shared)]
-        async fn mirror_add_without_a_ranking_writes_nothing() -> TestResult {
-            let l = setup("Test:Ranked:NoRanking").await?;
+        async fn add_without_a_score_repairs_the_ranked_copy() -> TestResult {
+            let l = setup("Test:Ranked:Repair").await?;
+            zadd(&l.trust, &[(1.0, "alice")]).await?;
             zadd(&l.global.source, &[(10.0, "alice:p1")]).await?;
 
-            mirror_add(&l.trust, &l.global, "alice", "alice:p1").await?;
+            add(&l.trust, &l.global, "alice:p1", None).await?;
 
+            assert_eq!(
+                members(&l.global.ranked).await?,
+                owned(&[("alice:p1", 10.0)])
+            );
+            Ok(())
+        }
+
+        #[tokio_shared_rt::test(shared)]
+        async fn add_without_a_ranking_writes_only_the_source() -> TestResult {
+            let l = setup("Test:Ranked:NoRanking").await?;
+
+            add(&l.trust, &l.global, "alice:p1", Some(10.0)).await?;
+
+            assert_eq!(
+                members(&l.global.source).await?,
+                owned(&[("alice:p1", 10.0)])
+            );
             assert!(!exists(&l.global.ranked).await?);
             Ok(())
         }
 
         #[tokio_shared_rt::test(shared)]
-        async fn mirrors_write_through_to_a_running_build() -> TestResult {
+        async fn writes_go_through_to_a_running_build() -> TestResult {
             let l = setup("Test:Ranked:WriteThrough").await?;
             zadd(&l.trust, &[(1.0, "alice")]).await?;
             zadd(&l.global.staging, &[(0.0, SENTINEL)]).await?;
-            zadd(&l.global.source, &[(10.0, "alice:p1")]).await?;
 
-            mirror_add(&l.trust, &l.global, "alice", "alice:p1").await?;
+            add(&l.trust, &l.global, "alice:p1", Some(10.0)).await?;
             assert_eq!(
                 members(&l.global.ranked).await?,
                 owned(&[("alice:p1", 10.0)])
@@ -772,7 +731,8 @@ mod tests {
                 owned(&[(SENTINEL, 0.0), ("alice:p1", 10.0)])
             );
 
-            mirror_remove(&l.global, "alice:p1").await?;
+            remove(&l.global, "alice:p1").await?;
+            assert!(!exists(&l.global.source).await?);
             assert!(!exists(&l.global.ranked).await?);
             assert_eq!(members(&l.global.staging).await?, owned(&[(SENTINEL, 0.0)]));
             Ok(())
@@ -795,7 +755,7 @@ mod tests {
             zadd(&l.global.ranked, &[(2.0, "bob:p2")]).await?;
             zadd(&spam.ranked, &[(9.0, "bob:p9")]).await?;
 
-            let stats = rebuild(&l).await?;
+            let stats = l.rebuild().await?;
 
             assert_eq!(
                 members(&l.global.ranked).await?,
@@ -823,7 +783,7 @@ mod tests {
             let entries: Vec<(f64, &str)> = posts.iter().map(|(m, s)| (*s, m.as_str())).collect();
             zadd(&l.global.source, &entries).await?;
 
-            rebuild(&l).await?;
+            l.rebuild().await?;
 
             let mut expected: Vec<(String, f64)> = posts
                 .into_iter()
@@ -832,13 +792,12 @@ mod tests {
             expected.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
             assert_eq!(members(&l.global.ranked).await?, expected);
             assert!(!exists(&l.global.staging).await?, "staging set left behind");
-            assert!(!exists(&l.global.old).await?, "old ranked set left behind");
             Ok(())
         }
 
         /// Writes landing during a staged build: a member deleted after its
-        /// batch was copied is not resurrected, and one created after its
-        /// region was scanned is kept.
+        /// page was copied is not resurrected, and one created after its region
+        /// was scanned is kept.
         #[tokio_shared_rt::test(shared)]
         async fn staged_build_keeps_concurrent_writes() -> TestResult {
             let l = setup("Test:Ranked:Concurrent").await?;
@@ -847,29 +806,14 @@ mod tests {
             zadd(&l.global.staging, &[(0.0, SENTINEL)]).await?;
 
             let mut conn = get_redis_conn().await?;
-            let copied: i64 = COPY_BATCH
-                .key(&l.global.source)
-                .key(&l.trust)
-                .key(&l.global.staging)
-                .arg(STAGING_LEASE_SECS)
-                .arg(&["alice:p1", "alice:p2", "alice:p0"])
-                .invoke_async(&mut conn)
-                .await?;
-            assert_eq!(copied, 2, "a member missing from the source is not copied");
+            let (next, scanned, copied) = copy_batch(&mut conn, &l.trust, &l.global, 0).await?;
+            assert_eq!((next, scanned, copied), (0, 2, 2));
 
             // Deleted, then created, while the build is still running.
-            let _: () = conn.zrem(&l.global.source, "alice:p2").await?;
-            mirror_remove(&l.global, "alice:p2").await?;
-            zadd(&l.global.source, &[(3.0, "alice:p3")]).await?;
-            mirror_add(&l.trust, &l.global, "alice", "alice:p3").await?;
+            remove(&l.global, "alice:p2").await?;
+            add(&l.trust, &l.global, "alice:p3", Some(3.0)).await?;
 
-            let _: i64 = SWAP
-                .key(&l.global.staging)
-                .key(&l.global.ranked)
-                .key(&l.global.old)
-                .arg(SENTINEL)
-                .invoke_async(&mut conn)
-                .await?;
+            swap(&mut conn, &l.global).await?;
 
             assert_eq!(
                 members(&l.global.ranked).await?,
@@ -880,23 +824,17 @@ mod tests {
         }
 
         #[tokio_shared_rt::test(shared)]
-        async fn small_rebuild_defers_to_staging_when_the_set_grew() -> TestResult {
-            let l = setup("Test:Ranked:Grew").await?;
+        async fn small_rebuild_defers_a_set_past_the_atomic_limit() -> TestResult {
+            let l = setup("Test:Ranked:Defer").await?;
             zadd(&l.trust, &[(1.0, "alice")]).await?;
-            zadd(&l.global.source, &[(1.0, "alice:p1"), (2.0, "alice:p2")]).await?;
+            let posts: Vec<String> = (0..=ATOMIC_MAX).map(|i| format!("alice:P{i:05}")).collect();
+            let entries: Vec<(f64, &str)> = posts.iter().map(|m| (1.0, m.as_str())).collect();
+            zadd(&l.global.source, &entries).await?;
 
             let mut conn = get_redis_conn().await?;
-            let copied: i64 = REBUILD_SMALL
-                .key(&l.global.source)
-                .key(&l.trust)
-                .key(&l.global.ranked)
-                .key(&l.global.staging)
-                .key(&l.global.old)
-                .arg(1)
-                .invoke_async(&mut conn)
-                .await?;
+            let rebuilt = rebuild_small(&mut conn, &l.trust, &l.global).await?;
 
-            assert_eq!(copied, -1);
+            assert_eq!(rebuilt, None);
             assert!(
                 !exists(&l.global.ranked).await?,
                 "nothing written on deferral"
@@ -911,11 +849,10 @@ mod tests {
             zadd(&l.global.ranked, &[(1.0, "alice:p1")]).await?;
             zadd(&l.tag("x").ranked, &[(1.0, "alice:p1")]).await?;
             zadd(&l.tag("y").staging, &[(0.0, SENTINEL)]).await?;
-            zadd(&l.tag("z").old, &[(1.0, "alice:p1")]).await?;
             let mut conn = get_redis_conn().await?;
             let _: () = conn.set(&l.built_at, 1).await?;
 
-            let stats = rebuild(&l).await?;
+            let stats = l.rebuild().await?;
 
             assert!(stats.dropped);
             for key in [
@@ -923,7 +860,6 @@ mod tests {
                 &l.global.ranked,
                 &l.tag("x").ranked,
                 &l.tag("y").staging,
-                &l.tag("z").old,
             ] {
                 assert!(!exists(key).await?, "{key} survived without a ranking");
             }
@@ -942,18 +878,16 @@ mod tests {
             // including the global set's (small, so rebuilt atomically).
             zadd(&l.tag("gone").ranked, &[(2.0, "alice:p2")]).await?;
             zadd(&l.tag("live").staging, &[(0.0, SENTINEL)]).await?;
-            zadd(&l.tag("other").old, &[(3.0, "alice:p3")]).await?;
+            zadd(&l.tag("dead").staging, &[(0.0, SENTINEL)]).await?;
             zadd(&l.global.staging, &[(0.0, SENTINEL)]).await?;
-            zadd(&l.global.old, &[(3.0, "alice:p3")]).await?;
 
-            let stats = rebuild(&l).await?;
+            let stats = l.rebuild().await?;
 
             assert_eq!(stats.orphans, 1);
             assert!(!exists(&l.tag("gone").ranked).await?);
             assert!(!exists(&l.tag("live").staging).await?);
-            assert!(!exists(&l.tag("other").old).await?);
+            assert!(!exists(&l.tag("dead").staging).await?);
             assert!(!exists(&l.global.staging).await?);
-            assert!(!exists(&l.global.old).await?);
             assert_eq!(
                 members(&l.global.ranked).await?,
                 owned(&[("alice:p4", 4.0)])
@@ -973,7 +907,7 @@ mod tests {
             assert!(try_acquire_lock(&l.lock, "other-rebuild", 60).await?);
 
             let waiting = l.clone();
-            let handle = tokio::spawn(async move { rebuild(&waiting).await });
+            let handle = tokio::spawn(async move { waiting.rebuild().await });
             tokio::time::sleep(Duration::from_millis(1_500)).await;
             assert!(
                 !handle.is_finished(),
@@ -995,33 +929,17 @@ mod tests {
         }
 
         #[tokio_shared_rt::test(shared)]
-        async fn state_reflects_the_ranking_marker_and_viewer() -> TestResult {
+        async fn load_reflects_the_ranking_marker_and_viewer() -> TestResult {
             let l = setup("Test:Ranked:State").await?;
-
-            let none = RankedState::load(&l, Some("alice")).await?;
-            assert_eq!(none.mode(), TrustMode::Off);
+            assert_eq!(TrustMode::load(&l, Some("alice")).await?, TrustMode::Off);
 
             zadd(&l.trust, &[(1.0, "alice")]).await?;
-            let unbuilt = RankedState::load(&l, None).await?;
-            assert_eq!(
-                unbuilt,
-                RankedState {
-                    trust_exists: true,
-                    built: false,
-                    viewer_ranked: None
-                }
-            );
+            assert_eq!(TrustMode::load(&l, None).await?, TrustMode::Unbuilt);
 
             let mut conn = get_redis_conn().await?;
             let _: () = conn.set(&l.built_at, 1).await?;
-            assert_eq!(
-                RankedState::load(&l, Some("alice")).await?.mode(),
-                TrustMode::Ranked
-            );
-            assert_eq!(
-                RankedState::load(&l, Some("stranger")).await?.mode(),
-                TrustMode::Off
-            );
+            assert_eq!(TrustMode::load(&l, Some("alice")).await?, TrustMode::Ranked);
+            assert_eq!(TrustMode::load(&l, Some("stranger")).await?, TrustMode::Off);
             Ok(())
         }
     }

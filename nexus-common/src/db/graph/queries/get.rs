@@ -310,14 +310,24 @@ pub fn get_user_tag_pairs() -> Query {
 pub fn get_trust_ranked_user_ids() -> Query {
     Query::new(
         "get_trust_ranked_user_ids",
-        "
-        MATCH (u:User)
-        WHERE u.trust > 0
-          AND NOT coalesce(u.deleted, false)
-        RETURN u.id AS user_id
-        ORDER BY u.trust DESC, user_id ASC
-        ",
+        format!(
+            "
+            MATCH (u:User)
+            WHERE {}
+            RETURN u.id AS user_id
+            ORDER BY u.trust DESC, user_id ASC
+            ",
+            trust_ranked_condition("u")
+        ),
     )
+}
+
+/// The ranking's membership test for the user bound to `var`: positive trust
+/// and not deleted. A missing `trust` reads as null, which drops the row, so a
+/// never-scored user is excluded too. Shared by the ranking and the
+/// trust-filtered post streams, so the two cannot drift apart.
+pub(crate) fn trust_ranked_condition(var: &str) -> String {
+    format!("{var}.trust > 0 AND NOT coalesce({var}.deleted, false)")
 }
 
 /// Users whose profile carries any of the given tag labels, scored by distinct
@@ -1167,10 +1177,13 @@ pub fn post_stream(
     kind: Option<KindFilter>,
     trust_rule: bool,
 ) -> GraphResult<Query> {
-    // The trust rule exists for `source=all` with `sorting=timeline` only; the
-    // query shape below relies on both.
-    let trust_rule =
-        trust_rule && matches!(source, StreamSource::All) && sorting == StreamSorting::Timeline;
+    // The caller decides when the trust rule applies; it only exists for
+    // `source=all` with `sorting=timeline`, which the query shape below relies on.
+    if trust_rule && !(matches!(source, StreamSource::All) && sorting == StreamSorting::Timeline) {
+        return Err(GraphError::QueryBuildError(
+            "the trust rule applies to source=all with sorting=timeline only".to_string(),
+        ));
+    }
 
     // Initialize the cypher query
     let mut cypher = String::new();
@@ -1344,20 +1357,17 @@ pub fn post_stream(
         SortOrder::Ascending => "ASC",
         SortOrder::Descending => "DESC",
     };
+    let timeline_order = format!("ORDER BY p.indexed_at {order_dir}, p.id {order_dir}");
 
     // Make unique the posts, cannot be repeated
     match trust_rule {
         // Sort the candidate posts first, then match each author in that order,
         // so the planner checks authors lazily and stops at LIMIT. Filtering the
         // author in the first MATCH makes it expand every candidate's author
-        // before sorting, nearly doubling the work. The membership test is the
-        // ranking's own (`get_trust_ranked_user_ids`): positive trust and not
-        // deleted; a missing `trust` reads as null and drops the row.
+        // before sorting, nearly doubling the work.
         true => cypher.push_str(&format!(
-            "WITH DISTINCT p\n\
-             ORDER BY p.indexed_at {order_dir}, p.id {order_dir}\n\
-             MATCH (p)<-[:AUTHORED]-(author:User)\n\
-             WHERE author.trust > 0 AND NOT coalesce(author.deleted, false)\n"
+            "WITH DISTINCT p\n{timeline_order}\nMATCH (p)<-[:AUTHORED]-(author:User)\nWHERE {}\n",
+            trust_ranked_condition("author")
         )),
         false => cypher.push_str("WITH DISTINCT p, author\n"),
     }
@@ -1368,10 +1378,7 @@ pub fn post_stream(
     // within a response (pagination across ties is still best-effort: the cursor
     // carries only the score, not the id).
     let (score_expr, order_clause) = match sorting {
-        StreamSorting::Timeline => (
-            "p.indexed_at",
-            format!("ORDER BY p.indexed_at {order_dir}, p.id {order_dir}"),
-        ),
+        StreamSorting::Timeline => ("p.indexed_at", timeline_order),
         StreamSorting::TotalEngagement => {
             // Each engagement count is its own COUNT{} subquery, so they don't
             // multiply into a cartesian product per post.
@@ -1681,30 +1688,16 @@ mod tests {
     use crate::types::WotDepth;
     use TelemetryValue::{Int, Str};
 
-    fn build_query(source: StreamSource) -> Query {
-        post_stream(
-            source,
-            StreamSorting::Timeline,
-            SortOrder::Descending,
-            &None,
-            Pagination {
-                limit: Some(10),
-                ..Default::default()
-            },
-            None,
-            false,
-        )
-        .unwrap()
-    }
-
-    fn all_timeline(
+    fn build_query_with(
+        source: StreamSource,
+        sorting: StreamSorting,
         tags: &Option<Vec<String>>,
         kind: Option<KindFilter>,
         trust_rule: bool,
-    ) -> String {
+    ) -> GraphResult<Query> {
         post_stream(
-            StreamSource::All,
-            StreamSorting::Timeline,
+            source,
+            sorting,
             SortOrder::Descending,
             tags,
             Pagination {
@@ -1714,18 +1707,38 @@ mod tests {
             kind,
             trust_rule,
         )
+    }
+
+    fn build_query(source: StreamSource) -> Query {
+        build_query_with(source, StreamSorting::Timeline, &None, None, false).unwrap()
+    }
+
+    fn all_timeline(
+        tags: &Option<Vec<String>>,
+        kind: Option<KindFilter>,
+        trust_rule: bool,
+    ) -> String {
+        build_query_with(
+            StreamSource::All,
+            StreamSorting::Timeline,
+            tags,
+            kind,
+            trust_rule,
+        )
         .unwrap()
         .to_cypher_populated()
     }
 
-    const TRUST_RULE: &str = "WHERE author.trust > 0 AND NOT coalesce(author.deleted, false)";
+    fn trust_rule_clause() -> String {
+        format!("WHERE {}", trust_ranked_condition("author"))
+    }
 
     #[test]
     fn post_stream_adds_the_trust_rule_only_when_asked() {
         let tags = Some(vec!["a".to_string(), "b".to_string()]);
         let kind = Some(KindFilter::Kind(pubky_app_specs::PubkyAppPostKind::Short));
         for (tags, kind) in [(None, kind.clone()), (tags.clone(), None), (tags, kind)] {
-            assert!(all_timeline(&tags, kind.clone(), true).contains(TRUST_RULE));
+            assert!(all_timeline(&tags, kind.clone(), true).contains(&trust_rule_clause()));
             assert!(!all_timeline(&tags, kind, false).contains("author.trust"));
         }
     }
@@ -1747,7 +1760,7 @@ mod tests {
         let parents_only = position("NOT ( (p)-[:REPLIED]->(:Post) )");
         let sort = position("WITH DISTINCT p\nORDER BY p.indexed_at DESC, p.id DESC");
         let author = position("MATCH (p)<-[:AUTHORED]-(author:User)");
-        let rule = position(TRUST_RULE);
+        let rule = position(&trust_rule_clause());
         let ret = position("RETURN author.id AS author_id");
         assert!(
             tag_match < kind_filter && kind_filter < parents_only,
@@ -1756,40 +1769,26 @@ mod tests {
         assert!(parents_only < sort && sort < author && author < rule && rule < ret);
     }
 
-    /// The rule only ever applies to `source=all` with `sorting=timeline`.
+    /// The rule only exists for `source=all` with `sorting=timeline`; asking for
+    /// it elsewhere is a caller bug, not something to drop silently.
     #[test]
-    fn post_stream_ignores_the_trust_rule_out_of_scope() {
-        let pagination = Pagination {
-            limit: Some(10),
-            ..Default::default()
+    fn post_stream_rejects_the_trust_rule_out_of_scope() {
+        let author = StreamSource::Author {
+            author_id: "author".to_string(),
         };
-        let engagement = post_stream(
-            StreamSource::All,
-            StreamSorting::TotalEngagement,
-            SortOrder::Descending,
-            &None,
-            pagination,
-            None,
-            true,
-        )
-        .unwrap()
-        .to_cypher_populated();
-        let author = post_stream(
-            StreamSource::Author {
-                author_id: "author".to_string(),
-            },
-            StreamSorting::Timeline,
-            SortOrder::Descending,
-            &None,
-            pagination,
-            None,
-            true,
-        )
-        .unwrap()
-        .to_cypher_populated();
-        for cypher in [engagement, author] {
-            assert!(!cypher.contains("author.trust"), "{cypher}");
+        for (source, sorting) in [
+            (StreamSource::All, StreamSorting::TotalEngagement),
+            (author, StreamSorting::Timeline),
+        ] {
+            assert!(build_query_with(source, sorting, &None, None, true).is_err());
         }
+    }
+
+    /// The ranking and the filtered streams share one membership test.
+    #[test]
+    fn ranking_query_uses_the_shared_trust_condition() {
+        let cypher = get_trust_ranked_user_ids().to_cypher_populated();
+        assert!(cypher.contains(&trust_ranked_condition("u")), "{cypher}");
     }
 
     fn build(source: StreamSource) -> String {

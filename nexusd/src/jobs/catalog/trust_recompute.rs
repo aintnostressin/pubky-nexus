@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use nexus_common::models::post::PostStream;
 use nexus_common::models::user::SocialGraphStatus;
 use nexus_common::types::DynError;
-use nexus_common::TrustRankConfig;
+use nexus_common::{DaemonConfig, TrustRankConfig};
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Meter};
 use tracing::{debug, error, info, warn};
@@ -19,7 +19,25 @@ use crate::trust::{
 const METER_NAME: &str = "nexus.trust";
 
 /// The job's name, which is also its `[jobs.<name>]` config key.
-pub const TRUST_RECOMPUTE_JOB_NAME: &str = "trust-recompute";
+const TRUST_RECOMPUTE_JOB_NAME: &str = "trust-recompute";
+
+/// With `[api] hide_unranked_authors` on and seeds configured, a new account
+/// stays hidden from `source=all` until a recompute ranks it. Without a
+/// schedule that only happens when an operator runs the job by hand, which is
+/// easy to miss, so say so at startup.
+pub fn warn_if_ranking_never_refreshes(config: &DaemonConfig) {
+    let scheduled = config
+        .jobs
+        .get(TRUST_RECOMPUTE_JOB_NAME)
+        .is_some_and(|job| job.cron.is_some());
+    if config.api.hide_unranked_authors && !config.trust_rank.seed.is_empty() && !scheduled {
+        warn!(
+            "[api] hide_unranked_authors is on but [jobs.{TRUST_RECOMPUTE_JOB_NAME}] has no cron: \
+             new accounts stay hidden from source=all timelines until \
+             `nexusd jobs run {TRUST_RECOMPUTE_JOB_NAME}` runs"
+        );
+    }
+}
 
 /// Publishes a finished ranking to whatever serves it. Injected into the job
 /// for the same reason the engine is: so the unit tests can drive `run` without

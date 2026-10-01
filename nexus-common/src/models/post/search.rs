@@ -72,38 +72,12 @@ impl PostsByTagSearch {
         sort_by: Option<StreamSorting>,
         pagination: Pagination,
     ) -> RedisResult<Option<Vec<PostsByTagSearch>>> {
-        let post_score_list = match sort_by {
-            Some(StreamSorting::TotalEngagement) => {
-                Self::try_from_index_sorted_set(
-                    &[&TAG_GLOBAL_POST_ENGAGEMENT[..], &[label]].concat(),
-                    pagination.start,
-                    pagination.end,
-                    pagination.skip,
-                    pagination.limit,
-                    SortOrder::Descending,
-                    None,
-                )
-                .await?
-            }
+        let index: &[&str] = match sort_by {
+            Some(StreamSorting::TotalEngagement) => &TAG_GLOBAL_POST_ENGAGEMENT,
             // Default case always: SortBy::Timeline
-            _ => {
-                Self::try_from_index_sorted_set(
-                    &[&TAG_GLOBAL_POST_TIMELINE[..], &[label]].concat(),
-                    pagination.start,
-                    pagination.end,
-                    pagination.skip,
-                    pagination.limit,
-                    SortOrder::Descending,
-                    None,
-                )
-                .await?
-            }
+            _ => &TAG_GLOBAL_POST_TIMELINE,
         };
-
-        match post_score_list {
-            Some(list) => Ok(Some(list.into_iter().map(|t| t.into()).collect())),
-            None => Ok(None),
-        }
+        Self::read_label_index(index, label, pagination).await
     }
 
     /// [`Self::get_by_label`] for the timeline sort, restricted to posts whose
@@ -113,8 +87,17 @@ impl PostsByTagSearch {
         label: &str,
         pagination: Pagination,
     ) -> RedisResult<Option<Vec<PostsByTagSearch>>> {
+        Self::read_label_index(&TAG_RANKED_POST_TIMELINE, label, pagination).await
+    }
+
+    /// Newest-first page of the per-label set under `index`.
+    async fn read_label_index(
+        index: &[&str],
+        label: &str,
+        pagination: Pagination,
+    ) -> RedisResult<Option<Vec<PostsByTagSearch>>> {
         let post_score_list = Self::try_from_index_sorted_set(
-            &[&TAG_RANKED_POST_TIMELINE[..], &[label]].concat(),
+            &[index, &[label]].concat(),
             pagination.start,
             pagination.end,
             pagination.skip,
@@ -180,31 +163,23 @@ impl PostsByTagSearch {
     }
 
     /// Adds the post to the label's timeline, and to its ranked copy when the
-    /// author is in the trust ranking. The mirror runs even when the post was
-    /// already indexed, so a retry repairs a ranked copy a crash left behind.
+    /// author is in the trust ranking. An already-indexed post still runs the
+    /// mirror, so a retry repairs a ranked copy a crash left behind.
     pub async fn put_to_index(author_id: &str, post_id: &str, tag_label: &str) -> RedisResult<()> {
         let post_key_slice: &[&str] = &[author_id, post_id];
         let key_parts = [&TAG_GLOBAL_POST_TIMELINE[..], &[tag_label]].concat();
-        let member_key = post_key_slice.join(":");
-        let tag_search = Self::check_sorted_set_member(None, &key_parts, post_key_slice).await?;
-        if tag_search.is_none() {
-            let option = PostDetails::try_from_index_json(post_key_slice, None).await?;
-            if let Some(post_details) = option {
-                Self::put_index_sorted_set(
-                    &key_parts,
-                    &[(post_details.indexed_at as f64, &member_key)],
-                    None,
-                    None,
-                )
-                .await?;
-            }
-        }
+        let score = match Self::check_sorted_set_member(None, &key_parts, post_key_slice).await? {
+            Some(_) => None,
+            None => PostDetails::try_from_index_json(post_key_slice, None)
+                .await?
+                .map(|details| details.indexed_at as f64),
+        };
         let layout = RankedLayout::production();
-        ranked::mirror_add(
+        ranked::add(
             &layout.trust,
             &layout.tag(tag_label),
-            author_id,
-            &member_key,
+            &post_key_slice.join(":"),
+            score,
         )
         .await
     }
@@ -218,10 +193,8 @@ impl PostsByTagSearch {
         let (taggers, _) = TagPost::get_from_index(post_label_key, None, None, None, None).await?;
         // Make sure that post does not have more taggers with that tag. Post:Taggers:user_id:post_id:label
         if taggers.is_empty() {
-            let key_parts = [&TAG_GLOBAL_POST_TIMELINE[..], &[tag_label]].concat();
             let post_key = format!("{author_id}:{post_id}");
-            Self::remove_from_index_sorted_set(None, &key_parts, &[&post_key]).await?;
-            ranked::mirror_remove(&RankedLayout::production().tag(tag_label), &post_key).await?;
+            ranked::remove(&RankedLayout::production().tag(tag_label), &post_key).await?;
         }
         Ok(())
     }

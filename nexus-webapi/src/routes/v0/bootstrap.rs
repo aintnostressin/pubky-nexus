@@ -10,6 +10,7 @@ use axum::routing::{get, put};
 use axum::Json;
 use axum::Router;
 use nexus_common::models::bootstrap::{Bootstrap, ViewType};
+use nexus_common::models::post::TrustFilter;
 use tracing::debug;
 use utoipa::OpenApi;
 
@@ -32,8 +33,11 @@ pub async fn bootstrap_handler(
     Path(user_id): Path<PubkyId>,
 ) -> Result<Json<Bootstrap>> {
     debug!("GET {BOOTSTRAP_ROUTE}, user_id:{}", user_id);
+    // Decided on the requested user even before it is indexed, so a brand-new
+    // account sees the timeline the stream routes would show it.
+    let trust_filter = TrustFilter::when(app_state.hide_unranked_authors, Some(&user_id));
     Ok(Json(
-        Bootstrap::get_by_id(&user_id, ViewType::Full, app_state.hide_unranked_authors).await?,
+        Bootstrap::get_by_id(&user_id, ViewType::Full, trust_filter).await?,
     ))
 }
 

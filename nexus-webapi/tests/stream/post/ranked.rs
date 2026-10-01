@@ -18,7 +18,7 @@ use anyhow::Result;
 use nexus_common::db::kv::SortOrder;
 use nexus_common::models::post::{KindFilter, PostStream, StreamSource};
 use nexus_common::types::{Pagination, StreamSorting};
-use pubky::Keypair;
+use nexus_common::utils::test_utils::random_pubky_id;
 use pubky_app_specs::PubkyAppPostKind;
 use serde_json::Value;
 
@@ -67,7 +67,7 @@ fn post_keys_in(response: &Value) -> Vec<String> {
 
 /// A valid pubky id Nexus has never seen.
 fn unknown_viewer() -> String {
-    Keypair::random().public_key().to_z32()
+    random_pubky_id().to_string()
 }
 
 /// The wot window, newest first, one page of 50.

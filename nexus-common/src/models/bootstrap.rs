@@ -73,14 +73,12 @@ impl Bootstrap {
     /// - `view_type: ViewType`
     ///   Controls whether to fetch replies and include full stream entries (`Full`)
     ///   or only base posts (`Partial`)
-    /// - `hide_unranked: bool`
-    ///   Applies the [`TrustFilter`] to the timeline, decided on `user_id` even
-    ///   before that user is indexed, so a brand-new account sees what the
-    ///   stream routes show it
+    /// - `trust_filter: Option<TrustFilter>`
+    ///   Applied to the timeline (see [`TrustFilter`])
     pub async fn get_by_id(
         user_id: &str,
         view_type: ViewType,
-        hide_unranked: bool,
+        trust_filter: Option<TrustFilter>,
     ) -> ModelResult<Self> {
         let mut bootstrap = Self::default();
         let mut user_ids = HashSet::new();
@@ -94,13 +92,9 @@ impl Bootstrap {
 
         let is_full_view_type = view_type == ViewType::Full;
 
-        let post_stream_by_timeline = Self::get_post_stream_timeline(
-            maybe_viewer_id,
-            StreamSource::All,
-            20,
-            Self::timeline_trust_filter(user_id, hide_unranked),
-        )
-        .await?;
+        let post_stream_by_timeline =
+            Self::get_post_stream_timeline(maybe_viewer_id, StreamSource::All, 20, trust_filter)
+                .await?;
 
         let post_replies = bootstrap.handle_post_stream(
             post_stream_by_timeline,
@@ -254,14 +248,6 @@ impl Bootstrap {
         Ok(())
     }
 
-    /// The timeline's trust filter, decided on `user_id` whether or not that
-    /// user is indexed yet, unlike `maybe_viewer_id`.
-    fn timeline_trust_filter(user_id: &str, hide_unranked: bool) -> Option<TrustFilter> {
-        hide_unranked.then(|| TrustFilter {
-            viewer_id: Some(user_id.to_string()),
-        })
-    }
-
     /// Fetches a post stream timeline for the given `source` and `limit`
     ///
     /// # Parameters
@@ -399,23 +385,5 @@ impl Bootstrap {
         self.files = results.into_iter().flatten().collect();
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The decision rests on the requested user even before it is indexed, so
-    /// a brand-new account sees the same timeline here as on the stream routes.
-    #[test]
-    fn timeline_trust_filter_rests_on_the_requested_user() {
-        assert_eq!(Bootstrap::timeline_trust_filter("user", false), None);
-        assert_eq!(
-            Bootstrap::timeline_trust_filter("user", true),
-            Some(TrustFilter {
-                viewer_id: Some("user".to_string())
-            })
-        );
     }
 }

@@ -233,14 +233,6 @@ impl PostStreamQuery {
         }
     }
 
-    /// The trust filter for this request when the switch is on, decided on its
-    /// `viewer_id` (see [`TrustFilter`]).
-    pub fn trust_filter(&self, hide_unranked_authors: bool) -> Option<TrustFilter> {
-        hide_unranked_authors.then(|| TrustFilter {
-            viewer_id: self.viewer_id.as_ref().map(ToString::to_string),
-        })
-    }
-
     pub fn extract_stream_params(&self) -> AppResult<(StreamSource, StreamSorting, SortOrder)> {
         Ok((
             self.build_source()?,
@@ -366,7 +358,7 @@ pub async fn stream_posts_handler(
         query.viewer_id.as_deref(),
         tags,
         query.kind_filter(),
-        query.trust_filter(app_state.hide_unranked_authors),
+        TrustFilter::when(app_state.hide_unranked_authors, query.viewer_id.as_deref()),
     )
     .await?
     {
@@ -439,7 +431,7 @@ pub async fn stream_post_keys_handler(
         sorting,
         tags,
         query.kind_filter(),
-        query.trust_filter(app_state.hide_unranked_authors),
+        TrustFilter::when(app_state.hide_unranked_authors, query.viewer_id.as_deref()),
     )
     .await?
     {

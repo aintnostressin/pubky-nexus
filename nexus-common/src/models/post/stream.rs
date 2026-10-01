@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use super::ranked::{
-    self, RankedLayout, RankedRebuildStats, RankedState, TrustMode, POST_RANKED_TIMELINE_KEY_PARTS,
-};
+use super::ranked::{self, RankedLayout, TrustMode, POST_RANKED_TIMELINE_KEY_PARTS};
 use super::{collection_item_keys, Bookmark, PostCounts, PostDetails, PostView};
 use crate::db::kv::{RedisResult, ScoreAction, SortOrder};
 use crate::db::{get_neo4j_graph, queries, GraphError, GraphResult, RedisOps};
@@ -179,6 +177,16 @@ pub struct TrustFilter {
     /// including one Nexus does not know, gets the unfiltered stream; no viewer
     /// gets the filtered one.
     pub viewer_id: Option<String>,
+}
+
+impl TrustFilter {
+    /// The filter for a request when the `hide_unranked_authors` switch is on,
+    /// decided on `viewer_id`.
+    pub fn when(enabled: bool, viewer_id: Option<&str>) -> Option<Self> {
+        enabled.then(|| TrustFilter {
+            viewer_id: viewer_id.map(str::to_string),
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Debug, Default, Clone)]
@@ -394,12 +402,11 @@ impl PostStream {
         if !matches!(source, StreamSource::All) || *sorting != StreamSorting::Timeline {
             return Ok(TrustMode::Off);
         }
-        let state = RankedState::load(
+        Ok(TrustMode::load(
             RankedLayout::production(),
             trust_filter.viewer_id.as_deref(),
         )
-        .await?;
-        Ok(state.mode())
+        .await?)
     }
 
     /// Rebuilds the ranked timeline sets from the current trust ranking, or
@@ -408,9 +415,9 @@ impl PostStream {
     /// # Errors
     /// Returns an error when a Redis call fails or another rebuild holds the
     /// lock for longer than the wait allows.
-    pub async fn rebuild_ranked_sets() -> ModelResult<RankedRebuildStats> {
+    pub async fn rebuild_ranked_sets() -> ModelResult<()> {
         let started = std::time::Instant::now();
-        let stats = ranked::rebuild(RankedLayout::production()).await?;
+        let stats = RankedLayout::production().rebuild().await?;
         tracing::info!(
             sets = stats.sets,
             scanned = stats.scanned,
@@ -420,7 +427,7 @@ impl PostStream {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "Ranked timeline sets rebuilt"
         );
-        Ok(stats)
+        Ok(())
     }
 
     // Determine if we have a quick access sorted set for this combination
@@ -910,16 +917,14 @@ impl PostStream {
     /// the score, and to its ranked copy when the author is in the trust ranking.
     pub async fn add_to_timeline_sorted_set(details: &PostDetails) -> RedisResult<()> {
         let element = format!("{}:{}", details.author, details.id);
-        let score = details.indexed_at as f64;
-        Self::put_index_sorted_set(
-            &POST_TIMELINE_KEY_PARTS,
-            &[(score, element.as_str())],
-            None,
-            None,
-        )
-        .await?;
         let layout = RankedLayout::production();
-        ranked::mirror_add(&layout.trust, &layout.global, &details.author, &element).await
+        ranked::add(
+            &layout.trust,
+            &layout.global,
+            &element,
+            Some(details.indexed_at as f64),
+        )
+        .await
     }
 
     /// Removes the post from the global timeline and its ranked copy.
@@ -928,9 +933,7 @@ impl PostStream {
         post_id: &str,
     ) -> RedisResult<()> {
         let element = format!("{author_id}:{post_id}");
-        Self::remove_from_index_sorted_set(None, &POST_TIMELINE_KEY_PARTS, &[element.as_str()])
-            .await?;
-        ranked::mirror_remove(&RankedLayout::production().global, &element).await
+        ranked::remove(&RankedLayout::production().global, &element).await
     }
 
     /// Adds the post to a Redis sorted set using the `indexed_at` timestamp as the score.

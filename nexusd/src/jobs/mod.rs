@@ -8,7 +8,7 @@ mod scheduler;
 mod test_support;
 
 pub use catalog::{
-    HotTagsCacheJob, InfluencersCacheJob, TrustRecomputeJob, TRUST_RECOMPUTE_JOB_NAME,
+    warn_if_ranking_never_refreshes, HotTagsCacheJob, InfluencersCacheJob, TrustRecomputeJob,
 };
 pub use error::{CronParseError, JobError};
 pub use lock::LOCK_TTL_SECS;

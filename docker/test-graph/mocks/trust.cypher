@@ -5,7 +5,7 @@
 // network, so `source=all` serves their posts. The score sits between the wot
 // endorsers (wot.cypher: D1 0.4, D2 0.2, D1B 0.1), which keeps D1 at the top
 // of the ranking and D2, D1B below the `established` cut (user/views.rs). The
-// wot on-ramp accounts stay unranked: stream/post/trust_filter.rs hides their
+// wot on-ramp accounts stay unranked: stream/post/ranked.rs hides their
 // posts. Only wot.cypher tags with the starter-pack labels, so these scores do
 // not touch stream/user/starter_pack.rs.
 // A GDS recompute rewrites `trust` for every user, so run the nexusd suite last and reseed.

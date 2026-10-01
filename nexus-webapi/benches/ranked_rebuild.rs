@@ -9,7 +9,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use deadpool_redis::redis::{self, AsyncCommands};
 use nexus_common::db::get_redis_conn;
-use nexus_common::models::post::ranked::{rebuild, RankedLayout};
+use nexus_common::models::post::RankedLayout;
 use setup::run_setup;
 use std::time::Duration;
 use tokio::runtime::Runtime;
@@ -106,7 +106,7 @@ fn bench_ranked_rebuild(c: &mut Criterion) {
 
     c.bench_function("ranked_rebuild", |b| {
         b.to_async(&rt).iter(|| async {
-            let stats = rebuild(&layout).await.expect("rebuild");
+            let stats = layout.rebuild().await.expect("rebuild");
             std::hint::black_box(stats);
         });
     });
