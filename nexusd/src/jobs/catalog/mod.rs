@@ -6,7 +6,7 @@ mod trust_recompute;
 
 pub use hot_tags::HotTagsCacheJob;
 pub use influencers::InfluencersCacheJob;
-pub use trust_recompute::{warn_if_ranking_never_refreshes, TrustRecomputeJob};
+pub use trust_recompute::TrustRecomputeJob;
 
 use std::sync::Arc;
 

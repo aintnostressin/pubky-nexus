@@ -17,8 +17,6 @@ pub const DEFAULT_PUBKY_LOCAL_PORT: u16 = 8081;
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Default maximum size (in bytes) accepted for a request body
 pub const DEFAULT_MAX_BODY_SIZE_BYTES: usize = 1024 * 1024;
-/// Default for [`ApiConfig::hide_unranked_authors`].
-pub const DEFAULT_HIDE_UNRANKED_AUTHORS: bool = true;
 
 const fn default_request_timeout_secs() -> u64 {
     DEFAULT_REQUEST_TIMEOUT_SECS
@@ -26,10 +24,6 @@ const fn default_request_timeout_secs() -> u64 {
 
 const fn default_max_body_size_bytes() -> usize {
     DEFAULT_MAX_BODY_SIZE_BYTES
-}
-
-const fn default_hide_unranked_authors() -> bool {
-    DEFAULT_HIDE_UNRANKED_AUTHORS
 }
 
 /// Per-bucket rate limiting configuration
@@ -95,12 +89,6 @@ pub struct ApiConfig {
     /// Maximum size (in bytes) accepted for a request body
     #[serde(default = "default_max_body_size_bytes")]
     pub max_body_size_bytes: usize,
-    /// Hides posts by authors outside the trust ranking from `source=all` with
-    /// `sorting=timeline`, for requests without a viewer and for viewers inside
-    /// the ranking. Has no effect until the trust-recompute job has built a
-    /// ranking. Read at startup.
-    #[serde(default = "default_hide_unranked_authors")]
-    pub hide_unranked_authors: bool,
     #[serde(default = "default_stack")]
     pub stack: StackConfig,
     #[serde(default)]
@@ -115,7 +103,6 @@ impl Default for ApiConfig {
             pubky_listen_socket: SocketAddr::from((DEFAULT_LOCAL_IP, DEFAULT_PUBKY_LOCAL_PORT)),
             request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
             max_body_size_bytes: DEFAULT_MAX_BODY_SIZE_BYTES,
-            hide_unranked_authors: DEFAULT_HIDE_UNRANKED_AUTHORS,
             stack: StackConfig::default(),
             rate_limit: RateLimitConfig::default(),
         }

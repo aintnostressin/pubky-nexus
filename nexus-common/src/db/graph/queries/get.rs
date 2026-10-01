@@ -310,24 +310,14 @@ pub fn get_user_tag_pairs() -> Query {
 pub fn get_trust_ranked_user_ids() -> Query {
     Query::new(
         "get_trust_ranked_user_ids",
-        format!(
-            "
-            MATCH (u:User)
-            WHERE {}
-            RETURN u.id AS user_id
-            ORDER BY u.trust DESC, user_id ASC
-            ",
-            trust_ranked_condition("u")
-        ),
+        "
+        MATCH (u:User)
+        WHERE u.trust > 0
+          AND NOT coalesce(u.deleted, false)
+        RETURN u.id AS user_id
+        ORDER BY u.trust DESC, user_id ASC
+        ",
     )
-}
-
-/// The ranking's membership test for the user bound to `var`: positive trust
-/// and not deleted. A missing `trust` reads as null, which drops the row, so a
-/// never-scored user is excluded too. Shared by the ranking and the
-/// trust-filtered post streams, so the two cannot drift apart.
-pub(crate) fn trust_ranked_condition(var: &str) -> String {
-    format!("{var}.trust > 0 AND NOT coalesce({var}.deleted, false)")
 }
 
 /// Users whose profile carries any of the given tag labels, scored by distinct
@@ -1165,7 +1155,7 @@ pub fn get_files_by_ids(key_pair: &[&[&str]]) -> Query {
 }
 
 /// Builds the graph query for a post stream. `trust_rule` keeps only posts
-/// whose author the trust ranking includes; the caller decides when it applies
+/// whose author has a positive trust score; the caller decides when it applies
 /// (`source=all` with `sorting=timeline`, a ranking exists, and the request has
 /// no viewer or a ranked one).
 pub fn post_stream(
@@ -1366,8 +1356,7 @@ pub fn post_stream(
         // author in the first MATCH makes it expand every candidate's author
         // before sorting, nearly doubling the work.
         true => cypher.push_str(&format!(
-            "WITH DISTINCT p\n{timeline_order}\nMATCH (p)<-[:AUTHORED]-(author:User)\nWHERE {}\n",
-            trust_ranked_condition("author")
+            "WITH DISTINCT p\n{timeline_order}\nMATCH (p)<-[:AUTHORED]-(author:User)\nWHERE author.trust > 0\n"
         )),
         false => cypher.push_str("WITH DISTINCT p, author\n"),
     }
@@ -1710,63 +1699,70 @@ mod tests {
     }
 
     fn build_query(source: StreamSource) -> Query {
-        build_query_with(source, StreamSorting::Timeline, &None, None, false).unwrap()
+        post_stream(
+            source,
+            StreamSorting::Timeline,
+            SortOrder::Descending,
+            &None,
+            Pagination {
+                limit: Some(10),
+                ..Default::default()
+            },
+            None,
+            false,
+        )
+        .unwrap()
     }
 
     fn all_timeline(
         tags: &Option<Vec<String>>,
         kind: Option<KindFilter>,
         trust_rule: bool,
-    ) -> String {
-        build_query_with(
+    ) -> GraphResult<String> {
+        let query = build_query_with(
             StreamSource::All,
             StreamSorting::Timeline,
             tags,
             kind,
             trust_rule,
-        )
-        .unwrap()
-        .to_cypher_populated()
+        )?;
+        Ok(query.to_cypher_populated())
     }
 
-    fn trust_rule_clause() -> String {
-        format!("WHERE {}", trust_ranked_condition("author"))
-    }
+    const TRUST_RULE: &str = "WHERE author.trust > 0";
 
     #[test]
-    fn post_stream_adds_the_trust_rule_only_when_asked() {
+    fn post_stream_adds_the_trust_rule_only_when_asked() -> GraphResult<()> {
         let tags = Some(vec!["a".to_string(), "b".to_string()]);
         let kind = Some(KindFilter::Kind(pubky_app_specs::PubkyAppPostKind::Short));
         for (tags, kind) in [(None, kind.clone()), (tags.clone(), None), (tags, kind)] {
-            assert!(all_timeline(&tags, kind.clone(), true).contains(&trust_rule_clause()));
-            assert!(!all_timeline(&tags, kind, false).contains("author.trust"));
+            assert!(all_timeline(&tags, kind.clone(), true)?.contains(TRUST_RULE));
+            assert!(!all_timeline(&tags, kind, false)?.contains("author.trust"));
         }
+        Ok(())
     }
 
     /// The posts are filtered and sorted before the author is matched, so the
     /// planner checks authors lazily in sort order and stops at LIMIT.
     #[test]
-    fn post_stream_trust_rule_matches_authors_after_sorting_posts() {
+    fn post_stream_trust_rule_matches_authors_after_sorting_posts() -> GraphResult<()> {
         let kind = Some(KindFilter::Kind(pubky_app_specs::PubkyAppPostKind::Short));
-        let cypher = all_timeline(&Some(vec!["a".to_string(), "b".to_string()]), kind, true);
-        let position = |needle: &str| {
-            cypher
-                .find(needle)
-                .unwrap_or_else(|| panic!("{needle} missing from {cypher}"))
-        };
+        let cypher = all_timeline(&Some(vec!["a".to_string(), "b".to_string()]), kind, true)?;
         assert!(cypher.starts_with("MATCH (p:Post)\n"), "{cypher}");
-        let tag_match = position("MATCH (:User)-[tag:TAGGED]->(p)");
-        let kind_filter = position("p.kind = 'short'");
-        let parents_only = position("NOT ( (p)-[:REPLIED]->(:Post) )");
-        let sort = position("WITH DISTINCT p\nORDER BY p.indexed_at DESC, p.id DESC");
-        let author = position("MATCH (p)<-[:AUTHORED]-(author:User)");
-        let rule = position(&trust_rule_clause());
-        let ret = position("RETURN author.id AS author_id");
-        assert!(
-            tag_match < kind_filter && kind_filter < parents_only,
-            "{cypher}"
-        );
-        assert!(parents_only < sort && sort < author && author < rule && rule < ret);
+        // In the order they must appear.
+        let clauses = [
+            "MATCH (:User)-[tag:TAGGED]->(p)",
+            "p.kind = 'short'",
+            "NOT ( (p)-[:REPLIED]->(:Post) )",
+            "WITH DISTINCT p\nORDER BY p.indexed_at DESC, p.id DESC",
+            "MATCH (p)<-[:AUTHORED]-(author:User)",
+            TRUST_RULE,
+            "RETURN author.id AS author_id",
+        ];
+        let positions: Vec<Option<usize>> = clauses.iter().map(|c| cypher.find(c)).collect();
+        assert!(positions.iter().all(Option::is_some), "{cypher}");
+        assert!(positions.windows(2).all(|w| w[0] < w[1]), "{cypher}");
+        Ok(())
     }
 
     /// The rule only exists for `source=all` with `sorting=timeline`; asking for
@@ -1782,13 +1778,6 @@ mod tests {
         ] {
             assert!(build_query_with(source, sorting, &None, None, true).is_err());
         }
-    }
-
-    /// The ranking and the filtered streams share one membership test.
-    #[test]
-    fn ranking_query_uses_the_shared_trust_condition() {
-        let cypher = get_trust_ranked_user_ids().to_cypher_populated();
-        assert!(cypher.contains(&trust_ranked_condition("u")), "{cypher}");
     }
 
     fn build(source: StreamSource) -> String {

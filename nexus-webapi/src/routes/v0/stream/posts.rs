@@ -6,11 +6,9 @@ use crate::routes::v0::endpoints::{
     STREAM_POSTS_BY_IDS_ROUTE, STREAM_POSTS_ROUTE, STREAM_POST_KEYS_ROUTE,
 };
 use crate::routes::v0::types::parse_string_to_u8;
-use crate::routes::AppState;
 use crate::routes::Json as RequestJson;
 use crate::routes::Query;
 use crate::{Error, Result as AppResult};
-use axum::extract::State;
 use axum::Json;
 use nexus_common::db::kv::SortOrder;
 use nexus_common::types::StreamSorting;
@@ -338,7 +336,6 @@ The `source` parameter determines the type of stream. Depending on the `source`,
 Ensure that you provide the necessary parameters based on the selected `source`. If a required parameter is missing, a 400 Bad Request error will be returned."#
 )]
 pub async fn stream_posts_handler(
-    State(app_state): State<AppState>,
     Query(mut query): Query<PostStreamQuery>,
 ) -> AppResult<Json<PostStreamDetailed>> {
     debug!("GET {STREAM_POSTS_ROUTE}");
@@ -358,7 +355,7 @@ pub async fn stream_posts_handler(
         query.viewer_id.as_deref(),
         tags,
         query.kind_filter(),
-        TrustFilter::when(app_state.hide_unranked_authors, query.viewer_id.as_deref()),
+        Some(TrustFilter::for_viewer(query.viewer_id.as_deref())),
     )
     .await?
     {
@@ -413,7 +410,6 @@ The `source` parameter determines the type of stream. Depending on the `source`,
 Ensure that you provide the necessary parameters based on the selected `source`. If a required parameter is missing, a 400 Bad Request error will be returned."#
 )]
 pub async fn stream_post_keys_handler(
-    State(app_state): State<AppState>,
     Query(mut query): Query<PostStreamQuery>,
 ) -> AppResult<Json<PostKeyStream>> {
     debug!("GET {STREAM_POST_KEYS_ROUTE}");
@@ -431,7 +427,7 @@ pub async fn stream_post_keys_handler(
         sorting,
         tags,
         query.kind_filter(),
-        TrustFilter::when(app_state.hide_unranked_authors, query.viewer_id.as_deref()),
+        Some(TrustFilter::for_viewer(query.viewer_id.as_deref())),
     )
     .await?
     {

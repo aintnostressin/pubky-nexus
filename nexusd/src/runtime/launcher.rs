@@ -1,11 +1,12 @@
 use std::{fmt::Debug, path::PathBuf};
 
-use crate::jobs::{run, warn_if_ranking_never_refreshes, JobRegistry};
-use nexus_common::{types::DynError, utils::create_shutdown_rx, DaemonConfig, StackManager};
+use nexus_common::{types::DynError, utils::create_shutdown_rx, DaemonConfig};
 use nexus_watcher::NexusWatcherBuilder;
 use nexus_webapi::{api_context::ApiContextBuilder, NexusApiBuilder};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::watch::Receiver, try_join};
+
+use crate::jobs::{run, JobRegistry};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonLauncher {}
@@ -32,10 +33,6 @@ impl DaemonLauncher {
         // bad cron fails fast at startup.
         let config = DaemonConfig::read_or_create_config_file(config_dir.clone()).await?;
         let jobs = JobRegistry::catalog(&config.trust_rank).scheduled_jobs(&config)?;
-        // Logging first, so the warning below is not lost; every service calls
-        // this again with the same stack config, which is a no-op.
-        StackManager::setup(&config.stack).await?;
-        warn_if_ranking_never_refreshes(&config);
 
         let api_context = ApiContextBuilder::from_config_dir(config_dir)
             .try_build()

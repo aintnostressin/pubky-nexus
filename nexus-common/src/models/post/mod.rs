@@ -13,9 +13,6 @@ pub use bookmark::Bookmark;
 pub use collection::{collection_item_keys, sync_collected_edges};
 pub use counts::PostCounts;
 pub use details::PostDetails;
-/// Ranked-set internals, for tests and benchmarks that rebuild a private namespace.
-#[cfg(any(test, feature = "test-utils"))]
-pub use ranked::RankedLayout;
 pub use ranked::{POST_RANKED_TIMELINE_KEY_PARTS, TAG_RANKED_POST_TIMELINE};
 pub use relationships::PostRelationships;
 pub use search::PostsByContentSearch;

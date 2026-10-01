@@ -7,9 +7,7 @@ mod scheduler;
 #[cfg(test)]
 mod test_support;
 
-pub use catalog::{
-    warn_if_ranking_never_refreshes, HotTagsCacheJob, InfluencersCacheJob, TrustRecomputeJob,
-};
+pub use catalog::{HotTagsCacheJob, InfluencersCacheJob, TrustRecomputeJob};
 pub use error::{CronParseError, JobError};
 pub use lock::LOCK_TTL_SECS;
 pub use registry::JobRegistry;

@@ -3,7 +3,7 @@ use crate::db::kv::{search, AuthorFilter, RedisResult, ScoreAction, SortOrder};
 use crate::db::queries::get::{global_tags_by_post, global_tags_by_post_engagement};
 use crate::db::{fetch_all_rows_from_graph, RedisOps};
 use crate::models::error::ModelResult;
-use crate::models::post::ranked::{self, RankedLayout, TAG_RANKED_POST_TIMELINE};
+use crate::models::post::ranked::{self, RankedSet, TAG_RANKED_POST_TIMELINE};
 use crate::models::post::{PostDetails, PostStream, StreamSource};
 use crate::models::tag::post::TagPost;
 use crate::models::tag::traits::TaggersCollection;
@@ -174,14 +174,7 @@ impl PostsByTagSearch {
                 .await?
                 .map(|details| details.indexed_at as f64),
         };
-        let layout = RankedLayout::production();
-        ranked::add(
-            &layout.trust,
-            &layout.tag(tag_label),
-            &post_key_slice.join(":"),
-            score,
-        )
-        .await
+        ranked::add(&RankedSet::tag(tag_label), &post_key_slice.join(":"), score).await
     }
 
     pub async fn del_from_index(
@@ -194,7 +187,7 @@ impl PostsByTagSearch {
         // Make sure that post does not have more taggers with that tag. Post:Taggers:user_id:post_id:label
         if taggers.is_empty() {
             let post_key = format!("{author_id}:{post_id}");
-            ranked::remove(&RankedLayout::production().tag(tag_label), &post_key).await?;
+            ranked::remove(&RankedSet::tag(tag_label), &post_key).await?;
         }
         Ok(())
     }

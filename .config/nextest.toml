@@ -17,10 +17,12 @@ filter = 'test(=stream::user::influencers::test_global_influencers) | test(=stre
 test-group = 'influencers-sorted-set'
 
 # test_social_graph_status deletes and rebuilds the shared Sorted:Users:SocialGraph
-# ranking. While it is gone, source=all serves everyone unfiltered, so the tests
-# asserting that unranked authors are hidden must never overlap that window.
+# ranking, and the ranked-set tests in nexus-common park it, take the rebuild lock
+# and rebuild every ranked set. While the ranking is gone, source=all serves
+# everyone unfiltered, so the tests asserting that unranked authors are hidden,
+# and the watcher tests that rank their own authors, must never overlap them.
 [[profile.default.overrides]]
-filter = 'test(=user::views::test_social_graph_status) | test(/^stream::post::ranked::/)'
+filter = 'test(=user::views::test_social_graph_status) | test(/^stream::post::ranked::/) | test(/^models::post::ranked::tests::live::/) | test(/^event_processor::posts::ranked::/)'
 test-group = 'ranked-sets'
 
 # nexusd/tests/cache_setup/main.rs calls clear_redis(), which issues FLUSHDB

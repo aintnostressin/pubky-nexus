@@ -9,17 +9,17 @@
 //!
 //! Every write to a source set goes through [`add`] and [`remove`], which
 //! update the ranked copy in the same atomic step. Every ranking publish
-//! rebuilds the copies in full ([`RankedLayout::rebuild`]), so drift lasts at
-//! most until the next recompute. Readers only trust the ranked sets once a
-//! complete rebuild has run (`built_at`); before that they serve the unfiltered
-//! sets.
+//! rebuilds the copies in full ([`rebuild`]), so drift lasts at most until the
+//! next recompute. Readers only trust the ranked sets once a complete rebuild
+//! has run ([`BUILT_AT_KEY`]); before that they serve the unfiltered sets.
 //!
 //! The scripts take several keys, so they assume a single Redis instance (not
 //! Redis Cluster), as the rest of Nexus does.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use deadpool_redis::Connection;
 use opentelemetry::global;
@@ -34,9 +34,18 @@ use crate::models::user::USER_SOCIAL_GRAPH_KEY_PARTS;
 
 /// Ranked copy of the global timeline: `Sorted:Posts:Global:Timeline:Ranked`.
 pub const POST_RANKED_TIMELINE_KEY_PARTS: [&str; 4] = ["Posts", "Global", "Timeline", "Ranked"];
+/// Where a staged rebuild of the global ranked copy writes before the swap.
+const POST_RANKED_STAGING_TIMELINE_KEY_PARTS: [&str; 4] =
+    ["Posts", "Global", "Timeline", "RankedStaging"];
 /// Ranked copies of the per-label timelines: `Sorted:Tags:Ranked:Post:Timeline:<label>`.
-/// A different third segment from the source sets, so a scan for one never matches the other.
+/// A different second segment from the source sets, so a scan for one never matches the other.
 pub const TAG_RANKED_POST_TIMELINE: [&str; 4] = ["Tags", "Ranked", "Post", "Timeline"];
+/// Where a staged rebuild of a per-label ranked copy writes before the swap.
+const TAG_RANKED_STAGING_POST_TIMELINE: [&str; 4] = ["Tags", "RankedStaging", "Post", "Timeline"];
+/// Set once a complete rebuild has run; readers trust the ranked sets only then.
+const BUILT_AT_KEY: &str = "Ranked:Timeline:BuiltAt";
+/// Serializes rebuilds.
+const REBUILD_LOCK_KEY: &str = "lock:ranked-timeline-rebuild";
 
 /// Sets up to this size are rebuilt by one atomic script.
 const ATOMIC_MAX: usize = 500;
@@ -59,208 +68,164 @@ const LOCK_TTL_SECS: u64 = 3_600;
 const LOCK_WAIT: Duration = Duration::from_secs(15 * 60);
 const LOCK_POLL: Duration = Duration::from_secs(1);
 
-/// Every key the ranked sets touch, so tests and benchmarks can run in a
-/// private namespace.
-#[derive(Debug, Clone)]
-pub struct RankedLayout {
-    /// The trust ranking: users with a positive trust score.
-    pub trust: String,
-    /// The global timeline and its ranked copy.
-    pub global: RankedSet,
-    /// Key prefixes of the per-label sets; the label follows the prefix.
-    pub tag_source_prefix: String,
-    pub tag_ranked_prefix: String,
-    pub tag_staging_prefix: String,
-    /// `SCAN` pattern covering the three per-label families.
-    pub tag_scan_pattern: String,
-    /// Set once a complete rebuild has run; readers trust the ranked sets only then.
-    pub built_at: String,
-    /// Serializes rebuilds.
-    pub lock: String,
+/// The key of the sorted set at `parts`.
+fn sorted_key(parts: &[&str]) -> String {
+    format!("{SORTED_PREFIX}:{}", parts.join(":"))
+}
+
+/// The trust ranking: users with a positive trust score.
+fn ranking_key() -> String {
+    sorted_key(&USER_SOCIAL_GRAPH_KEY_PARTS)
 }
 
 /// One source set and the keys of its ranked copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RankedSet {
+pub(crate) struct RankedSet {
     pub source: String,
     pub ranked: String,
     /// Where a staged build writes before the swap.
     pub staging: String,
 }
 
-static PRODUCTION: LazyLock<RankedLayout> = LazyLock::new(|| {
-    let global_source = format!("{SORTED_PREFIX}:{}", POST_TIMELINE_KEY_PARTS.join(":"));
-    let [tags, ranked, post, timeline] = TAG_RANKED_POST_TIMELINE;
-    RankedLayout {
-        trust: format!("{SORTED_PREFIX}:{}", USER_SOCIAL_GRAPH_KEY_PARTS.join(":")),
-        global: RankedSet {
-            ranked: format!(
-                "{SORTED_PREFIX}:{}",
-                POST_RANKED_TIMELINE_KEY_PARTS.join(":")
-            ),
-            staging: format!("{global_source}:RankedStaging"),
-            source: global_source,
-        },
-        tag_source_prefix: format!("{SORTED_PREFIX}:{}:", TAG_GLOBAL_POST_TIMELINE.join(":")),
-        tag_ranked_prefix: format!("{SORTED_PREFIX}:{tags}:{ranked}:{post}:{timeline}:"),
-        tag_staging_prefix: format!("{SORTED_PREFIX}:{tags}:{ranked}Staging:{post}:{timeline}:"),
-        tag_scan_pattern: format!("{SORTED_PREFIX}:{tags}:*:{post}:{timeline}:*"),
-        built_at: "Ranked:Timeline:BuiltAt".to_string(),
-        lock: "lock:ranked-timeline-rebuild".to_string(),
-    }
-});
-
-impl RankedLayout {
-    pub(crate) fn production() -> &'static RankedLayout {
-        &PRODUCTION
-    }
-
-    /// The same key shapes as production under `ns`, so scans behave the same.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn namespaced(ns: &str) -> RankedLayout {
-        RankedLayout {
-            trust: format!("{ns}:Trust"),
-            global: RankedSet {
-                source: format!("{ns}:Timeline"),
-                ranked: format!("{ns}:Timeline:Ranked"),
-                staging: format!("{ns}:Timeline:RankedStaging"),
-            },
-            tag_source_prefix: format!("{ns}:Tags:Global:"),
-            tag_ranked_prefix: format!("{ns}:Tags:Ranked:"),
-            tag_staging_prefix: format!("{ns}:Tags:RankedStaging:"),
-            tag_scan_pattern: format!("{ns}:Tags:*"),
-            built_at: format!("{ns}:BuiltAt"),
-            lock: format!("{ns}:Lock"),
-        }
-    }
-
-    /// The per-label timeline for `label` and its ranked copy.
-    pub fn tag(&self, label: &str) -> RankedSet {
+impl RankedSet {
+    /// The global timeline.
+    pub fn global() -> Self {
         RankedSet {
-            source: format!("{}{label}", self.tag_source_prefix),
-            ranked: format!("{}{label}", self.tag_ranked_prefix),
-            staging: format!("{}{label}", self.tag_staging_prefix),
+            source: sorted_key(&POST_TIMELINE_KEY_PARTS),
+            ranked: sorted_key(&POST_RANKED_TIMELINE_KEY_PARTS),
+            staging: sorted_key(&POST_RANKED_STAGING_TIMELINE_KEY_PARTS),
         }
     }
 
-    /// Rebuilds every ranked set from the current ranking, or drops them all
-    /// when there is no ranking. Waits for a rebuild already running, so the
-    /// last ranking publish is always followed by a complete rebuild.
-    pub async fn rebuild(&self) -> RedisResult<RankedRebuildStats> {
-        let token = lock_token();
-        let deadline = Instant::now() + LOCK_WAIT;
-        while !try_acquire_lock(&self.lock, &token, LOCK_TTL_SECS).await? {
-            if Instant::now() >= deadline {
-                return Err(RedisError::CommandFailed(
-                    "timed out waiting for another ranked-set rebuild to finish".into(),
-                ));
-            }
-            tokio::time::sleep(LOCK_POLL).await;
+    /// The per-label timeline for `label`.
+    pub fn tag(label: &str) -> Self {
+        let key = |parts: &[&str]| sorted_key(&[parts, &[label]].concat());
+        RankedSet {
+            source: key(&TAG_GLOBAL_POST_TIMELINE),
+            ranked: key(&TAG_RANKED_POST_TIMELINE),
+            staging: key(&TAG_RANKED_STAGING_POST_TIMELINE),
         }
+    }
+}
 
-        let result = async {
-            let mut conn = get_redis_conn().await?;
-            self.rebuild_locked(&mut conn).await
+/// Rebuilds every ranked set from the current ranking, or drops them all when
+/// there is no ranking. Waits for a rebuild already running, so the last
+/// ranking publish is always followed by a complete rebuild.
+pub(crate) async fn rebuild() -> RedisResult<RankedRebuildStats> {
+    let token = lock_token();
+    let deadline = Instant::now() + LOCK_WAIT;
+    while !try_acquire_lock(REBUILD_LOCK_KEY, &token, LOCK_TTL_SECS).await? {
+        if Instant::now() >= deadline {
+            return Err(RedisError::CommandFailed(
+                "timed out waiting for another ranked-set rebuild to finish".into(),
+            ));
         }
-        .await;
-        let released = release_lock(&self.lock, &token).await;
-        let stats = result?;
-        released?;
-        Ok(stats)
+        tokio::time::sleep(LOCK_POLL).await;
     }
 
-    async fn rebuild_locked(&self, conn: &mut Connection) -> RedisResult<RankedRebuildStats> {
-        let mut stats = RankedRebuildStats::default();
-        let trust_exists: bool = conn.exists(&self.trust).await?;
-        if !trust_exists {
-            self.drop_all(conn).await?;
-            stats.dropped = true;
-            return Ok(stats);
-        }
+    let result = async {
+        let mut conn = get_redis_conn().await?;
+        rebuild_locked(&mut conn).await
+    }
+    .await;
+    let released = release_lock(REBUILD_LOCK_KEY, &token).await;
+    let stats = result?;
+    released?;
+    Ok(stats)
+}
 
-        let tags = self.scan_tag_keys(conn).await?;
-        rebuild_set(conn, &self.trust, &self.global, &mut stats).await?;
-        for label in &tags.sources {
-            rebuild_set(conn, &self.trust, &self.tag(label), &mut stats).await?;
-        }
-
-        // A ranked set normally empties, and so vanishes, with its source; one that
-        // outlived its source drifted. Re-checked here, as a label may have been
-        // tagged again since the scan.
-        for label in tags.ranked.difference(&tags.sources) {
-            let set = self.tag(label);
-            let source_exists: bool = conn.exists(&set.source).await?;
-            if !source_exists {
-                let _: () = conn.unlink(&set.ranked).await?;
-                stats.orphans += 1;
-            }
-        }
-        // Left by a build that crashed; the lock guarantees none is running now.
-        let leftovers = tags
-            .staging
-            .iter()
-            .map(|label| format!("{}{label}", self.tag_staging_prefix));
-        unlink_keys(conn, leftovers).await?;
-
-        let built_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or_default();
-        let _: () = conn.set(&self.built_at, built_at).await?;
-        Ok(stats)
+async fn rebuild_locked(conn: &mut Connection) -> RedisResult<RankedRebuildStats> {
+    let mut stats = RankedRebuildStats::default();
+    let trust = ranking_key();
+    let trust_exists: bool = conn.exists(&trust).await?;
+    if !trust_exists {
+        drop_all(conn).await?;
+        stats.dropped = true;
+        return Ok(stats);
     }
 
-    /// Drops every ranked set. The ready marker goes first, so readers fall back
-    /// to the unfiltered sets before any ranked set disappears.
-    async fn drop_all(&self, conn: &mut Connection) -> RedisResult<()> {
-        let _: () = conn.del(&self.built_at).await?;
-        let _: () = conn
-            .unlink(&[&self.global.ranked, &self.global.staging])
+    let tags = scan_tag_keys(conn).await?;
+    rebuild_set(conn, &trust, &RankedSet::global(), &mut stats).await?;
+    for label in &tags.sources {
+        rebuild_set(conn, &trust, &RankedSet::tag(label), &mut stats).await?;
+    }
+
+    // A ranked set normally empties, and so vanishes, with its source; one that
+    // outlived its source drifted. Re-checked here, as a label may have been
+    // tagged again since the scan.
+    for label in tags.ranked.difference(&tags.sources) {
+        let set = RankedSet::tag(label);
+        let source_exists: bool = conn.exists(&set.source).await?;
+        if !source_exists {
+            let _: () = conn.unlink(&set.ranked).await?;
+            stats.orphans += 1;
+        }
+    }
+    // Left by a build that crashed; the lock guarantees none is running now.
+    let leftovers = tags
+        .staging
+        .iter()
+        .map(|label| RankedSet::tag(label).staging);
+    unlink_keys(conn, leftovers).await?;
+
+    let built_at = chrono::Utc::now().timestamp_millis();
+    let _: () = conn.set(BUILT_AT_KEY, built_at).await?;
+    Ok(stats)
+}
+
+/// Drops every ranked set. The ready marker goes first, so readers fall back
+/// to the unfiltered sets before any ranked set disappears.
+async fn drop_all(conn: &mut Connection) -> RedisResult<()> {
+    let _: () = conn.del(BUILT_AT_KEY).await?;
+    let global = RankedSet::global();
+    let _: () = conn.unlink(&[&global.ranked, &global.staging]).await?;
+    let tags = scan_tag_keys(conn).await?;
+    let ranked = tags.ranked.iter().map(|label| RankedSet::tag(label).ranked);
+    let staging = tags
+        .staging
+        .iter()
+        .map(|label| RankedSet::tag(label).staging);
+    unlink_keys(conn, ranked.chain(staging)).await
+}
+
+/// The labels of every per-label family, from one pass over the keyspace:
+/// `SCAN` costs the whole keyspace however few keys match, so the families
+/// share it. Collected up front: a rebuild only writes keys of families it
+/// has already listed, and the sets absorb the repeats `SCAN` may return.
+async fn scan_tag_keys(conn: &mut Connection) -> RedisResult<TagKeys> {
+    let prefix = |parts: &[&str]| format!("{}:", sorted_key(parts));
+    let source_prefix = prefix(&TAG_GLOBAL_POST_TIMELINE);
+    let ranked_prefix = prefix(&TAG_RANKED_POST_TIMELINE);
+    let staging_prefix = prefix(&TAG_RANKED_STAGING_POST_TIMELINE);
+    let [tags_part, _, post_part, timeline_part] = TAG_RANKED_POST_TIMELINE;
+    let pattern = format!("{SORTED_PREFIX}:{tags_part}:*:{post_part}:{timeline_part}:*");
+
+    let mut tags = TagKeys::default();
+    let mut cursor: u64 = 0;
+    loop {
+        let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(&pattern)
+            .arg("COUNT")
+            .arg(SCAN_COUNT)
+            .query_async(conn)
             .await?;
-        let tags = self.scan_tag_keys(conn).await?;
-        let ranked = tags
-            .ranked
-            .iter()
-            .map(|label| format!("{}{label}", self.tag_ranked_prefix));
-        let staging = tags
-            .staging
-            .iter()
-            .map(|label| format!("{}{label}", self.tag_staging_prefix));
-        unlink_keys(conn, ranked.chain(staging)).await
-    }
-
-    /// The labels of every per-label family, from one pass over the keyspace:
-    /// `SCAN` costs the whole keyspace however few keys match, so the families
-    /// share it. Collected up front: a rebuild only writes keys of families it
-    /// has already listed, and the sets absorb the repeats `SCAN` may return.
-    async fn scan_tag_keys(&self, conn: &mut Connection) -> RedisResult<TagKeys> {
-        let mut tags = TagKeys::default();
-        let mut cursor: u64 = 0;
-        loop {
-            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&self.tag_scan_pattern)
-                .arg("COUNT")
-                .arg(SCAN_COUNT)
-                .query_async(conn)
-                .await?;
-            for key in keys {
-                if let Some(label) = key.strip_prefix(self.tag_source_prefix.as_str()) {
-                    tags.sources.insert(label.to_string());
-                } else if let Some(label) = key.strip_prefix(self.tag_ranked_prefix.as_str()) {
-                    tags.ranked.insert(label.to_string());
-                } else if let Some(label) = key.strip_prefix(self.tag_staging_prefix.as_str()) {
-                    tags.staging.insert(label.to_string());
-                }
+        for key in keys {
+            if let Some(label) = key.strip_prefix(source_prefix.as_str()) {
+                tags.sources.insert(label.to_string());
+            } else if let Some(label) = key.strip_prefix(ranked_prefix.as_str()) {
+                tags.ranked.insert(label.to_string());
+            } else if let Some(label) = key.strip_prefix(staging_prefix.as_str()) {
+                tags.staging.insert(label.to_string());
             }
-            if next == 0 {
-                break;
-            }
-            cursor = next;
         }
-        Ok(tags)
+        if next == 0 {
+            break;
+        }
+        cursor = next;
     }
+    Ok(tags)
 }
 
 /// The labels found for each per-label family.
@@ -285,13 +250,14 @@ pub(crate) enum TrustMode {
 
 impl TrustMode {
     /// Reads the ranking state for one request in one round trip.
-    pub async fn load(layout: &RankedLayout, viewer_id: Option<&str>) -> RedisResult<Self> {
+    pub async fn load(viewer_id: Option<&str>) -> RedisResult<Self> {
+        let trust = ranking_key();
         let mut pipe = redis::pipe();
-        pipe.exists(&layout.trust).exists(&layout.built_at);
+        pipe.exists(&trust).exists(BUILT_AT_KEY);
         let mut conn = get_redis_conn().await?;
         let (trust_exists, built, viewer_ranked) = match viewer_id {
             Some(viewer_id) => {
-                pipe.zscore(&layout.trust, viewer_id);
+                pipe.zscore(&trust, viewer_id);
                 let (trust_exists, built, score): (bool, bool, Option<f64>) =
                     pipe.query_async(&mut conn).await?;
                 (trust_exists, built, Some(score.is_some()))
@@ -414,16 +380,11 @@ static SWAP: LazyLock<Script> = LazyLock::new(|| {
 /// Adds `member` (`author:post`) to `set.source` at `score`, mirroring it into
 /// the ranked copy. With `score` `None` only the mirror runs, from the score
 /// already in the source, so a retry repairs a copy a crash left behind.
-pub(crate) async fn add(
-    trust: &str,
-    set: &RankedSet,
-    member: &str,
-    score: Option<f64>,
-) -> RedisResult<()> {
+pub(crate) async fn add(set: &RankedSet, member: &str, score: Option<f64>) -> RedisResult<()> {
     let mut conn = get_redis_conn().await?;
     let _: i64 = ADD
         .key(&set.source)
-        .key(trust)
+        .key(ranking_key())
         .key(&set.ranked)
         .key(&set.staging)
         .arg(member)
@@ -452,7 +413,7 @@ pub(crate) async fn remove(set: &RankedSet, member: &str) -> RedisResult<()> {
 
 /// What a rebuild did, for its log line.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct RankedRebuildStats {
+pub(crate) struct RankedRebuildStats {
     /// Ranked sets rebuilt (the global one plus one per label).
     pub sets: usize,
     /// Source members examined.
@@ -467,11 +428,13 @@ pub struct RankedRebuildStats {
 
 /// Unique per call: the lock only lets the holder of its token release it.
 fn lock_token() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    format!("{}:{nanos}", std::process::id())
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_micros(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 async fn rebuild_set(
@@ -595,36 +558,32 @@ mod tests {
     }
 
     #[test]
-    fn production_layout_matches_the_key_parts_readers_use() {
-        let layout = RankedLayout::production();
-        assert_eq!(layout.trust, "Sorted:Users:SocialGraph");
-        assert_eq!(layout.global.source, "Sorted:Posts:Global:Timeline");
-        assert_eq!(layout.global.ranked, "Sorted:Posts:Global:Timeline:Ranked");
-        let tag = layout.tag("bitcoin");
+    fn keys_match_the_key_parts_readers_use() {
+        assert_eq!(ranking_key(), "Sorted:Users:SocialGraph");
+        let global = RankedSet::global();
+        assert_eq!(global.source, "Sorted:Posts:Global:Timeline");
+        assert_eq!(global.ranked, "Sorted:Posts:Global:Timeline:Ranked");
+        let tag = RankedSet::tag("bitcoin");
         assert_eq!(tag.source, "Sorted:Tags:Global:Post:Timeline:bitcoin");
         assert_eq!(tag.ranked, "Sorted:Tags:Ranked:Post:Timeline:bitcoin");
         assert_eq!(
             tag.staging,
             "Sorted:Tags:RankedStaging:Post:Timeline:bitcoin"
         );
-        assert_eq!(layout.tag_scan_pattern, "Sorted:Tags:*:Post:Timeline:*");
         // Scanning one family of keys must never match another.
-        let prefixes = [
-            &layout.tag_source_prefix,
-            &layout.tag_ranked_prefix,
-            &layout.tag_staging_prefix,
-        ];
-        for (i, a) in prefixes.iter().enumerate() {
-            for (j, b) in prefixes.iter().enumerate() {
-                if i != j {
-                    assert!(!a.starts_with(b.as_str()), "{a} starts with {b}");
-                }
+        let families = [tag.source, tag.ranked, tag.staging];
+        for (i, a) in families.iter().enumerate() {
+            for (j, b) in families.iter().enumerate() {
+                let prefix = b.trim_end_matches("bitcoin");
+                assert!(i == j || !a.starts_with(prefix), "{a} starts with {prefix}");
             }
         }
     }
 
-    /// Live tests against Redis, each in its own key namespace so they see
-    /// neither the fixture sets nor each other.
+    /// Live tests against the shared Redis and its fixture ranking. Each test
+    /// writes only its own labels and authors, and clears them before and
+    /// after. A full rebuild, the lock and the ranking key are shared, so
+    /// `.config/nextest.toml` runs these in the `ranked-sets` serial group.
     mod live {
         use super::super::*;
         use crate::types::DynError;
@@ -632,12 +591,40 @@ mod tests {
 
         type TestResult = Result<(), DynError>;
 
-        async fn setup(ns: &str) -> Result<RankedLayout, DynError> {
+        const ALICE: &str = "test-ranked-alice";
+        const BOB: &str = "test-ranked-bob";
+        const CAROL: &str = "test-ranked-carol";
+        /// Where a test parks the ranking while it checks behaviour without one.
+        const RANKING_ASIDE: &str = "Test:Ranked:RankingAside";
+
+        /// Connects and clears what an earlier run may have left behind,
+        /// including a ranking it parked and never restored.
+        async fn setup(labels: &[&str]) -> TestResult {
             StackManager::setup(&StackConfig::default()).await?;
             let mut conn = get_redis_conn().await?;
-            let keys: Vec<String> = conn.keys(format!("{ns}:*")).await?;
+            let parked: bool = conn.exists(RANKING_ASIDE).await?;
+            if parked {
+                restore_ranking().await?;
+            }
+            cleanup(labels).await
+        }
+
+        /// Clears the sets of `labels` and the test authors' ranks.
+        async fn cleanup(labels: &[&str]) -> TestResult {
+            let mut conn = get_redis_conn().await?;
+            let keys = labels.iter().flat_map(|label| {
+                let set = RankedSet::tag(label);
+                [set.source, set.ranked, set.staging]
+            });
             unlink_keys(&mut conn, keys).await?;
-            Ok(RankedLayout::namespaced(ns))
+            let _: () = conn.zrem(ranking_key(), &[ALICE, BOB, CAROL]).await?;
+            Ok(())
+        }
+
+        /// Ranks `authors` below every fixture user, so fixture ranks are untouched.
+        async fn rank(authors: &[&str]) -> TestResult {
+            let entries: Vec<(f64, &str)> = authors.iter().map(|author| (1e9, *author)).collect();
+            zadd(&ranking_key(), &entries).await
         }
 
         async fn zadd(key: &str, entries: &[(f64, &str)]) -> TestResult {
@@ -662,137 +649,156 @@ mod tests {
             entries.iter().map(|(m, s)| (m.to_string(), *s)).collect()
         }
 
+        /// Moves the ranking aside, so the code under test sees none.
+        async fn park_ranking() -> TestResult {
+            let mut conn = get_redis_conn().await?;
+            let _: () = conn.rename(ranking_key(), RANKING_ASIDE).await?;
+            Ok(())
+        }
+
+        async fn restore_ranking() -> TestResult {
+            let mut conn = get_redis_conn().await?;
+            let _: () = conn.rename(RANKING_ASIDE, ranking_key()).await?;
+            Ok(())
+        }
+
         #[tokio_shared_rt::test(shared)]
         async fn add_mirrors_ranked_authors_only() -> TestResult {
-            let l = setup("Test:Ranked:Add").await?;
-            zadd(&l.trust, &[(1.0, "alice")]).await?;
+            let label = "test-ranked-add";
+            setup(&[label]).await?;
+            rank(&[ALICE]).await?;
+            let set = RankedSet::tag(label);
 
-            add(&l.trust, &l.global, "alice:p1", Some(10.0)).await?;
-            add(&l.trust, &l.global, "bob:p2", Some(20.0)).await?;
+            add(&set, "test-ranked-alice:p1", Some(10.0)).await?;
+            add(&set, "test-ranked-bob:p2", Some(20.0)).await?;
             // Neither in the source nor written: nothing to mirror.
-            add(&l.trust, &l.global, "alice:gone", None).await?;
+            add(&set, "test-ranked-alice:gone", None).await?;
 
             assert_eq!(
-                members(&l.global.source).await?,
-                owned(&[("alice:p1", 10.0), ("bob:p2", 20.0)])
+                members(&set.source).await?,
+                owned(&[("test-ranked-alice:p1", 10.0), ("test-ranked-bob:p2", 20.0)])
             );
             assert_eq!(
-                members(&l.global.ranked).await?,
-                owned(&[("alice:p1", 10.0)])
+                members(&set.ranked).await?,
+                owned(&[("test-ranked-alice:p1", 10.0)])
             );
             // No build is running, so nothing is written to a staging set.
-            assert!(!exists(&l.global.staging).await?);
-            Ok(())
+            assert!(!exists(&set.staging).await?);
+            cleanup(&[label]).await
         }
 
         /// Without a score only the mirror runs, from the source's own score.
         #[tokio_shared_rt::test(shared)]
         async fn add_without_a_score_repairs_the_ranked_copy() -> TestResult {
-            let l = setup("Test:Ranked:Repair").await?;
-            zadd(&l.trust, &[(1.0, "alice")]).await?;
-            zadd(&l.global.source, &[(10.0, "alice:p1")]).await?;
+            let label = "test-ranked-repair";
+            setup(&[label]).await?;
+            rank(&[ALICE]).await?;
+            let set = RankedSet::tag(label);
+            zadd(&set.source, &[(10.0, "test-ranked-alice:p1")]).await?;
 
-            add(&l.trust, &l.global, "alice:p1", None).await?;
-
-            assert_eq!(
-                members(&l.global.ranked).await?,
-                owned(&[("alice:p1", 10.0)])
-            );
-            Ok(())
-        }
-
-        #[tokio_shared_rt::test(shared)]
-        async fn add_without_a_ranking_writes_only_the_source() -> TestResult {
-            let l = setup("Test:Ranked:NoRanking").await?;
-
-            add(&l.trust, &l.global, "alice:p1", Some(10.0)).await?;
+            add(&set, "test-ranked-alice:p1", None).await?;
 
             assert_eq!(
-                members(&l.global.source).await?,
-                owned(&[("alice:p1", 10.0)])
+                members(&set.ranked).await?,
+                owned(&[("test-ranked-alice:p1", 10.0)])
             );
-            assert!(!exists(&l.global.ranked).await?);
-            Ok(())
+            cleanup(&[label]).await
         }
 
         #[tokio_shared_rt::test(shared)]
         async fn writes_go_through_to_a_running_build() -> TestResult {
-            let l = setup("Test:Ranked:WriteThrough").await?;
-            zadd(&l.trust, &[(1.0, "alice")]).await?;
-            zadd(&l.global.staging, &[(0.0, SENTINEL)]).await?;
+            let label = "test-ranked-write-through";
+            setup(&[label]).await?;
+            rank(&[ALICE]).await?;
+            let set = RankedSet::tag(label);
+            zadd(&set.staging, &[(0.0, SENTINEL)]).await?;
 
-            add(&l.trust, &l.global, "alice:p1", Some(10.0)).await?;
+            add(&set, "test-ranked-alice:p1", Some(10.0)).await?;
             assert_eq!(
-                members(&l.global.ranked).await?,
-                owned(&[("alice:p1", 10.0)])
+                members(&set.ranked).await?,
+                owned(&[("test-ranked-alice:p1", 10.0)])
             );
             assert_eq!(
-                members(&l.global.staging).await?,
-                owned(&[(SENTINEL, 0.0), ("alice:p1", 10.0)])
+                members(&set.staging).await?,
+                owned(&[(SENTINEL, 0.0), ("test-ranked-alice:p1", 10.0)])
             );
 
-            remove(&l.global, "alice:p1").await?;
-            assert!(!exists(&l.global.source).await?);
-            assert!(!exists(&l.global.ranked).await?);
-            assert_eq!(members(&l.global.staging).await?, owned(&[(SENTINEL, 0.0)]));
-            Ok(())
+            remove(&set, "test-ranked-alice:p1").await?;
+            assert!(!exists(&set.source).await?);
+            assert!(!exists(&set.ranked).await?);
+            assert_eq!(members(&set.staging).await?, owned(&[(SENTINEL, 0.0)]));
+            cleanup(&[label]).await
         }
 
         #[tokio_shared_rt::test(shared)]
         async fn rebuild_keeps_ranked_authors_in_every_set() -> TestResult {
-            let l = setup("Test:Ranked:Rebuild").await?;
-            zadd(&l.trust, &[(1.0, "alice"), (2.0, "carol")]).await?;
+            let labels = ["test-ranked-rebuild-rust", "test-ranked-rebuild-spam"];
+            setup(&labels).await?;
+            rank(&[ALICE, CAROL]).await?;
+            let [rust, spam] = labels.map(RankedSet::tag);
             zadd(
-                &l.global.source,
-                &[(1.0, "alice:p1"), (2.0, "bob:p2"), (3.0, "carol:p3")],
+                &rust.source,
+                &[(1.0, "test-ranked-alice:p1"), (2.0, "test-ranked-bob:p2")],
             )
             .await?;
-            let rust = l.tag("rust");
-            zadd(&rust.source, &[(1.0, "alice:p1"), (2.0, "bob:p2")]).await?;
-            let spam = l.tag("spam");
-            zadd(&spam.source, &[(9.0, "bob:p9")]).await?;
+            zadd(&spam.source, &[(9.0, "test-ranked-bob:p9")]).await?;
             // Drift the rebuild must correct.
-            zadd(&l.global.ranked, &[(2.0, "bob:p2")]).await?;
-            zadd(&spam.ranked, &[(9.0, "bob:p9")]).await?;
+            zadd(&rust.ranked, &[(2.0, "test-ranked-bob:p2")]).await?;
+            zadd(&spam.ranked, &[(9.0, "test-ranked-bob:p9")]).await?;
 
-            let stats = l.rebuild().await?;
+            let stats = rebuild().await?;
 
             assert_eq!(
-                members(&l.global.ranked).await?,
-                owned(&[("alice:p1", 1.0), ("carol:p3", 3.0)])
+                members(&rust.ranked).await?,
+                owned(&[("test-ranked-alice:p1", 1.0)])
             );
-            assert_eq!(members(&rust.ranked).await?, owned(&[("alice:p1", 1.0)]));
             assert!(!exists(&spam.ranked).await?);
-            assert!(exists(&l.built_at).await?);
-            assert_eq!(stats.sets, 3);
-            assert_eq!(stats.copied, 3);
+            assert!(exists(BUILT_AT_KEY).await?);
             assert!(!stats.dropped);
-            Ok(())
+            // The global set is rebuilt from the fixture: only ranked authors.
+            let mut conn = get_redis_conn().await?;
+            let ranking: BTreeSet<String> = conn.zrange(ranking_key(), 0, -1).await?;
+            let ranked_posts: Vec<String> = conn.zrange(RankedSet::global().ranked, 0, -1).await?;
+            assert!(!ranked_posts.is_empty());
+            let unranked: Vec<&String> = ranked_posts
+                .iter()
+                .filter(|post| {
+                    !post
+                        .split_once(':')
+                        .is_some_and(|(author, _)| ranking.contains(author))
+                })
+                .collect();
+            assert!(unranked.is_empty(), "unranked authors: {unranked:?}");
+            cleanup(&labels).await
         }
 
         /// Past the atomic limit, across `ZSCAN` pages and a run of equal
         /// scores longer than a page.
         #[tokio_shared_rt::test(shared)]
         async fn rebuild_stages_large_sets() -> TestResult {
-            let l = setup("Test:Ranked:Staged").await?;
-            zadd(&l.trust, &[(1.0, "ranked-a"), (2.0, "ranked-b")]).await?;
+            let label = "test-ranked-staged";
+            setup(&[label]).await?;
+            rank(&[ALICE, BOB]).await?;
+            let set = RankedSet::tag(label);
             let mut posts: Vec<(String, f64)> = Vec::new();
-            posts.extend((0..1_500).map(|i| (format!("ranked-a:P{i:05}"), 1_000.0)));
-            posts.extend((0..700).map(|i| (format!("ranked-b:P{i:05}"), 2_000.0 + i as f64)));
-            posts.extend((0..900).map(|i| (format!("unranked-c:P{i:05}"), 500.0 + i as f64)));
+            posts.extend((0..1_500).map(|i| (format!("{ALICE}:P{i:05}"), 1_000.0)));
+            posts.extend((0..700).map(|i| (format!("{BOB}:P{i:05}"), 2_000.0 + i as f64)));
+            posts.extend((0..900).map(|i| (format!("{CAROL}:P{i:05}"), 500.0 + i as f64)));
             let entries: Vec<(f64, &str)> = posts.iter().map(|(m, s)| (*s, m.as_str())).collect();
-            zadd(&l.global.source, &entries).await?;
+            zadd(&set.source, &entries).await?;
 
-            l.rebuild().await?;
+            let mut conn = get_redis_conn().await?;
+            let mut stats = RankedRebuildStats::default();
+            rebuild_set(&mut conn, &ranking_key(), &set, &mut stats).await?;
 
             let mut expected: Vec<(String, f64)> = posts
                 .into_iter()
-                .filter(|(m, _)| !m.starts_with("unranked-c:"))
+                .filter(|(m, _)| !m.starts_with(CAROL))
                 .collect();
             expected.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-            assert_eq!(members(&l.global.ranked).await?, expected);
-            assert!(!exists(&l.global.staging).await?, "staging set left behind");
-            Ok(())
+            assert_eq!(members(&set.ranked).await?, expected);
+            assert!(!exists(&set.staging).await?, "staging set left behind");
+            cleanup(&[label]).await
         }
 
         /// Writes landing during a staged build: a member deleted after its
@@ -800,147 +806,183 @@ mod tests {
         /// was scanned is kept.
         #[tokio_shared_rt::test(shared)]
         async fn staged_build_keeps_concurrent_writes() -> TestResult {
-            let l = setup("Test:Ranked:Concurrent").await?;
-            zadd(&l.trust, &[(1.0, "alice")]).await?;
-            zadd(&l.global.source, &[(1.0, "alice:p1"), (2.0, "alice:p2")]).await?;
-            zadd(&l.global.staging, &[(0.0, SENTINEL)]).await?;
+            let label = "test-ranked-concurrent";
+            setup(&[label]).await?;
+            rank(&[ALICE]).await?;
+            let set = RankedSet::tag(label);
+            zadd(
+                &set.source,
+                &[(1.0, "test-ranked-alice:p1"), (2.0, "test-ranked-alice:p2")],
+            )
+            .await?;
+            zadd(&set.staging, &[(0.0, SENTINEL)]).await?;
 
             let mut conn = get_redis_conn().await?;
-            let (next, scanned, copied) = copy_batch(&mut conn, &l.trust, &l.global, 0).await?;
+            let (next, scanned, copied) = copy_batch(&mut conn, &ranking_key(), &set, 0).await?;
             assert_eq!((next, scanned, copied), (0, 2, 2));
 
             // Deleted, then created, while the build is still running.
-            remove(&l.global, "alice:p2").await?;
-            add(&l.trust, &l.global, "alice:p3", Some(3.0)).await?;
+            remove(&set, "test-ranked-alice:p2").await?;
+            add(&set, "test-ranked-alice:p3", Some(3.0)).await?;
 
-            swap(&mut conn, &l.global).await?;
+            swap(&mut conn, &set).await?;
 
             assert_eq!(
-                members(&l.global.ranked).await?,
-                owned(&[("alice:p1", 1.0), ("alice:p3", 3.0)])
+                members(&set.ranked).await?,
+                owned(&[("test-ranked-alice:p1", 1.0), ("test-ranked-alice:p3", 3.0)])
             );
-            assert!(!exists(&l.global.staging).await?);
-            Ok(())
+            assert!(!exists(&set.staging).await?);
+            cleanup(&[label]).await
         }
 
         #[tokio_shared_rt::test(shared)]
         async fn small_rebuild_defers_a_set_past_the_atomic_limit() -> TestResult {
-            let l = setup("Test:Ranked:Defer").await?;
-            zadd(&l.trust, &[(1.0, "alice")]).await?;
-            let posts: Vec<String> = (0..=ATOMIC_MAX).map(|i| format!("alice:P{i:05}")).collect();
+            let label = "test-ranked-defer";
+            setup(&[label]).await?;
+            rank(&[ALICE]).await?;
+            let set = RankedSet::tag(label);
+            let posts: Vec<String> = (0..=ATOMIC_MAX)
+                .map(|i| format!("{ALICE}:P{i:05}"))
+                .collect();
             let entries: Vec<(f64, &str)> = posts.iter().map(|m| (1.0, m.as_str())).collect();
-            zadd(&l.global.source, &entries).await?;
+            zadd(&set.source, &entries).await?;
 
             let mut conn = get_redis_conn().await?;
-            let rebuilt = rebuild_small(&mut conn, &l.trust, &l.global).await?;
+            let rebuilt = rebuild_small(&mut conn, &ranking_key(), &set).await?;
 
             assert_eq!(rebuilt, None);
-            assert!(
-                !exists(&l.global.ranked).await?,
-                "nothing written on deferral"
-            );
-            Ok(())
+            assert!(!exists(&set.ranked).await?, "nothing written on deferral");
+            cleanup(&[label]).await
         }
 
+        /// Without a ranking every ranked set goes, the ready marker first. The
+        /// ranking is parked and restored, and a second rebuild brings the
+        /// fixture's ranked sets back before anything is asserted.
         #[tokio_shared_rt::test(shared)]
         async fn rebuild_without_a_ranking_drops_every_ranked_set() -> TestResult {
-            let l = setup("Test:Ranked:Drop").await?;
-            zadd(&l.global.source, &[(1.0, "alice:p1")]).await?;
-            zadd(&l.global.ranked, &[(1.0, "alice:p1")]).await?;
-            zadd(&l.tag("x").ranked, &[(1.0, "alice:p1")]).await?;
-            zadd(&l.tag("y").staging, &[(0.0, SENTINEL)]).await?;
-            let mut conn = get_redis_conn().await?;
-            let _: () = conn.set(&l.built_at, 1).await?;
+            let labels = ["test-ranked-drop-x", "test-ranked-drop-y"];
+            setup(&labels).await?;
+            let [x, y] = labels.map(RankedSet::tag);
+            zadd(&x.ranked, &[(1.0, "test-ranked-alice:p1")]).await?;
+            zadd(&y.staging, &[(0.0, SENTINEL)]).await?;
+            let global = RankedSet::global();
 
-            let stats = l.rebuild().await?;
-
-            assert!(stats.dropped);
-            for key in [
-                &l.built_at,
-                &l.global.ranked,
-                &l.tag("x").ranked,
-                &l.tag("y").staging,
-            ] {
-                assert!(!exists(key).await?, "{key} survived without a ranking");
+            park_ranking().await?;
+            let dropped = rebuild().await;
+            let survivors = async {
+                let mut survivors = Vec::new();
+                for key in [BUILT_AT_KEY, &global.ranked, &x.ranked, &y.staging] {
+                    if exists(key).await? {
+                        survivors.push(key.to_string());
+                    }
+                }
+                Ok::<_, DynError>(survivors)
             }
+            .await;
+            let source_kept = exists(&global.source).await;
+            restore_ranking().await?;
+            rebuild().await?;
+
+            assert!(dropped?.dropped);
+            assert!(survivors?.is_empty(), "survived without a ranking");
             // The source sets are not the rebuild's to touch.
-            assert!(exists(&l.global.source).await?);
-            Ok(())
+            assert!(source_kept?);
+            cleanup(&labels).await
         }
 
         #[tokio_shared_rt::test(shared)]
         async fn rebuild_removes_orphans_and_leftovers() -> TestResult {
-            let l = setup("Test:Ranked:Orphans").await?;
-            zadd(&l.trust, &[(1.0, "alice")]).await?;
-            zadd(&l.tag("live").source, &[(1.0, "alice:p1")]).await?;
-            zadd(&l.global.source, &[(4.0, "alice:p4")]).await?;
-            // Ranked set whose source vanished, and leftovers of a crashed build,
-            // including the global set's (small, so rebuilt atomically).
-            zadd(&l.tag("gone").ranked, &[(2.0, "alice:p2")]).await?;
-            zadd(&l.tag("live").staging, &[(0.0, SENTINEL)]).await?;
-            zadd(&l.tag("dead").staging, &[(0.0, SENTINEL)]).await?;
-            zadd(&l.global.staging, &[(0.0, SENTINEL)]).await?;
+            let labels = ["test-ranked-live", "test-ranked-gone", "test-ranked-dead"];
+            setup(&labels).await?;
+            rank(&[ALICE]).await?;
+            let [live, gone, dead] = labels.map(RankedSet::tag);
+            zadd(&live.source, &[(1.0, "test-ranked-alice:p1")]).await?;
+            // A ranked set whose source vanished, and leftovers of a crashed
+            // build, including the global set's (staged, as the fixture is past
+            // the atomic limit).
+            zadd(&gone.ranked, &[(2.0, "test-ranked-alice:p2")]).await?;
+            zadd(&live.staging, &[(0.0, SENTINEL)]).await?;
+            zadd(&dead.staging, &[(0.0, SENTINEL)]).await?;
+            zadd(&RankedSet::global().staging, &[(0.0, SENTINEL)]).await?;
 
-            let stats = l.rebuild().await?;
+            let stats = rebuild().await?;
 
-            assert_eq!(stats.orphans, 1);
-            assert!(!exists(&l.tag("gone").ranked).await?);
-            assert!(!exists(&l.tag("live").staging).await?);
-            assert!(!exists(&l.tag("dead").staging).await?);
-            assert!(!exists(&l.global.staging).await?);
+            assert!(stats.orphans >= 1);
+            for key in [
+                &gone.ranked,
+                &live.staging,
+                &dead.staging,
+                &RankedSet::global().staging,
+            ] {
+                assert!(!exists(key).await?, "{key} left behind");
+            }
             assert_eq!(
-                members(&l.global.ranked).await?,
-                owned(&[("alice:p4", 4.0)])
+                members(&live.ranked).await?,
+                owned(&[("test-ranked-alice:p1", 1.0)])
             );
-            assert_eq!(
-                members(&l.tag("live").ranked).await?,
-                owned(&[("alice:p1", 1.0)])
-            );
-            Ok(())
+            cleanup(&labels).await
         }
 
         #[tokio_shared_rt::test(shared)]
         async fn rebuild_waits_for_a_running_rebuild() -> TestResult {
-            let l = setup("Test:Ranked:Lock").await?;
-            zadd(&l.trust, &[(1.0, "alice")]).await?;
-            zadd(&l.global.source, &[(1.0, "alice:p1")]).await?;
-            assert!(try_acquire_lock(&l.lock, "other-rebuild", 60).await?);
+            let label = "test-ranked-lock";
+            setup(&[label]).await?;
+            rank(&[ALICE]).await?;
+            let set = RankedSet::tag(label);
+            zadd(&set.source, &[(1.0, "test-ranked-alice:p1")]).await?;
+            let holder = "test-ranked-other-rebuild";
+            assert!(
+                try_acquire_lock(REBUILD_LOCK_KEY, holder, 60).await?,
+                "another rebuild holds the lock"
+            );
 
-            let waiting = l.clone();
-            let handle = tokio::spawn(async move { waiting.rebuild().await });
+            let handle = tokio::spawn(rebuild());
             tokio::time::sleep(Duration::from_millis(1_500)).await;
-            assert!(
-                !handle.is_finished(),
-                "rebuild must wait for the lock holder"
-            );
-            assert!(!exists(&l.global.ranked).await?);
-
-            release_lock(&l.lock, "other-rebuild").await?;
+            let waited = !handle.is_finished();
+            let built_early = exists(&set.ranked).await;
+            release_lock(REBUILD_LOCK_KEY, holder).await?;
             handle.await??;
+
+            assert!(waited, "rebuild must wait for the lock holder");
+            assert!(!built_early?);
             assert_eq!(
-                members(&l.global.ranked).await?,
-                owned(&[("alice:p1", 1.0)])
+                members(&set.ranked).await?,
+                owned(&[("test-ranked-alice:p1", 1.0)])
             );
             assert!(
-                !exists(&l.lock).await?,
+                !exists(REBUILD_LOCK_KEY).await?,
                 "the lock is released after the rebuild"
             );
-            Ok(())
+            cleanup(&[label]).await
         }
 
+        /// The marker and the ranking are restored before anything is asserted.
         #[tokio_shared_rt::test(shared)]
         async fn load_reflects_the_ranking_marker_and_viewer() -> TestResult {
-            let l = setup("Test:Ranked:State").await?;
-            assert_eq!(TrustMode::load(&l, Some("alice")).await?, TrustMode::Off);
+            setup(&[]).await?;
+            rank(&[ALICE]).await?;
+            rebuild().await?;
 
-            zadd(&l.trust, &[(1.0, "alice")]).await?;
-            assert_eq!(TrustMode::load(&l, None).await?, TrustMode::Unbuilt);
+            let ranked = TrustMode::load(Some(ALICE)).await;
+            let anonymous = TrustMode::load(None).await;
+            let stranger = TrustMode::load(Some("test-ranked-stranger")).await;
 
             let mut conn = get_redis_conn().await?;
-            let _: () = conn.set(&l.built_at, 1).await?;
-            assert_eq!(TrustMode::load(&l, Some("alice")).await?, TrustMode::Ranked);
-            assert_eq!(TrustMode::load(&l, Some("stranger")).await?, TrustMode::Off);
-            Ok(())
+            let built_at: String = conn.get(BUILT_AT_KEY).await?;
+            let _: () = conn.del(BUILT_AT_KEY).await?;
+            let unbuilt = TrustMode::load(None).await;
+            let _: () = conn.set(BUILT_AT_KEY, built_at).await?;
+
+            park_ranking().await?;
+            let no_ranking = TrustMode::load(Some(ALICE)).await;
+            restore_ranking().await?;
+
+            assert_eq!(ranked?, TrustMode::Ranked);
+            assert_eq!(anonymous?, TrustMode::Ranked);
+            assert_eq!(stranger?, TrustMode::Off);
+            assert_eq!(unbuilt?, TrustMode::Unbuilt);
+            assert_eq!(no_ranking?, TrustMode::Off);
+            cleanup(&[]).await
         }
     }
 }

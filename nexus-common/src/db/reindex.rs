@@ -76,6 +76,10 @@ pub async fn sync() {
         .await
         .expect("Failed to reindex influencers");
 
+    SocialGraphStatus::reindex()
+        .await
+        .expect("Failed to reindex the social graph ranking");
+
     PostsByTagSearch::reindex()
         .await
         .expect("Failed to store the global post tags");
@@ -88,11 +92,8 @@ pub async fn sync() {
         .await
         .expect("Failed to store the global tags");
 
-    // Last, and together: publishing the ranking is what turns the filter on, and
-    // the ranked sets need the ranking plus every timeline rebuilt above.
-    SocialGraphStatus::reindex()
-        .await
-        .expect("Failed to reindex the social graph ranking");
+    // Last: the ranked sets are copies of the timelines rebuilt above, filtered by
+    // the ranking.
     PostStream::rebuild_ranked_sets()
         .await
         .expect("Failed to rebuild the ranked timeline sets");

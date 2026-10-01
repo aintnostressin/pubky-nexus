@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::ranked::{self, RankedLayout, TrustMode, POST_RANKED_TIMELINE_KEY_PARTS};
+use super::ranked::{self, RankedSet, TrustMode, POST_RANKED_TIMELINE_KEY_PARTS};
 use super::{collection_item_keys, Bookmark, PostCounts, PostDetails, PostView};
 use crate::db::kv::{RedisResult, ScoreAction, SortOrder};
 use crate::db::{get_neo4j_graph, queries, GraphError, GraphResult, RedisOps};
@@ -180,12 +180,11 @@ pub struct TrustFilter {
 }
 
 impl TrustFilter {
-    /// The filter for a request when the `hide_unranked_authors` switch is on,
-    /// decided on `viewer_id`.
-    pub fn when(enabled: bool, viewer_id: Option<&str>) -> Option<Self> {
-        enabled.then(|| TrustFilter {
+    /// The filter for a request, decided on `viewer_id`.
+    pub fn for_viewer(viewer_id: Option<&str>) -> Self {
+        TrustFilter {
             viewer_id: viewer_id.map(str::to_string),
-        })
+        }
     }
 }
 
@@ -402,11 +401,7 @@ impl PostStream {
         if !matches!(source, StreamSource::All) || *sorting != StreamSorting::Timeline {
             return Ok(TrustMode::Off);
         }
-        Ok(TrustMode::load(
-            RankedLayout::production(),
-            trust_filter.viewer_id.as_deref(),
-        )
-        .await?)
+        Ok(TrustMode::load(trust_filter.viewer_id.as_deref()).await?)
     }
 
     /// Rebuilds the ranked timeline sets from the current trust ranking, or
@@ -417,7 +412,7 @@ impl PostStream {
     /// lock for longer than the wait allows.
     pub async fn rebuild_ranked_sets() -> ModelResult<()> {
         let started = std::time::Instant::now();
-        let stats = RankedLayout::production().rebuild().await?;
+        let stats = ranked::rebuild().await?;
         tracing::info!(
             sets = stats.sets,
             scanned = stats.scanned,
@@ -917,10 +912,8 @@ impl PostStream {
     /// the score, and to its ranked copy when the author is in the trust ranking.
     pub async fn add_to_timeline_sorted_set(details: &PostDetails) -> RedisResult<()> {
         let element = format!("{}:{}", details.author, details.id);
-        let layout = RankedLayout::production();
         ranked::add(
-            &layout.trust,
-            &layout.global,
+            &RankedSet::global(),
             &element,
             Some(details.indexed_at as f64),
         )
@@ -933,7 +926,7 @@ impl PostStream {
         post_id: &str,
     ) -> RedisResult<()> {
         let element = format!("{author_id}:{post_id}");
-        ranked::remove(&RankedLayout::production().global, &element).await
+        ranked::remove(&RankedSet::global(), &element).await
     }
 
     /// Adds the post to a Redis sorted set using the `indexed_at` timestamp as the score.

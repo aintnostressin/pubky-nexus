@@ -90,7 +90,7 @@ fn first_page(limit: usize) -> Pagination {
     }
 }
 
-/// The stream exactly as served with the switch off.
+/// The stream exactly as served without the trust filter.
 async fn unfiltered_keys(
     tags: Option<&[&str]>,
     kind: Option<KindFilter>,
@@ -190,8 +190,8 @@ async fn test_single_tag_reads_the_ranked_set() -> Result<()> {
     Ok(())
 }
 
-/// `kind`, `exclude_kinds` and several tags go to Cypher, which applies the
-/// same membership test as the ranking.
+/// `kind`, `exclude_kinds` and several tags go to Cypher, which keeps authors
+/// with a positive trust score.
 #[tokio_shared_rt::test(shared)]
 async fn test_cypher_shapes_hide_unranked_authors() -> Result<()> {
     for filter in ["kind=short", "exclude_kinds=long"] {
