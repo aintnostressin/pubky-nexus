@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::time::Duration;
-use streams_benches::{author, bookmarks, kind, post_keys, reach, sorting, tag, user, wot};
+use streams_benches::{author, bookmarks, kind, post_keys, ranked, reach, sorting, tag, user, wot};
 
 mod setup;
 mod streams_benches;
@@ -30,6 +30,13 @@ criterion_group! {
               sorting::bench_stream_all_timeline,
               sorting::bench_stream_all_total_engagement,
               post_keys::bench_stream_post_keys_all_timeline,
+              ranked::bench_stream_all_timeline_ranked,
+              ranked::bench_stream_post_keys_all_timeline_ranked,
+              ranked::bench_stream_post_keys_all_timeline_unranked_viewer,
+              ranked::bench_stream_post_keys_tag_timeline_ranked,
+              ranked::bench_stream_post_keys_kind_timeline_ranked,
+              ranked::bench_stream_post_keys_tag_timeline,
+              ranked::bench_stream_post_keys_kind_timeline,
               tag::bench_stream_tag_timeline,
               tag::bench_stream_tag_total_engagement,
               tag::bench_stream_multi_tag_timeline,

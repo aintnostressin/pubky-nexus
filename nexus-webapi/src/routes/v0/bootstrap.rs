@@ -27,9 +27,14 @@ use utoipa::OpenApi;
         (status = 500, description = "Internal server error")
     )
 )]
-pub async fn bootstrap_handler(Path(user_id): Path<PubkyId>) -> Result<Json<Bootstrap>> {
+pub async fn bootstrap_handler(
+    State(app_state): State<AppState>,
+    Path(user_id): Path<PubkyId>,
+) -> Result<Json<Bootstrap>> {
     debug!("GET {BOOTSTRAP_ROUTE}, user_id:{}", user_id);
-    Ok(Json(Bootstrap::get_by_id(&user_id, ViewType::Full).await?))
+    Ok(Json(
+        Bootstrap::get_by_id(&user_id, ViewType::Full, app_state.hide_unranked_authors).await?,
+    ))
 }
 
 #[utoipa::path(

@@ -12,7 +12,7 @@ use super::error::ModelResult;
 
 use crate::models::{
     file::FileDetails,
-    post::{PostStream, StreamSource},
+    post::{PostStream, StreamSource, TrustFilter},
     traits::Collection,
     user::{Influencers, UserStream},
 };
@@ -73,7 +73,15 @@ impl Bootstrap {
     /// - `view_type: ViewType`
     ///   Controls whether to fetch replies and include full stream entries (`Full`)
     ///   or only base posts (`Partial`)
-    pub async fn get_by_id(user_id: &str, view_type: ViewType) -> ModelResult<Self> {
+    /// - `hide_unranked: bool`
+    ///   Applies the [`TrustFilter`] to the timeline, decided on `user_id` even
+    ///   before that user is indexed, so a brand-new account sees what the
+    ///   stream routes show it
+    pub async fn get_by_id(
+        user_id: &str,
+        view_type: ViewType,
+        hide_unranked: bool,
+    ) -> ModelResult<Self> {
         let mut bootstrap = Self::default();
         let mut user_ids = HashSet::new();
         let mut attachment_uris = HashSet::new();
@@ -86,8 +94,13 @@ impl Bootstrap {
 
         let is_full_view_type = view_type == ViewType::Full;
 
-        let post_stream_by_timeline =
-            Self::get_post_stream_timeline(maybe_viewer_id, StreamSource::All, 20).await?;
+        let post_stream_by_timeline = Self::get_post_stream_timeline(
+            maybe_viewer_id,
+            StreamSource::All,
+            20,
+            Self::timeline_trust_filter(user_id, hide_unranked),
+        )
+        .await?;
 
         let post_replies = bootstrap.handle_post_stream(
             post_stream_by_timeline,
@@ -227,6 +240,7 @@ impl Bootstrap {
                     viewer_id_clone.as_deref(),
                     StreamSource::PostReplies { author_id, post_id },
                     3,
+                    None,
                 )
                 .await
             }
@@ -240,6 +254,14 @@ impl Bootstrap {
         Ok(())
     }
 
+    /// The timeline's trust filter, decided on `user_id` whether or not that
+    /// user is indexed yet, unlike `maybe_viewer_id`.
+    fn timeline_trust_filter(user_id: &str, hide_unranked: bool) -> Option<TrustFilter> {
+        hide_unranked.then(|| TrustFilter {
+            viewer_id: Some(user_id.to_string()),
+        })
+    }
+
     /// Fetches a post stream timeline for the given `source` and `limit`
     ///
     /// # Parameters
@@ -249,10 +271,13 @@ impl Bootstrap {
     ///   The source of the post stream
     /// - `limit: usize`
     ///   The limit of the post stream
+    /// - `trust_filter: Option<TrustFilter>`
+    ///   Hides posts by authors outside the trust ranking (see [`TrustFilter`])
     async fn get_post_stream_timeline(
         maybe_viewer_id: Option<&str>,
         source: StreamSource,
         limit: usize,
+        trust_filter: Option<TrustFilter>,
     ) -> ModelResult<PostStream> {
         let pagination = Pagination {
             skip: Some(0),
@@ -268,6 +293,7 @@ impl Bootstrap {
             maybe_viewer_id,
             None,
             None,
+            trust_filter,
         )
         .await?
         .unwrap_or_default())
@@ -373,5 +399,23 @@ impl Bootstrap {
         self.files = results.into_iter().flatten().collect();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The decision rests on the requested user even before it is indexed, so
+    /// a brand-new account sees the same timeline here as on the stream routes.
+    #[test]
+    fn timeline_trust_filter_rests_on_the_requested_user() {
+        assert_eq!(Bootstrap::timeline_trust_filter("user", false), None);
+        assert_eq!(
+            Bootstrap::timeline_trust_filter("user", true),
+            Some(TrustFilter {
+                viewer_id: Some("user".to_string())
+            })
+        );
     }
 }

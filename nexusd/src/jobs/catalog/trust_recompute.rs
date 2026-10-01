@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use nexus_common::models::post::PostStream;
 use nexus_common::models::user::SocialGraphStatus;
 use nexus_common::types::DynError;
 use nexus_common::TrustRankConfig;
@@ -17,6 +18,9 @@ use crate::trust::{
 /// OpenTelemetry meter name for all trust-rank metrics.
 const METER_NAME: &str = "nexus.trust";
 
+/// The job's name, which is also its `[jobs.<name>]` config key.
+pub const TRUST_RECOMPUTE_JOB_NAME: &str = "trust-recompute";
+
 /// Publishes a finished ranking to whatever serves it. Injected into the job
 /// for the same reason the engine is: so the unit tests can drive `run` without
 /// a database behind it.
@@ -26,13 +30,16 @@ pub(crate) trait TrustProjection: Send + Sync {
     async fn publish(&self) -> Result<(), DynError>;
 }
 
-/// Rebuilds the Redis ranking that backs the social graph badge.
+/// Rebuilds the Redis ranking that backs the social graph badge, then the
+/// ranked timeline sets derived from it.
 pub(crate) struct SocialGraphProjection;
 
 #[async_trait]
 impl TrustProjection for SocialGraphProjection {
     async fn publish(&self) -> Result<(), DynError> {
-        SocialGraphStatus::reindex().await.map_err(Into::into)
+        SocialGraphStatus::reindex().await?;
+        PostStream::rebuild_ranked_sets().await?;
+        Ok(())
     }
 }
 
@@ -115,7 +122,7 @@ impl TrustRecomputeJob {
 #[async_trait]
 impl Job for TrustRecomputeJob {
     fn name(&self) -> &'static str {
-        "trust-recompute"
+        TRUST_RECOMPUTE_JOB_NAME
     }
 
     async fn run(&self) -> Result<(), DynError> {
@@ -147,8 +154,9 @@ impl Job for TrustRecomputeJob {
         }
 
         // Last, so a Redis blip cannot cost the report of a compute that already
-        // succeeded. Still fatal: fresh scores nobody can read leave the badge on
-        // yesterday's ranking, and that should not pass as a clean run.
+        // succeeded. Still fatal: fresh scores nobody can read leave the badge and
+        // the filtered timelines on yesterday's ranking, and that should not pass
+        // as a clean run.
         self.projection.publish().await?;
 
         Ok(())

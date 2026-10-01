@@ -25,7 +25,7 @@ mod stack;
 mod trust;
 pub mod watcher;
 
-pub use api::{ApiConfig, RateLimitBucketConfig, RateLimitConfig};
+pub use api::{ApiConfig, RateLimitBucketConfig, RateLimitConfig, DEFAULT_HIDE_UNRANKED_AUTHORS};
 pub use daemon::DaemonConfig;
 pub use job::JobConfig;
 pub use net::NetConfig;

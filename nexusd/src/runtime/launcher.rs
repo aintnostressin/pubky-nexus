@@ -1,12 +1,13 @@
 use std::{fmt::Debug, path::PathBuf};
 
-use nexus_common::{types::DynError, utils::create_shutdown_rx, DaemonConfig};
+use nexus_common::{types::DynError, utils::create_shutdown_rx, DaemonConfig, StackManager};
 use nexus_watcher::NexusWatcherBuilder;
 use nexus_webapi::{api_context::ApiContextBuilder, NexusApiBuilder};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::watch::Receiver, try_join};
+use tracing::warn;
 
-use crate::jobs::{run, JobRegistry};
+use crate::jobs::{run, JobRegistry, TRUST_RECOMPUTE_JOB_NAME};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonLauncher {}
@@ -33,6 +34,10 @@ impl DaemonLauncher {
         // bad cron fails fast at startup.
         let config = DaemonConfig::read_or_create_config_file(config_dir.clone()).await?;
         let jobs = JobRegistry::catalog(&config.trust_rank).scheduled_jobs(&config)?;
+        // Logging first, so the warning below is not lost; every service calls
+        // this again with the same stack config, which is a no-op.
+        StackManager::setup(&config.stack).await?;
+        warn_if_ranking_never_refreshes(&config);
 
         let api_context = ApiContextBuilder::from_config_dir(config_dir)
             .try_build()
@@ -53,5 +58,22 @@ impl DaemonLauncher {
             },
         )?;
         Ok(())
+    }
+}
+
+/// With the switch on and seeds configured, a new account stays hidden from
+/// `source=all` until a recompute ranks it. Without a schedule that only
+/// happens when an operator runs the job by hand, which is easy to miss.
+fn warn_if_ranking_never_refreshes(config: &DaemonConfig) {
+    let scheduled = config
+        .jobs
+        .get(TRUST_RECOMPUTE_JOB_NAME)
+        .is_some_and(|job| job.cron.is_some());
+    if config.api.hide_unranked_authors && !config.trust_rank.seed.is_empty() && !scheduled {
+        warn!(
+            "[api] hide_unranked_authors is on but [jobs.{TRUST_RECOMPUTE_JOB_NAME}] has no cron: \
+             new accounts stay hidden from source=all timelines until \
+             `nexusd jobs run {TRUST_RECOMPUTE_JOB_NAME}` runs"
+        );
     }
 }

@@ -1154,7 +1154,10 @@ pub fn get_files_by_ids(key_pair: &[&[&str]]) -> Query {
     .param("pairs", key_pair)
 }
 
-// Build the graph query based on parameters
+/// Builds the graph query for a post stream. `trust_rule` keeps only posts
+/// whose author the trust ranking includes; the caller decides when it applies
+/// (`source=all` with `sorting=timeline`, a ranking exists, and the request has
+/// no viewer or a ranked one).
 pub fn post_stream(
     source: StreamSource,
     sorting: StreamSorting,
@@ -1162,7 +1165,13 @@ pub fn post_stream(
     tags: &Option<Vec<String>>,
     pagination: Pagination,
     kind: Option<KindFilter>,
+    trust_rule: bool,
 ) -> GraphResult<Query> {
+    // The trust rule exists for `source=all` with `sorting=timeline` only; the
+    // query shape below relies on both.
+    let trust_rule =
+        trust_rule && matches!(source, StreamSource::All) && sorting == StreamSorting::Timeline;
+
     // Initialize the cypher query
     let mut cypher = String::new();
 
@@ -1239,8 +1248,11 @@ pub fn post_stream(
 
     // Base match for posts and authors. For observer-anchored sources `author`
     // is already bound, so this expands their posts instead of enumerating all
-    // posts.
-    cypher.push_str("MATCH (p:Post)<-[:AUTHORED]-(author:User)\n");
+    // posts. With the trust rule the author is matched later (see below).
+    match trust_rule {
+        true => cypher.push_str("MATCH (p:Post)\n"),
+        false => cypher.push_str("MATCH (p:Post)<-[:AUTHORED]-(author:User)\n"),
+    }
 
     // Apply tags
     if tags.is_some() {
@@ -1328,13 +1340,27 @@ pub fn post_stream(
         }
     }
 
-    // Make unique the posts, cannot be repeated
-    cypher.push_str("WITH DISTINCT p, author\n");
-
     let order_dir = match order {
         SortOrder::Ascending => "ASC",
         SortOrder::Descending => "DESC",
     };
+
+    // Make unique the posts, cannot be repeated
+    match trust_rule {
+        // Sort the candidate posts first, then match each author in that order,
+        // so the planner checks authors lazily and stops at LIMIT. Filtering the
+        // author in the first MATCH makes it expand every candidate's author
+        // before sorting, nearly doubling the work. The membership test is the
+        // ranking's own (`get_trust_ranked_user_ids`): positive trust and not
+        // deleted; a missing `trust` reads as null and drops the row.
+        true => cypher.push_str(&format!(
+            "WITH DISTINCT p\n\
+             ORDER BY p.indexed_at {order_dir}, p.id {order_dir}\n\
+             MATCH (p)<-[:AUTHORED]-(author:User)\n\
+             WHERE author.trust > 0 AND NOT coalesce(author.deleted, false)\n"
+        )),
+        false => cypher.push_str("WITH DISTINCT p, author\n"),
+    }
 
     // Apply StreamSorting. `score` is the value the cursor (`last_post_score`) pages
     // on: the post timestamp for Timeline, the engagement count for TotalEngagement.
@@ -1666,8 +1692,104 @@ mod tests {
                 ..Default::default()
             },
             None,
+            false,
         )
         .unwrap()
+    }
+
+    fn all_timeline(
+        tags: &Option<Vec<String>>,
+        kind: Option<KindFilter>,
+        trust_rule: bool,
+    ) -> String {
+        post_stream(
+            StreamSource::All,
+            StreamSorting::Timeline,
+            SortOrder::Descending,
+            tags,
+            Pagination {
+                limit: Some(10),
+                ..Default::default()
+            },
+            kind,
+            trust_rule,
+        )
+        .unwrap()
+        .to_cypher_populated()
+    }
+
+    const TRUST_RULE: &str = "WHERE author.trust > 0 AND NOT coalesce(author.deleted, false)";
+
+    #[test]
+    fn post_stream_adds_the_trust_rule_only_when_asked() {
+        let tags = Some(vec!["a".to_string(), "b".to_string()]);
+        let kind = Some(KindFilter::Kind(pubky_app_specs::PubkyAppPostKind::Short));
+        for (tags, kind) in [(None, kind.clone()), (tags.clone(), None), (tags, kind)] {
+            assert!(all_timeline(&tags, kind.clone(), true).contains(TRUST_RULE));
+            assert!(!all_timeline(&tags, kind, false).contains("author.trust"));
+        }
+    }
+
+    /// The posts are filtered and sorted before the author is matched, so the
+    /// planner checks authors lazily in sort order and stops at LIMIT.
+    #[test]
+    fn post_stream_trust_rule_matches_authors_after_sorting_posts() {
+        let kind = Some(KindFilter::Kind(pubky_app_specs::PubkyAppPostKind::Short));
+        let cypher = all_timeline(&Some(vec!["a".to_string(), "b".to_string()]), kind, true);
+        let position = |needle: &str| {
+            cypher
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from {cypher}"))
+        };
+        assert!(cypher.starts_with("MATCH (p:Post)\n"), "{cypher}");
+        let tag_match = position("MATCH (:User)-[tag:TAGGED]->(p)");
+        let kind_filter = position("p.kind = 'short'");
+        let parents_only = position("NOT ( (p)-[:REPLIED]->(:Post) )");
+        let sort = position("WITH DISTINCT p\nORDER BY p.indexed_at DESC, p.id DESC");
+        let author = position("MATCH (p)<-[:AUTHORED]-(author:User)");
+        let rule = position(TRUST_RULE);
+        let ret = position("RETURN author.id AS author_id");
+        assert!(
+            tag_match < kind_filter && kind_filter < parents_only,
+            "{cypher}"
+        );
+        assert!(parents_only < sort && sort < author && author < rule && rule < ret);
+    }
+
+    /// The rule only ever applies to `source=all` with `sorting=timeline`.
+    #[test]
+    fn post_stream_ignores_the_trust_rule_out_of_scope() {
+        let pagination = Pagination {
+            limit: Some(10),
+            ..Default::default()
+        };
+        let engagement = post_stream(
+            StreamSource::All,
+            StreamSorting::TotalEngagement,
+            SortOrder::Descending,
+            &None,
+            pagination,
+            None,
+            true,
+        )
+        .unwrap()
+        .to_cypher_populated();
+        let author = post_stream(
+            StreamSource::Author {
+                author_id: "author".to_string(),
+            },
+            StreamSorting::Timeline,
+            SortOrder::Descending,
+            &None,
+            pagination,
+            None,
+            true,
+        )
+        .unwrap()
+        .to_cypher_populated();
+        for cypher in [engagement, author] {
+            assert!(!cypher.contains("author.trust"), "{cypher}");
+        }
     }
 
     fn build(source: StreamSource) -> String {

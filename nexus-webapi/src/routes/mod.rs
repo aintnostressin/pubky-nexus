@@ -10,7 +10,7 @@ use axum::http::{Request, StatusCode};
 use axum::Json as AxumJson;
 use axum::Router;
 use nexus_common::models::user::UserIngestor;
-use nexus_common::RateLimitConfig;
+use nexus_common::{RateLimitConfig, DEFAULT_HIDE_UNRANKED_AUTHORS};
 use tokio::sync::watch::Receiver;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
@@ -88,6 +88,9 @@ pub struct AppState {
     /// Same permits as `queued_variant_controller`, but sheds instead of queueing. For
     /// routes with a cheaper fallback than waiting: see `user_avatar_handler`.
     pub fail_fast_variant_controller: VariantController,
+    /// `[api] hide_unranked_authors`: whether `source=all` timelines hide posts by
+    /// authors outside the trust ranking.
+    pub hide_unranked_authors: bool,
 }
 
 impl AppState {
@@ -111,7 +114,14 @@ impl AppState {
                 FailFastGate::new(permits),
                 subprocess,
             ),
+            hide_unranked_authors: DEFAULT_HIDE_UNRANKED_AUTHORS,
         }
+    }
+
+    /// Overrides the `[api] hide_unranked_authors` default.
+    pub fn with_hide_unranked_authors(mut self, hide_unranked_authors: bool) -> Self {
+        self.hide_unranked_authors = hide_unranked_authors;
+        self
     }
 }
 
@@ -123,7 +133,8 @@ pub fn routes(ctx: &ApiContext, shutdown_rx: Receiver<bool>) -> Router {
         MediaSubprocess::new(Duration::from_secs(
             ctx.api_config.stack.media.process_timeout_secs,
         )),
-    );
+    )
+    .with_hide_unranked_authors(ctx.api_config.hide_unranked_authors);
 
     let app_routes = app_routes(state.clone(), &ctx.api_config.rate_limit, shutdown_rx);
 

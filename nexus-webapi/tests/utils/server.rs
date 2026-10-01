@@ -63,6 +63,10 @@ impl TestServiceServer {
             // When we define the sockets, use local port 0 so OS assigns an available port
             public_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             pubky_listen_socket: SocketAddr::from(([127, 0, 0, 1], 0)),
+            // The fixture ranks every user but the wot on-ramp accounts
+            // (docker/test-graph/mocks/trust.cypher), so the suite runs against a
+            // production-shaped ranking.
+            hide_unranked_authors: true,
             ..Default::default()
         };
 

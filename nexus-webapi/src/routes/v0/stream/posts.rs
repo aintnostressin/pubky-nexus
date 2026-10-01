@@ -6,14 +6,16 @@ use crate::routes::v0::endpoints::{
     STREAM_POSTS_BY_IDS_ROUTE, STREAM_POSTS_ROUTE, STREAM_POST_KEYS_ROUTE,
 };
 use crate::routes::v0::types::parse_string_to_u8;
+use crate::routes::AppState;
 use crate::routes::Json as RequestJson;
 use crate::routes::Query;
 use crate::{Error, Result as AppResult};
+use axum::extract::State;
 use axum::Json;
 use nexus_common::db::kv::SortOrder;
 use nexus_common::types::StreamSorting;
 use nexus_common::{
-    models::post::{KindFilter, PostKeyStream, PostStream, StreamSource},
+    models::post::{KindFilter, PostKeyStream, PostStream, StreamSource, TrustFilter},
     types::{DomainTrust, WotDepth},
 };
 use pubky_app_specs::PubkyAppPostKind;
@@ -231,6 +233,14 @@ impl PostStreamQuery {
         }
     }
 
+    /// The trust filter for this request when the switch is on, decided on its
+    /// `viewer_id` (see [`TrustFilter`]).
+    pub fn trust_filter(&self, hide_unranked_authors: bool) -> Option<TrustFilter> {
+        hide_unranked_authors.then(|| TrustFilter {
+            viewer_id: self.viewer_id.as_ref().map(ToString::to_string),
+        })
+    }
+
     pub fn extract_stream_params(&self) -> AppResult<(StreamSource, StreamSorting, SortOrder)> {
         Ok((
             self.build_source()?,
@@ -336,6 +346,7 @@ The `source` parameter determines the type of stream. Depending on the `source`,
 Ensure that you provide the necessary parameters based on the selected `source`. If a required parameter is missing, a 400 Bad Request error will be returned."#
 )]
 pub async fn stream_posts_handler(
+    State(app_state): State<AppState>,
     Query(mut query): Query<PostStreamQuery>,
 ) -> AppResult<Json<PostStreamDetailed>> {
     debug!("GET {STREAM_POSTS_ROUTE}");
@@ -355,6 +366,7 @@ pub async fn stream_posts_handler(
         query.viewer_id.as_deref(),
         tags,
         query.kind_filter(),
+        query.trust_filter(app_state.hide_unranked_authors),
     )
     .await?
     {
@@ -409,6 +421,7 @@ The `source` parameter determines the type of stream. Depending on the `source`,
 Ensure that you provide the necessary parameters based on the selected `source`. If a required parameter is missing, a 400 Bad Request error will be returned."#
 )]
 pub async fn stream_post_keys_handler(
+    State(app_state): State<AppState>,
     Query(mut query): Query<PostStreamQuery>,
 ) -> AppResult<Json<PostKeyStream>> {
     debug!("GET {STREAM_POST_KEYS_ROUTE}");
@@ -426,6 +439,7 @@ pub async fn stream_post_keys_handler(
         sorting,
         tags,
         query.kind_filter(),
+        query.trust_filter(app_state.hide_unranked_authors),
     )
     .await?
     {

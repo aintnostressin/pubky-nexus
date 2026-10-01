@@ -6,7 +6,7 @@ mod trust_recompute;
 
 pub use hot_tags::HotTagsCacheJob;
 pub use influencers::InfluencersCacheJob;
-pub use trust_recompute::TrustRecomputeJob;
+pub use trust_recompute::{TrustRecomputeJob, TRUST_RECOMPUTE_JOB_NAME};
 
 use std::sync::Arc;
 

@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use super::ranked::{
+    self, RankedLayout, RankedRebuildStats, RankedState, TrustMode, POST_RANKED_TIMELINE_KEY_PARTS,
+};
 use super::{collection_item_keys, Bookmark, PostCounts, PostDetails, PostView};
 use crate::db::kv::{RedisResult, ScoreAction, SortOrder};
 use crate::db::{get_neo4j_graph, queries, GraphError, GraphResult, RedisOps};
@@ -167,6 +170,17 @@ pub enum KindFilter {
     Exclude(Vec<PubkyAppPostKind>),
 }
 
+/// Hides posts by authors outside the trust ranking from `source=all` with
+/// `sorting=timeline`; every other source and sorting ignores it. Applies only
+/// once a ranking exists.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TrustFilter {
+    /// The viewer the decision rests on. A viewer outside the ranking,
+    /// including one Nexus does not know, gets the unfiltered stream; no viewer
+    /// gets the filtered one.
+    pub viewer_id: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, ToSchema, Debug, Default, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct PostKeyStream {
@@ -203,6 +217,9 @@ impl PostStream {
     pub fn extend(&mut self, post_stream: PostStream) {
         self.0.extend(post_stream.0);
     }
+    /// `viewer_id` sets the relationship flags on the returned posts;
+    /// `trust_filter` (see [`TrustFilter`]) carries its own viewer.
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_posts(
         source: StreamSource,
         pagination: Pagination,
@@ -211,9 +228,11 @@ impl PostStream {
         viewer_id: Option<&str>,
         tags: Option<Vec<String>>,
         kind: Option<KindFilter>,
+        trust_filter: Option<TrustFilter>,
     ) -> ModelResult<Option<Self>> {
         let post_key_stream =
-            Self::collect_post_keys(source, pagination, order, sorting, tags, kind).await?;
+            Self::collect_post_keys(source, pagination, order, sorting, tags, kind, trust_filter)
+                .await?;
 
         if post_key_stream.is_empty() {
             return Ok(None);
@@ -229,9 +248,11 @@ impl PostStream {
         sorting: StreamSorting,
         tags: Option<Vec<String>>,
         kind: Option<KindFilter>,
+        trust_filter: Option<TrustFilter>,
     ) -> ModelResult<Option<PostKeyStream>> {
         let post_key_stream =
-            Self::collect_post_keys(source, pagination, order, sorting, tags, kind).await?;
+            Self::collect_post_keys(source, pagination, order, sorting, tags, kind, trust_filter)
+                .await?;
 
         if post_key_stream.is_empty() {
             return Ok(None);
@@ -247,6 +268,7 @@ impl PostStream {
         sorting: StreamSorting,
         tags: Option<Vec<String>>,
         kind: Option<KindFilter>,
+        trust_filter: Option<TrustFilter>,
     ) -> ModelResult<PostKeyStream> {
         // Collection has its own envelope-driven resolution path (neither
         // sorted-set index nor Cypher).
@@ -269,13 +291,24 @@ impl PostStream {
 
         // Decide whether to use index or fallback to graph query
         let use_index = Self::can_use_index(&sorting, &source, &tags, &kind);
+        let trust_mode = Self::trust_mode(&source, &sorting, trust_filter.as_ref()).await?;
 
         let started = std::time::Instant::now();
         let result: ModelResult<PostKeyStream> = match use_index {
-            true => Self::get_from_index(source, sorting, order, &tags, pagination).await,
-            false => Self::get_from_graph(source, sorting, order, &tags, pagination, kind)
-                .await
-                .map_err(Into::into),
+            true => {
+                Self::get_from_index(source, sorting, order, &tags, pagination, trust_mode).await
+            }
+            false => Self::get_from_graph(
+                source,
+                sorting,
+                order,
+                &tags,
+                pagination,
+                kind,
+                trust_mode != TrustMode::Off,
+            )
+            .await
+            .map_err(Into::into),
         };
 
         // Record duration on both success and error paths, so timeouts / DB errors
@@ -316,7 +349,7 @@ impl PostStream {
 
         let started = std::time::Instant::now();
         let result: ModelResult<Vec<(String, f64)>> =
-            Self::get_scored_from_graph(source, sorting, order, &tags, pagination, None)
+            Self::get_scored_from_graph(source, sorting, order, &tags, pagination, None, false)
                 .await
                 .map_err(Into::into);
 
@@ -346,6 +379,48 @@ impl PostStream {
             )),
             _ => None,
         }
+    }
+
+    /// How the trust ranking applies to this request. Only `source=all` with
+    /// `sorting=timeline` is in scope, and only when a [`TrustFilter`] is given.
+    async fn trust_mode(
+        source: &StreamSource,
+        sorting: &StreamSorting,
+        trust_filter: Option<&TrustFilter>,
+    ) -> ModelResult<TrustMode> {
+        let Some(trust_filter) = trust_filter else {
+            return Ok(TrustMode::Off);
+        };
+        if !matches!(source, StreamSource::All) || *sorting != StreamSorting::Timeline {
+            return Ok(TrustMode::Off);
+        }
+        let state = RankedState::load(
+            RankedLayout::production(),
+            trust_filter.viewer_id.as_deref(),
+        )
+        .await?;
+        Ok(state.mode())
+    }
+
+    /// Rebuilds the ranked timeline sets from the current trust ranking, or
+    /// drops them when there is none. Run after every ranking publish.
+    ///
+    /// # Errors
+    /// Returns an error when a Redis call fails or another rebuild holds the
+    /// lock for longer than the wait allows.
+    pub async fn rebuild_ranked_sets() -> ModelResult<RankedRebuildStats> {
+        let started = std::time::Instant::now();
+        let stats = ranked::rebuild(RankedLayout::production()).await?;
+        tracing::info!(
+            sets = stats.sets,
+            scanned = stats.scanned,
+            copied = stats.copied,
+            orphans = stats.orphans,
+            dropped = stats.dropped,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Ranked timeline sets rebuilt"
+        );
+        Ok(stats)
     }
 
     // Determine if we have a quick access sorted set for this combination
@@ -387,20 +462,33 @@ impl PostStream {
         order: SortOrder,
         tags: &Option<Vec<String>>,
         pagination: Pagination,
+        trust_mode: TrustMode,
     ) -> ModelResult<PostKeyStream> {
         let start = pagination.start;
         let end = pagination.end;
         let skip = pagination.skip;
         let limit = pagination.limit;
 
+        // Only the `source=all` arms below have ranked sets; `trust_mode` is
+        // `Off` for every other source.
+        let ranked = match trust_mode {
+            TrustMode::Ranked => true,
+            TrustMode::Unbuilt => {
+                ranked::record_unbuilt();
+                false
+            }
+            TrustMode::Off => false,
+        };
+
         let result = match (source, tags) {
             // Global post streams
             (StreamSource::All, None) => {
-                Self::get_global_posts_keys(sorting, order, start, end, skip, limit).await?
+                Self::get_global_posts_keys(sorting, order, start, end, skip, limit, ranked).await?
             }
             // Streams by tags
             (StreamSource::All, Some(tags)) if tags.len() == 1 => {
-                Self::get_posts_keys_by_tag(&tags[0], sorting, start, end, skip, limit).await?
+                Self::get_posts_keys_by_tag(&tags[0], sorting, start, end, skip, limit, ranked)
+                    .await?
             }
             // Bookmark streams
             (StreamSource::Bookmarks { observer_id }, None) => {
@@ -469,8 +557,9 @@ impl PostStream {
         tags: &Option<Vec<String>>,
         pagination: Pagination,
         kind: Option<KindFilter>,
+        trust_rule: bool,
     ) -> GraphResult<PostKeyStream> {
-        Self::get_scored_from_graph(source, sorting, order, tags, pagination, kind)
+        Self::get_scored_from_graph(source, sorting, order, tags, pagination, kind, trust_rule)
             .await
             .map(PostKeyStream::from_scored_entries)
     }
@@ -482,9 +571,11 @@ impl PostStream {
         tags: &Option<Vec<String>>,
         pagination: Pagination,
         kind: Option<KindFilter>,
+        trust_rule: bool,
     ) -> GraphResult<Vec<(String, f64)>> {
         let graph = get_neo4j_graph()?;
-        let query = queries::get::post_stream(source, sorting, order, tags, pagination, kind)?;
+        let query =
+            queries::get::post_stream(source, sorting, order, tags, pagination, kind, trust_rule)?;
 
         // The 10-second budget covers execution AND row streaming: execute()
         // only submits the query and the heavy work (ORDER BY materializes at
@@ -508,6 +599,8 @@ impl PostStream {
         .map_err(|_| GraphError::QueryTimeout)?
     }
 
+    /// `ranked` reads the timeline's ranked copy (authors in the trust ranking
+    /// only). It has no effect on the engagement sort, which has no ranked copy.
     pub async fn get_global_posts_keys(
         sorting: StreamSorting,
         order: SortOrder,
@@ -515,6 +608,7 @@ impl PostStream {
         end: Option<f64>,
         skip: Option<usize>,
         limit: Option<usize>,
+        ranked: bool,
     ) -> RedisResult<PostKeyStream> {
         let sorted_set = match sorting {
             StreamSorting::TotalEngagement => {
@@ -530,16 +624,12 @@ impl PostStream {
                 .await?
             }
             StreamSorting::Timeline => {
-                Self::try_from_index_sorted_set(
-                    &POST_TIMELINE_KEY_PARTS,
-                    start,
-                    end,
-                    skip,
-                    limit,
-                    order,
-                    None,
-                )
-                .await?
+                let key_parts: &[&str] = match ranked {
+                    true => &POST_RANKED_TIMELINE_KEY_PARTS,
+                    false => &POST_TIMELINE_KEY_PARTS,
+                };
+                Self::try_from_index_sorted_set(key_parts, start, end, skip, limit, order, None)
+                    .await?
             }
         };
         Ok(PostKeyStream::from_scored_entries(
@@ -547,6 +637,8 @@ impl PostStream {
         ))
     }
 
+    /// `ranked` reads the label's ranked timeline (authors in the trust ranking
+    /// only); it is only ever set for the timeline sort.
     pub async fn get_posts_keys_by_tag(
         label: &str,
         sorting: StreamSorting,
@@ -554,6 +646,7 @@ impl PostStream {
         end: Option<f64>,
         skip: Option<usize>,
         limit: Option<usize>,
+        ranked: bool,
     ) -> RedisResult<PostKeyStream> {
         let skip = skip.unwrap_or(0);
         let limit = limit.unwrap_or(10);
@@ -565,7 +658,10 @@ impl PostStream {
             limit: Some(limit),
         };
 
-        let post_search_result = PostsByTagSearch::get_by_label(label, Some(sorting), pag).await?;
+        let post_search_result = match ranked {
+            true => PostsByTagSearch::get_ranked_by_label(label, pag).await?,
+            false => PostsByTagSearch::get_by_label(label, Some(sorting), pag).await?,
+        };
 
         let stream = match post_search_result {
             Some(post_keys) => {
@@ -810,7 +906,8 @@ impl PostStream {
         Ok(Some(Self(post_views)))
     }
 
-    /// Adds the post to a Redis sorted set using the `indexed_at` timestamp as the score.
+    /// Adds the post to the global timeline using the `indexed_at` timestamp as
+    /// the score, and to its ranked copy when the author is in the trust ranking.
     pub async fn add_to_timeline_sorted_set(details: &PostDetails) -> RedisResult<()> {
         let element = format!("{}:{}", details.author, details.id);
         let score = details.indexed_at as f64;
@@ -820,17 +917,20 @@ impl PostStream {
             None,
             None,
         )
-        .await
+        .await?;
+        let layout = RankedLayout::production();
+        ranked::mirror_add(&layout.trust, &layout.global, &details.author, &element).await
     }
 
-    /// Adds the post to a Redis sorted set using the `indexed_at` timestamp as the score.
+    /// Removes the post from the global timeline and its ranked copy.
     pub async fn remove_from_timeline_sorted_set(
         author_id: &str,
         post_id: &str,
     ) -> RedisResult<()> {
         let element = format!("{author_id}:{post_id}");
         Self::remove_from_index_sorted_set(None, &POST_TIMELINE_KEY_PARTS, &[element.as_str()])
-            .await
+            .await?;
+        ranked::mirror_remove(&RankedLayout::production().global, &element).await
     }
 
     /// Adds the post to a Redis sorted set using the `indexed_at` timestamp as the score.
@@ -1002,6 +1102,30 @@ mod tests {
             let source = StreamSource::from_reach(observer(), reach);
             assert_eq!(source.get_observer(), Some("observer"));
             assert_eq!(source, expected);
+        }
+    }
+
+    /// Out of scope, or without a filter, the decision needs no Redis read.
+    #[tokio::test]
+    async fn test_trust_mode_is_off_outside_all_timeline() {
+        let filter = TrustFilter::default();
+        let author = StreamSource::Author {
+            author_id: "author".to_string(),
+        };
+        let cases = [
+            (StreamSource::All, StreamSorting::Timeline, None),
+            (
+                StreamSource::All,
+                StreamSorting::TotalEngagement,
+                Some(&filter),
+            ),
+            (author, StreamSorting::Timeline, Some(&filter)),
+        ];
+        for (source, sorting, trust_filter) in cases {
+            let mode = PostStream::trust_mode(&source, &sorting, trust_filter)
+                .await
+                .expect("decided without Redis");
+            assert_eq!(mode, TrustMode::Off, "{source:?} {sorting:?}");
         }
     }
 

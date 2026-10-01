@@ -10,10 +10,18 @@
 
 [test-groups]
 influencers-sorted-set = { max-threads = 1 }
+ranked-sets = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'test(=stream::user::influencers::test_global_influencers) | test(=stream::user::influencers::test_global_influencers_skip_limit) | test(=stream::user::influencers::test_global_influencers_alltime_cache_recovery) | test(=stream::user::influencers::test_global_influencers_preview)'
 test-group = 'influencers-sorted-set'
+
+# test_social_graph_status deletes and rebuilds the shared Sorted:Users:SocialGraph
+# ranking. While it is gone, source=all serves everyone unfiltered, so the tests
+# asserting that unranked authors are hidden must never overlap that window.
+[[profile.default.overrides]]
+filter = 'test(=user::views::test_social_graph_status) | test(/^stream::post::ranked::/)'
+test-group = 'ranked-sets'
 
 # nexusd/tests/cache_setup/main.rs calls clear_redis(), which issues FLUSHDB
 # against the shared Redis instance. It must not overlap with any other test in
