@@ -1,10 +1,11 @@
 use async_trait::async_trait;
-use nexus_common::db::{new_lock_token, release_lock, try_acquire_lock, RedisError};
+use nexus_common::db::{release_lock, try_acquire_lock, RedisError};
 use nexus_common::utils::ms;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::{global, KeyValue};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::timeout;
 
 use super::error::{LockError, LockResult};
@@ -57,22 +58,45 @@ impl From<RedisError> for LockError {
     }
 }
 
-/// Redis-backed [`RunLock`] used in production.
-#[derive(Default)]
-pub struct RedisRunLock;
+/// Redis-backed [`RunLock`] used in production. Construct once per process (via
+/// [`new`](Self::new)) and share the `Arc`: the token counter is per-instance,
+/// so a second instance would restart it and could mint a colliding token.
+pub struct RedisRunLock {
+    // pid can be reused after a process exits, so mix in the start time to keep
+    // tokens distinct across pid reuse (a cross-process concern).
+    seed: u128,
+    counter: AtomicU64,
+}
 
 impl RedisRunLock {
     pub fn new() -> Self {
-        Self
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        Self {
+            seed,
+            counter: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Default for RedisRunLock {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait]
 impl RunLock for RedisRunLock {
-    /// A token unique per acquisition, from the scheme every Nexus lock shares
-    /// (see [`new_lock_token`]).
+    /// A token unique per acquisition within this process: `<pid>-<seed>-<counter>`.
     fn new_token(&self) -> String {
-        new_lock_token()
+        format!(
+            "{}-{}-{}",
+            std::process::id(),
+            self.seed,
+            self.counter.fetch_add(1, Ordering::Relaxed),
+        )
     }
 
     async fn acquire(&self, job: &str, token: &str) -> LockResult<bool> {

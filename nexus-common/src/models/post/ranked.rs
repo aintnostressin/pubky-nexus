@@ -21,7 +21,6 @@
 
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
 
 use deadpool_redis::Connection;
 use redis::{AsyncCommands, Script};
@@ -29,7 +28,7 @@ use redis::{AsyncCommands, Script};
 use super::search::TAG_GLOBAL_POST_TIMELINE;
 use super::stream::POST_TIMELINE_KEY_PARTS;
 use crate::db::get_redis_conn;
-use crate::db::kv::{LockLease, RedisError, RedisResult, SORTED_PREFIX};
+use crate::db::kv::{RedisResult, SORTED_PREFIX};
 use crate::models::user::USER_SOCIAL_GRAPH_KEY_PARTS;
 
 /// Ranked copy of the global timeline: `Sorted:Posts:Ranked:Timeline`.
@@ -40,25 +39,12 @@ pub const POST_RANKED_TIMELINE_KEY_PARTS: [&str; 3] = ["Posts", "Ranked", "Timel
 pub const TAG_RANKED_POST_TIMELINE: [&str; 4] = ["Tags", "Ranked", "Post", "Timeline"];
 /// Set once a complete rebuild has run; readers trust the ranked sets only then.
 const BUILT_AT_KEY: &str = "Ranked:Timeline:BuiltAt";
-/// Serializes rebuilds.
-const REBUILD_LOCK_KEY: &str = "lock:ranked-timeline-rebuild";
 
 /// Members per `ZSCAN` page, the most a rebuild call touches. Sized so a call
 /// stays well under 10 ms of Redis time: at 200k root posts the slowest took 3 ms.
 const BATCH: usize = 500;
 /// Keys per `SCAN` page when listing labels; cheap per key, so larger.
 const SCAN_COUNT: usize = 1_000;
-/// How long the lock outlives a rebuild that stops renewing it, such as one
-/// whose process was killed. Well under [`LOCK_WAIT`], so a waiting rebuild
-/// outlasts a lock left behind.
-const LOCK_TTL_SECS: u64 = 300;
-/// How often a running rebuild renews the lock, between sets. A single set has
-/// at least the TTL minus this to finish; the global one takes about 5 s at a
-/// million posts.
-const LOCK_RENEW: Duration = Duration::from_secs(60);
-/// How long a rebuild waits for a running one before giving up.
-const LOCK_WAIT: Duration = Duration::from_secs(15 * 60);
-const LOCK_POLL: Duration = Duration::from_secs(1);
 
 /// The key of the sorted set at `parts`.
 fn sorted_key(parts: &[&str]) -> String {
@@ -97,72 +83,21 @@ impl RankedSet {
 }
 
 /// Rebuilds every ranked set from the current ranking, or drops them all when
-/// there is no ranking. Waits for a rebuild already running, so the last
-/// ranking publish is always followed by a complete rebuild.
+/// there is no ranking. Takes no lock: every page reads the live ranking, so
+/// rebuilds that overlap converge on the same sets. In production only the
+/// trust job rebuilds, one run at a time under its job lock.
 pub(crate) async fn rebuild() -> RedisResult<RankedRebuildStats> {
-    // Armed before the first attempt, so a rebuild cancelled or failing at any
-    // point, the acquire included, still releases the lock.
-    let lock = LockLease::new(REBUILD_LOCK_KEY);
-    let deadline = Instant::now() + LOCK_WAIT;
-    let mut waiting = false;
-    loop {
-        match lock.try_acquire(LOCK_TTL_SECS).await {
-            Ok(true) => break,
-            Ok(false) if Instant::now() < deadline => {
-                if !waiting {
-                    waiting = true;
-                    tracing::warn!(
-                        "Another ranked-set rebuild is running, waiting up to {LOCK_WAIT:?} for it"
-                    );
-                }
-                tokio::time::sleep(LOCK_POLL).await
-            }
-            Ok(false) => {
-                lock.disarm();
-                return Err(RedisError::CommandFailed(
-                    "timed out waiting for another ranked-set rebuild to finish".into(),
-                ));
-            }
-            // The `SET` may have landed with its reply lost.
-            Err(e) => {
-                release(lock).await;
-                return Err(e);
-            }
-        }
-    }
-
-    let result = async {
-        let mut conn = get_redis_conn().await?;
-        rebuild_locked(&mut conn, &lock).await
-    }
-    .await;
-    release(lock).await;
-    result
-}
-
-/// Releases the rebuild lock. A failure only delays the next rebuild until the
-/// TTL frees the lock, so it is logged rather than returned.
-async fn release(lock: LockLease) {
-    if let Err(e) = lock.release().await {
-        tracing::warn!("Could not release the ranked-set rebuild lock, its TTL frees it: {e}");
-    }
-}
-
-async fn rebuild_locked(
-    conn: &mut Connection,
-    lock: &LockLease,
-) -> RedisResult<RankedRebuildStats> {
-    let mut renewed = Instant::now();
+    let mut conn = get_redis_conn().await?;
     let mut stats = RankedRebuildStats::default();
     let trust = ranking_key();
     let trust_exists: bool = conn.exists(&trust).await?;
     if !trust_exists {
-        drop_all(conn).await?;
+        drop_all(&mut conn).await?;
         stats.dropped = true;
         return Ok(stats);
     }
 
-    let tags = scan_tag_keys(conn).await?;
+    let tags = scan_tag_keys(&mut conn).await?;
     // A ranked set normally empties, and so vanishes, with its source; one that
     // outlived its source drifted, and reconciling it against the missing
     // source empties it.
@@ -172,29 +107,12 @@ async fn rebuild_locked(
         .union(&tags.ranked)
         .map(|label| RankedSet::tag(label));
     for set in std::iter::once(RankedSet::global()).chain(labels) {
-        keep_lock(lock, &mut renewed).await?;
-        rebuild_set(conn, &trust, &set, &mut stats).await?;
+        rebuild_set(&mut conn, &trust, &set, &mut stats).await?;
     }
 
     let built_at = chrono::Utc::now().timestamp_millis();
     let _: () = conn.set(BUILT_AT_KEY, built_at).await?;
     Ok(stats)
-}
-
-/// Renews the rebuild lock once [`LOCK_RENEW`] has passed since `renewed`, and
-/// stops the rebuild if the lock was lost: by then another rebuild may hold it,
-/// and that one finishes the job.
-async fn keep_lock(lock: &LockLease, renewed: &mut Instant) -> RedisResult<()> {
-    if renewed.elapsed() < LOCK_RENEW {
-        return Ok(());
-    }
-    if !lock.extend(LOCK_TTL_SECS).await? {
-        return Err(RedisError::CommandFailed(
-            "lost the ranked-set rebuild lock".into(),
-        ));
-    }
-    *renewed = Instant::now();
-    Ok(())
 }
 
 /// Drops every ranked set. The ready marker goes first, so readers fall back
@@ -566,11 +484,11 @@ mod tests {
 
     /// Live tests against the shared Redis and its fixture ranking. Each test
     /// writes only its own labels and authors, and clears them before and
-    /// after. A full rebuild, the lock and the ranking key are shared, so
+    /// after. A full rebuild and the ranking key are shared, so
     /// `.config/nextest.toml` runs each of these alone.
     mod live {
         use super::super::*;
-        use crate::db::kv::{release_lock, try_acquire_lock, RedisOps};
+        use crate::db::kv::RedisOps;
         use crate::models::post::PostStream;
         use crate::types::DynError;
         use crate::{StackConfig, StackManager};
@@ -870,103 +788,25 @@ mod tests {
             cleanup(&labels).await
         }
 
+        /// No lock: two rebuilds running at once still leave every set exact.
         #[tokio_shared_rt::test(shared)]
-        async fn rebuild_waits_for_a_running_rebuild() -> TestResult {
-            let label = "test-ranked-lock";
+        async fn overlapping_rebuilds_converge() -> TestResult {
+            let label = "test-ranked-overlap";
             setup(&[label]).await?;
             rank(&[ALICE]).await?;
             let set = RankedSet::tag(label);
-            zadd(&set.source, &[(1.0, "test-ranked-alice:p1")]).await?;
-            let holder = "test-ranked-other-rebuild";
-            assert!(
-                try_acquire_lock(REBUILD_LOCK_KEY, holder, 60).await?,
-                "another rebuild holds the lock"
-            );
+            let posts: Vec<String> = (0..1_200).map(|i| format!("{ALICE}:P{i:05}")).collect();
+            let mut entries: Vec<(f64, &str)> = posts.iter().map(|m| (1.0, m.as_str())).collect();
+            entries.push((2.0, "test-ranked-bob:p1"));
+            zadd(&set.source, &entries).await?;
 
-            let handle = tokio::spawn(rebuild());
-            tokio::time::sleep(Duration::from_millis(1_500)).await;
-            let waited = !handle.is_finished();
-            let built_early = exists(&set.ranked).await;
-            release_lock(REBUILD_LOCK_KEY, holder).await?;
-            handle.await??;
+            let (first, second) = tokio::join!(rebuild(), rebuild());
+            first?;
+            second?;
 
-            assert!(waited, "rebuild must wait for the lock holder");
-            assert!(!built_early?);
-            assert_eq!(
-                members(&set.ranked).await?,
-                owned(&[("test-ranked-alice:p1", 1.0)])
-            );
-            assert!(
-                !exists(REBUILD_LOCK_KEY).await?,
-                "the lock is released after the rebuild"
-            );
+            let ranked: Vec<(String, f64)> = posts.iter().map(|m| (m.clone(), 1.0)).collect();
+            assert_eq!(members(&set.ranked).await?, ranked);
             cleanup(&[label]).await
-        }
-
-        /// A rebuild cancelled while it holds the lock, as when the trust job is
-        /// dropped at shutdown or at its deadline, still releases it. The big
-        /// label keeps the rebuild running long enough to cancel it midway.
-        #[tokio_shared_rt::test(shared)]
-        async fn a_cancelled_rebuild_releases_the_lock() -> TestResult {
-            let label = "test-ranked-cancel";
-            setup(&[label]).await?;
-            rank(&[ALICE]).await?;
-            let posts: Vec<String> = (0..20_000).map(|i| format!("{ALICE}:P{i:05}")).collect();
-            let entries: Vec<(f64, &str)> = posts.iter().map(|m| (1.0, m.as_str())).collect();
-            zadd(&RankedSet::tag(label).source, &entries).await?;
-
-            let handle = tokio::spawn(rebuild());
-            while !exists(REBUILD_LOCK_KEY).await? && !handle.is_finished() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            handle.abort();
-            let cancelled = handle.await.err().is_some_and(|e| e.is_cancelled());
-            let mut released = false;
-            for _ in 0..100 {
-                if !exists(REBUILD_LOCK_KEY).await? {
-                    released = true;
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            if !released {
-                // Unblocks the rebuilds after this test before failing it.
-                let mut conn = get_redis_conn().await?;
-                let _: () = conn.del(REBUILD_LOCK_KEY).await?;
-            }
-            // Finishes the ranked sets the cancelled rebuild left half done.
-            rebuild().await?;
-
-            assert!(cancelled, "the rebuild finished before it was cancelled");
-            assert!(released, "a cancelled rebuild left the lock held");
-            cleanup(&[label]).await
-        }
-
-        /// Once the renewal interval has passed the lock is renewed, and a lost
-        /// lock stops the rebuild.
-        #[tokio_shared_rt::test(shared)]
-        async fn keep_lock_renews_and_stops_once_the_lock_is_lost() -> TestResult {
-            setup(&[]).await?;
-            let key = "test-ranked-lock-renewal";
-            let mut conn = get_redis_conn().await?;
-            let _: () = conn.del(key).await?;
-            let lease = LockLease::new(key);
-            assert!(lease.try_acquire(5).await?);
-            let due = || {
-                Instant::now()
-                    .checked_sub(LOCK_RENEW)
-                    .ok_or("the monotonic clock is too young")
-            };
-
-            keep_lock(&lease, &mut due()?).await?;
-            let ttl: i64 = conn.ttl(key).await?;
-            let _: () = conn.del(key).await?;
-            let lost = keep_lock(&lease, &mut due()?).await;
-            lease.disarm();
-
-            assert!(ttl > 5, "renewed to the rebuild TTL, got {ttl}");
-            assert!(lost.is_err(), "a lost lock must stop the rebuild");
-            Ok(())
         }
 
         /// The marker and the ranking are restored before anything is asserted.

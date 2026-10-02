@@ -410,8 +410,7 @@ impl PostStream {
     /// drops them when there is none. Run after every ranking publish.
     ///
     /// # Errors
-    /// Returns an error when a Redis call fails or another rebuild holds the
-    /// lock for longer than the wait allows.
+    /// Returns an error when a Redis call fails.
     pub async fn rebuild_ranked_sets() -> ModelResult<()> {
         let started = std::time::Instant::now();
         let stats = ranked::rebuild().await?;
