@@ -173,7 +173,7 @@ pub enum KindFilter {
 /// Hides posts by authors outside the trust ranking from `source=all` with
 /// `sorting=timeline`; every other source and sorting ignores it. Applies only
 /// once a ranking exists.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct TrustFilter {
     /// The viewer the decision rests on. A viewer outside the ranking,
     /// including one Nexus does not know, gets the unfiltered stream; no viewer
@@ -397,13 +397,12 @@ impl PostStream {
         sorting: &StreamSorting,
         trust_filter: Option<&TrustFilter>,
     ) -> ModelResult<TrustMode> {
-        let Some(trust_filter) = trust_filter else {
-            return Ok(TrustMode::Off);
-        };
-        if !matches!(source, StreamSource::All) || *sorting != StreamSorting::Timeline {
-            return Ok(TrustMode::Off);
+        match (source, sorting, trust_filter) {
+            (StreamSource::All, StreamSorting::Timeline, Some(filter)) => {
+                Ok(TrustMode::load(filter.viewer_id.as_deref()).await?)
+            }
+            _ => Ok(TrustMode::Off),
         }
-        Ok(TrustMode::load(trust_filter.viewer_id.as_deref()).await?)
     }
 
     /// Rebuilds the ranked timeline sets from the current trust ranking, or
@@ -473,26 +472,33 @@ impl PostStream {
         let skip = pagination.skip;
         let limit = pagination.limit;
 
-        // Only the `source=all` arms below have ranked sets; `trust_mode` is
-        // `Off` for every other source.
-        let ranked = trust_mode == TrustMode::Ranked;
+        // `Ranked` implies `source=all` with `sorting=timeline` (see `trust_mode`):
+        // read the ranked copy of the global timeline, or of the one label's.
+        if trust_mode == TrustMode::Ranked {
+            let (key_parts, order, limit) = match tags.as_deref() {
+                None => (POST_RANKED_TIMELINE_KEY_PARTS.to_vec(), order, limit),
+                // Newest first with the page default of `get_posts_keys_by_tag`.
+                Some([tag]) => (
+                    [&TAG_RANKED_POST_TIMELINE[..], &[tag.as_str()]].concat(),
+                    SortOrder::Descending,
+                    limit.or(Some(10)),
+                ),
+                Some(_) => return Ok(PostKeyStream::default()),
+            };
+            let entries =
+                Self::try_from_index_sorted_set(&key_parts, start, end, skip, limit, order, None)
+                    .await?;
+            return Ok(PostKeyStream::from_scored_entries(
+                entries.unwrap_or_default(),
+            ));
+        }
 
         let result = match (source, tags) {
             // Global post streams
-            (StreamSource::All, None) if ranked => {
-                let key_parts = &POST_RANKED_TIMELINE_KEY_PARTS;
-                Self::get_ranked_posts_keys(key_parts, order, start, end, skip, limit).await?
-            }
             (StreamSource::All, None) => {
                 Self::get_global_posts_keys(sorting, order, start, end, skip, limit).await?
             }
-            // Streams by tags, newest first with the page defaults of `get_posts_keys_by_tag`
-            (StreamSource::All, Some(tags)) if tags.len() == 1 && ranked => {
-                let key_parts = [&TAG_RANKED_POST_TIMELINE[..], &[tags[0].as_str()]].concat();
-                let (skip, limit) = (Some(skip.unwrap_or(0)), Some(limit.unwrap_or(10)));
-                let order = SortOrder::Descending;
-                Self::get_ranked_posts_keys(&key_parts, order, start, end, skip, limit).await?
-            }
+            // Streams by tags
             (StreamSource::All, Some(tags)) if tags.len() == 1 => {
                 Self::get_posts_keys_by_tag(&tags[0], sorting, start, end, skip, limit).await?
             }
@@ -678,24 +684,6 @@ impl PostStream {
         };
 
         Ok(stream)
-    }
-
-    /// A page of the ranked timeline at `key_parts`: the posts of its source
-    /// timeline whose author is in the trust ranking, read like the source.
-    async fn get_ranked_posts_keys(
-        key_parts: &[&str],
-        order: SortOrder,
-        start: Option<f64>,
-        end: Option<f64>,
-        skip: Option<usize>,
-        limit: Option<usize>,
-    ) -> RedisResult<PostKeyStream> {
-        let sorted_set =
-            Self::try_from_index_sorted_set(key_parts, start, end, skip, limit, order, None)
-                .await?;
-        Ok(PostKeyStream::from_scored_entries(
-            sorted_set.unwrap_or_default(),
-        ))
     }
 
     pub async fn get_author_posts(

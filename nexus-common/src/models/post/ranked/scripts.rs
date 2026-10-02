@@ -40,9 +40,9 @@ pub(super) static ADD: LazyLock<Script> = LazyLock::new(|| {
         &[
             LUA_HELPERS,
             r"redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1])
-              if not ranked_flags({ARGV[1]})[1] then return 0 end
-              redis.call('ZADD', KEYS[3], ARGV[2], ARGV[1])
-              return 1",
+              if ranked_flags({ARGV[1]})[1] then
+                  redis.call('ZADD', KEYS[3], ARGV[2], ARGV[1])
+              end",
         ]
         .concat(),
     )

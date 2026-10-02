@@ -13,12 +13,12 @@
 //! These tests depend on the ranking key existing, which `test_social_graph_status`
 //! briefly deletes; `.config/nextest.toml` runs that test alone.
 use crate::utils::get_request;
+use crate::utils::search_reach::UNKNOWN_USER;
 use crate::utils::server::TestServiceServer;
 use anyhow::Result;
 use nexus_common::db::kv::SortOrder;
 use nexus_common::models::post::{KindFilter, PostStream, StreamSource};
 use nexus_common::types::{Pagination, StreamSorting};
-use nexus_common::utils::test_utils::random_pubky_id;
 use pubky_app_specs::PubkyAppPostKind;
 use serde_json::Value;
 
@@ -65,11 +65,6 @@ fn post_keys_in(response: &Value) -> Vec<String> {
         .collect()
 }
 
-/// A valid pubky id Nexus has never seen.
-fn unknown_viewer() -> String {
-    random_pubky_id().to_string()
-}
-
 /// The wot window, newest first, one page of 50.
 fn window_page() -> Pagination {
     Pagination {
@@ -111,16 +106,30 @@ async fn unfiltered_keys(
     Ok(stream.map(|stream| stream.post_keys).unwrap_or_default())
 }
 
-/// No viewer: the Redis path, its keys route, and the hydrated route all
-/// serve only the ranked authors.
+/// No viewer: every shape serves only the ranked authors, on the keys route and
+/// the hydrated one. The plain stream reads the ranked set; `kind`,
+/// `exclude_kinds` and several tags go to Cypher, which keeps authors with a
+/// positive trust score.
 #[tokio_shared_rt::test(shared)]
 async fn test_all_timeline_hides_unranked_authors() -> Result<()> {
-    let page = keys(&format!("{WINDOW}&start={WINDOW_START}&limit=50")).await?;
-    assert_eq!(post_keys_in(&page), ranked_window_keys());
-    assert_eq!(page["last_post_score"], Value::from(1650000000002_u64));
+    for shape in ["", "&kind=short", "&exclude_kinds=long"] {
+        let page = keys(&format!("{WINDOW}{shape}&start={WINDOW_START}&limit=50")).await?;
+        assert_eq!(post_keys_in(&page), ranked_window_keys(), "{shape}");
+        let cursor = Value::from(1650000000002_u64);
+        assert_eq!(page["last_post_score"], cursor, "{shape}");
 
-    let page = posts(&format!("{WINDOW}&start={WINDOW_START}&limit=50")).await?;
-    assert_eq!(ids_in(&page), [D2_POST, D1B_POST, D1_POST]);
+        let page = posts(&format!("{WINDOW}{shape}&start={WINDOW_START}&limit=50")).await?;
+        assert_eq!(ids_in(&page), [D2_POST, D1B_POST, D1_POST], "{shape}");
+    }
+
+    // Every fixture author tagging these is ranked; this pins that the rule
+    // composes with the tag MATCH rather than emptying the stream.
+    let tags = "tags=bitcoin,opensource&limit=50";
+    let page = keys(&format!("source=all&sorting=timeline&{tags}")).await?;
+    let unfiltered =
+        unfiltered_keys(Some(&["bitcoin", "opensource"]), None, first_page(50)).await?;
+    assert!(!unfiltered.is_empty());
+    assert_eq!(post_keys_in(&page), unfiltered);
     Ok(())
 }
 
@@ -201,29 +210,6 @@ async fn test_single_tag_reads_the_ranked_set() -> Result<()> {
     Ok(())
 }
 
-/// `kind`, `exclude_kinds` and several tags go to Cypher, which keeps authors
-/// with a positive trust score.
-#[tokio_shared_rt::test(shared)]
-async fn test_cypher_shapes_hide_unranked_authors() -> Result<()> {
-    for filter in ["kind=short", "exclude_kinds=long"] {
-        let page = keys(&format!("{WINDOW}&start={WINDOW_START}&{filter}&limit=50")).await?;
-        assert_eq!(post_keys_in(&page), ranked_window_keys(), "{filter}");
-
-        let page = posts(&format!("{WINDOW}&start={WINDOW_START}&{filter}&limit=50")).await?;
-        assert_eq!(ids_in(&page), [D2_POST, D1B_POST, D1_POST], "{filter}");
-    }
-
-    // Every fixture author tagging these is ranked; this pins that the rule
-    // composes with the tag MATCH rather than emptying the stream.
-    let tags = "tags=bitcoin,opensource&limit=50";
-    let page = keys(&format!("source=all&sorting=timeline&{tags}")).await?;
-    let unfiltered =
-        unfiltered_keys(Some(&["bitcoin", "opensource"]), None, first_page(50)).await?;
-    assert!(!unfiltered.is_empty());
-    assert_eq!(post_keys_in(&page), unfiltered);
-    Ok(())
-}
-
 /// A ranked viewer gets the same filtered stream as an anonymous request.
 #[tokio_shared_rt::test(shared)]
 async fn test_ranked_viewer_gets_the_filtered_stream() -> Result<()> {
@@ -260,7 +246,7 @@ async fn test_unranked_and_unknown_viewers_get_the_unfiltered_stream() -> Result
     assert!(short.contains(&spammer_post), "fixture: {short:?}");
     assert_eq!(tagged, [format!("{SPAMMER}:WOTPOSTMODF01")]);
 
-    for viewer in [SPAMMER.to_string(), unknown_viewer()] {
+    for viewer in [SPAMMER, UNKNOWN_USER] {
         let viewer = format!("viewer_id={viewer}");
 
         let page = keys(&format!("{WINDOW}&start={WINDOW_START}&limit=50&{viewer}")).await?;
@@ -285,8 +271,8 @@ async fn test_unranked_and_unknown_viewers_get_the_unfiltered_stream() -> Result
     Ok(())
 }
 
-/// Every other source and sorting is untouched: the engagement sort still
-/// serves an unranked author's post.
+/// Every other source and sorting is untouched: the author stream and the
+/// engagement sort still serve an unranked author's post.
 #[tokio_shared_rt::test(shared)]
 async fn test_out_of_scope_streams_are_unfiltered() -> Result<()> {
     let page = keys(&format!(
@@ -298,22 +284,13 @@ async fn test_out_of_scope_streams_are_unfiltered() -> Result<()> {
         "author stream: {page}"
     );
 
-    // Walk the engagement sort to its end: hidden authors' zero-engagement posts
-    // sit at its tail.
-    let mut skip = 0;
-    let mut found = false;
-    loop {
-        let page = keys(&format!(
-            "source=all&sorting=total_engagement&limit=50&skip={skip}"
-        ))
-        .await?;
-        let page_keys = post_keys_in(&page);
-        found |= page_keys.contains(&format!("{SPAMMER}:{SPAMMER_POST}"));
-        if page_keys.len() < 50 || found {
-            break;
-        }
-        skip += 50;
-    }
-    assert!(found, "the engagement sort must keep unranked authors");
+    // The label that is empty on the timeline sort keeps the spammer's reply on
+    // the engagement sort, which has no ranked sets.
+    let page = keys("source=all&sorting=total_engagement&tags=wmtag1").await?;
+    assert_eq!(
+        post_keys_in(&page),
+        [format!("{SPAMMER}:WOTPOSTMODF01")],
+        "the engagement sort must keep unranked authors"
+    );
     Ok(())
 }

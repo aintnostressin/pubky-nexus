@@ -52,8 +52,8 @@ fn ranking_key() -> String {
     sorted_key(&USER_SOCIAL_GRAPH_KEY_PARTS)
 }
 
-/// One source set and the keys of its ranked copy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A source set and its ranked copy.
+#[derive(Debug)]
 pub(crate) struct RankedSet {
     pub source: String,
     pub ranked: String,
@@ -93,35 +93,32 @@ pub(crate) enum TrustMode {
 impl TrustMode {
     /// Reads the ranking state for one request in one round trip.
     pub async fn load(viewer_id: Option<&str>) -> RedisResult<Self> {
-        let trust = ranking_key();
-        let mut pipe = redis::pipe();
-        pipe.exists(&trust).exists(BUILT_AT_KEY);
+        let ranking = ranking_key();
         let mut conn = get_redis_conn().await?;
-        let (trust_exists, built, viewer_ranked) = match viewer_id {
+        let mut pipe = redis::pipe();
+        pipe.exists(BUILT_AT_KEY);
+        // A viewer's rank also says that a ranking exists.
+        let (built, filtered) = match viewer_id {
             Some(viewer_id) => {
-                pipe.zscore(&trust, viewer_id);
-                let (trust_exists, built, score): (bool, bool, Option<f64>) =
-                    pipe.query_async(&mut conn).await?;
-                (trust_exists, built, Some(score.is_some()))
+                let (built, rank): (bool, Option<f64>) = pipe
+                    .zscore(&ranking, viewer_id)
+                    .query_async(&mut conn)
+                    .await?;
+                (built, rank.is_some())
             }
-            None => {
-                let (trust_exists, built): (bool, bool) = pipe.query_async(&mut conn).await?;
-                (trust_exists, built, None)
-            }
+            None => pipe.exists(&ranking).query_async(&mut conn).await?,
         };
-        Ok(Self::decide(trust_exists, built, viewer_ranked))
+        Ok(Self::decide(filtered, built))
     }
 
-    /// No ranking means no filtering at all. A viewer outside the ranking,
-    /// including one Nexus does not know, gets the unfiltered stream;
-    /// `viewer_ranked` is `None` when the request has no viewer.
-    pub fn decide(trust_exists: bool, built: bool, viewer_ranked: Option<bool>) -> Self {
-        if !trust_exists || viewer_ranked == Some(false) {
-            TrustMode::Off
-        } else if built {
-            TrustMode::Ranked
-        } else {
-            TrustMode::Unbuilt
+    /// `filtered` says whether the filter applies to the request at all: a
+    /// ranking exists and the viewer, if any, is in it. A viewer outside the
+    /// ranking, including one Nexus does not know, gets the unfiltered stream.
+    pub fn decide(filtered: bool, built: bool) -> Self {
+        match (filtered, built) {
+            (false, _) => TrustMode::Off,
+            (true, true) => TrustMode::Ranked,
+            (true, false) => TrustMode::Unbuilt,
         }
     }
 }
@@ -130,7 +127,7 @@ impl TrustMode {
 /// copy when its author is in the ranking.
 pub(crate) async fn add(set: &RankedSet, member: &str, score: f64) -> RedisResult<()> {
     let mut conn = get_redis_conn().await?;
-    let _: i64 = ADD
+    let _: () = ADD
         .key(&set.source)
         .key(ranking_key())
         .key(&set.ranked)

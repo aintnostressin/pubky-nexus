@@ -73,13 +73,7 @@ impl Bootstrap {
     /// - `view_type: ViewType`
     ///   Controls whether to fetch replies and include full stream entries (`Full`)
     ///   or only base posts (`Partial`)
-    /// - `trust_filter: Option<TrustFilter>`
-    ///   Applied to the timeline (see [`TrustFilter`])
-    pub async fn get_by_id(
-        user_id: &str,
-        view_type: ViewType,
-        trust_filter: Option<TrustFilter>,
-    ) -> ModelResult<Self> {
+    pub async fn get_by_id(user_id: &str, view_type: ViewType) -> ModelResult<Self> {
         let mut bootstrap = Self::default();
         let mut user_ids = HashSet::new();
         let mut attachment_uris = HashSet::new();
@@ -92,6 +86,9 @@ impl Bootstrap {
 
         let is_full_view_type = view_type == ViewType::Full;
 
+        // Decided on the requested user even before it is indexed, so a brand-new
+        // account sees the timeline the stream routes would show it.
+        let trust_filter = Some(TrustFilter::for_viewer(Some(user_id)));
         let post_stream_by_timeline =
             Self::get_post_stream_timeline(maybe_viewer_id, StreamSource::All, 20, trust_filter)
                 .await?;

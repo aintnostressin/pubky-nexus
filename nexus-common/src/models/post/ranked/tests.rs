@@ -1,26 +1,11 @@
 use super::*;
 
 #[test]
-fn decide_is_off_without_a_ranking() {
-    for built in [false, true] {
-        for viewer in [None, Some(false), Some(true)] {
-            assert_eq!(TrustMode::decide(false, built, viewer), TrustMode::Off);
-        }
-    }
-}
-
-#[test]
-fn decide_is_off_for_a_viewer_outside_the_ranking() {
-    assert_eq!(TrustMode::decide(true, true, Some(false)), TrustMode::Off);
-    assert_eq!(TrustMode::decide(true, false, Some(false)), TrustMode::Off);
-}
-
-#[test]
-fn decide_filters_anonymous_and_ranked_viewers() {
-    for viewer in [None, Some(true)] {
-        assert_eq!(TrustMode::decide(true, true, viewer), TrustMode::Ranked);
-        assert_eq!(TrustMode::decide(true, false, viewer), TrustMode::Unbuilt);
-    }
+fn decide_covers_every_state() {
+    assert_eq!(TrustMode::decide(false, false), TrustMode::Off);
+    assert_eq!(TrustMode::decide(false, true), TrustMode::Off);
+    assert_eq!(TrustMode::decide(true, true), TrustMode::Ranked);
+    assert_eq!(TrustMode::decide(true, false), TrustMode::Unbuilt);
 }
 
 #[test]
@@ -159,19 +144,24 @@ mod live {
 
     #[tokio_shared_rt::test(shared)]
     async fn rebuild_keeps_ranked_authors_in_every_set() -> TestResult {
-        let labels = ["test-ranked-rebuild-rust", "test-ranked-rebuild-spam"];
+        let labels = [
+            "test-ranked-rebuild-rust",
+            "test-ranked-rebuild-spam",
+            "test-ranked-rebuild-gone",
+        ];
         setup(&labels).await?;
         rank(&[ALICE, CAROL]).await?;
-        let [rust, spam] = labels.map(RankedSet::tag);
+        let [rust, spam, gone] = labels.map(RankedSet::tag);
         zadd(
             &rust.source,
             &[(1.0, "test-ranked-alice:p1"), (2.0, "test-ranked-bob:p2")],
         )
         .await?;
         zadd(&spam.source, &[(9.0, "test-ranked-bob:p9")]).await?;
-        // Drift the rebuild must correct.
+        // Drift the rebuild must correct, a ranked set whose source is gone included.
         zadd(&rust.ranked, &[(2.0, "test-ranked-bob:p2")]).await?;
         zadd(&spam.ranked, &[(9.0, "test-ranked-bob:p9")]).await?;
+        zadd(&gone.ranked, &[(2.0, "test-ranked-alice:p2")]).await?;
 
         let stats = rebuild().await?;
 
@@ -180,6 +170,8 @@ mod live {
             owned(&[("test-ranked-alice:p1", 1.0)])
         );
         assert!(!exists(&spam.ranked).await?);
+        assert!(!exists(&gone.ranked).await?, "orphaned ranked set kept");
+        assert!(stats.orphans >= 1);
         assert!(exists(BUILT_AT_KEY).await?);
         assert!(!stats.dropped);
         // The global set is rebuilt from the fixture: only ranked authors.
@@ -226,7 +218,7 @@ mod live {
 
         let mut conn = get_redis_conn().await?;
         let mut stats = RankedRebuildStats::default();
-        rebuild_set(&mut conn, &ranking_key(), &set, &mut stats).await?;
+        rebuild_set(&mut conn, &set, &mut stats).await?;
 
         let mut expected: Vec<(String, f64)> = posts
             .into_iter()
@@ -254,14 +246,14 @@ mod live {
         zadd(&set.source, &entries).await?;
 
         let mut conn = get_redis_conn().await?;
-        let (mut cursor, ..) = reconcile_page(&mut conn, &ranking_key(), &set, 0).await?;
+        let (mut cursor, ..) = reconcile_page(&mut conn, &set, 0).await?;
         assert_ne!(cursor, 0, "the set spans several pages");
         let reconciled: Vec<String> = conn.zrange(&set.ranked, 0, 0).await?;
         let deleted = reconciled.first().ok_or("nothing reconciled")?;
         remove(&set, deleted).await?;
         add(&set, "test-ranked-alice:NEW", 2.0).await?;
         while cursor != 0 {
-            (cursor, ..) = reconcile_page(&mut conn, &ranking_key(), &set, cursor).await?;
+            (cursor, ..) = reconcile_page(&mut conn, &set, cursor).await?;
         }
 
         let source = members(&set.source).await?;
@@ -285,7 +277,7 @@ mod live {
         zadd(&set.ranked, &stale).await?;
 
         let mut conn = get_redis_conn().await?;
-        let page = reconcile_page(&mut conn, &ranking_key(), &set, 0).await?;
+        let page = reconcile_page(&mut conn, &set, 0).await?;
 
         assert_eq!(page, (0, 2, 1, 2, true));
         assert_eq!(
@@ -305,52 +297,22 @@ mod live {
         let set = RankedSet::tag(label);
         zadd(&set.ranked, &[(1.0, "test-ranked-alice:p1")]).await?;
         let global = RankedSet::global();
+        let mut conn = get_redis_conn().await?;
 
         park_ranking().await?;
         let dropped = rebuild().await;
-        let survivors = async {
-            let mut survivors = Vec::new();
-            for key in [BUILT_AT_KEY, &global.ranked, &set.ranked] {
-                if exists(key).await? {
-                    survivors.push(key.to_string());
-                }
-            }
-            Ok::<_, DynError>(survivors)
-        }
-        .await;
+        let survivors: redis::RedisResult<usize> = conn
+            .exists(&[BUILT_AT_KEY, &global.ranked, &set.ranked])
+            .await;
         let source_kept = exists(&global.source).await;
         restore_ranking().await?;
         rebuild().await?;
 
         assert!(dropped?.dropped);
-        assert!(survivors?.is_empty(), "survived without a ranking");
+        assert_eq!(survivors?, 0, "ranked keys survived without a ranking");
         // The source sets are not the rebuild's to touch.
         assert!(source_kept?);
         cleanup(&[label]).await
-    }
-
-    /// A ranked set whose source is gone is emptied by reconciling it.
-    #[tokio_shared_rt::test(shared)]
-    async fn rebuild_empties_ranked_sets_whose_source_is_gone() -> TestResult {
-        let labels = ["test-ranked-live", "test-ranked-gone"];
-        setup(&labels).await?;
-        rank(&[ALICE]).await?;
-        let [live, gone] = labels.map(RankedSet::tag);
-        zadd(&live.source, &[(1.0, "test-ranked-alice:p1")]).await?;
-        zadd(&gone.ranked, &[(2.0, "test-ranked-alice:p2")]).await?;
-
-        let stats = rebuild().await?;
-
-        assert!(stats.orphans >= 1);
-        assert!(
-            !exists(&gone.ranked).await?,
-            "orphaned ranked set left behind"
-        );
-        assert_eq!(
-            members(&live.ranked).await?,
-            owned(&[("test-ranked-alice:p1", 1.0)])
-        );
-        cleanup(&labels).await
     }
 
     /// No lock: two rebuilds running at once still leave every set exact.
@@ -392,14 +354,19 @@ mod live {
         let _: () = conn.set(BUILT_AT_KEY, built_at).await?;
 
         park_ranking().await?;
-        let no_ranking = TrustMode::load(Some(ALICE)).await;
+        let no_ranking = [
+            TrustMode::load(Some(ALICE)).await,
+            TrustMode::load(None).await,
+        ];
         restore_ranking().await?;
 
         assert_eq!(ranked?, TrustMode::Ranked);
         assert_eq!(anonymous?, TrustMode::Ranked);
         assert_eq!(stranger?, TrustMode::Off);
         assert_eq!(unbuilt?, TrustMode::Unbuilt);
-        assert_eq!(no_ranking?, TrustMode::Off);
+        for mode in no_ranking {
+            assert_eq!(mode?, TrustMode::Off);
+        }
         cleanup(&[]).await
     }
 }

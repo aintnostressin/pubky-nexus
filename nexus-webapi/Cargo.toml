@@ -91,10 +91,6 @@ name = "streams"
 harness = false
 
 [[bench]]
-name = "ranked_rebuild"
-harness = false
-
-[[bench]]
 name = "search"
 harness = false
 

@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use deadpool_redis::Connection;
-use redis::AsyncCommands;
+use redis::{AsyncCommands, ScanOptions};
 
 use super::scripts::{PRUNE, RECONCILE};
 use super::{
@@ -27,9 +27,8 @@ const SCAN_COUNT: usize = 1_000;
 pub(crate) async fn rebuild() -> RedisResult<RankedRebuildStats> {
     let mut conn = get_redis_conn().await?;
     let mut stats = RankedRebuildStats::default();
-    let trust = ranking_key();
-    let trust_exists: bool = conn.exists(&trust).await?;
-    if !trust_exists {
+    let ranking_exists: bool = conn.exists(ranking_key()).await?;
+    if !ranking_exists {
         drop_all(&mut conn).await?;
         stats.dropped = true;
         return Ok(stats);
@@ -45,7 +44,7 @@ pub(crate) async fn rebuild() -> RedisResult<RankedRebuildStats> {
         .union(&tags.ranked)
         .map(|label| RankedSet::tag(label));
     for set in std::iter::once(RankedSet::global()).chain(labels) {
-        rebuild_set(&mut conn, &trust, &set, &mut stats).await?;
+        rebuild_set(&mut conn, &set, &mut stats).await?;
     }
 
     let built_at = chrono::Utc::now().timestamp_millis();
@@ -74,28 +73,18 @@ async fn scan_tag_keys(conn: &mut Connection) -> RedisResult<TagKeys> {
     let [tags_part, _, post_part, timeline_part] = TAG_RANKED_POST_TIMELINE;
     let pattern = format!("{SORTED_PREFIX}:{tags_part}:*:{post_part}:{timeline_part}:*");
 
+    let scan = ScanOptions::default()
+        .with_pattern(pattern)
+        .with_count(SCAN_COUNT);
+    let mut keys = conn.scan_options::<String>(scan).await?;
     let mut tags = TagKeys::default();
-    let mut cursor: u64 = 0;
-    loop {
-        let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(&pattern)
-            .arg("COUNT")
-            .arg(SCAN_COUNT)
-            .query_async(conn)
-            .await?;
-        for key in keys {
-            if let Some(label) = key.strip_prefix(source_prefix.as_str()) {
-                tags.sources.insert(label.to_string());
-            } else if let Some(label) = key.strip_prefix(ranked_prefix.as_str()) {
-                tags.ranked.insert(label.to_string());
-            }
+    while let Some(key) = keys.next_item().await {
+        let key = key?;
+        if let Some(label) = key.strip_prefix(source_prefix.as_str()) {
+            tags.sources.insert(label.to_string());
+        } else if let Some(label) = key.strip_prefix(ranked_prefix.as_str()) {
+            tags.ranked.insert(label.to_string());
         }
-        if next == 0 {
-            break;
-        }
-        cursor = next;
     }
     Ok(tags)
 }
@@ -108,7 +97,7 @@ struct TagKeys {
 }
 
 /// What a rebuild did, for its log line.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub(crate) struct RankedRebuildStats {
     /// Ranked sets rebuilt (the global one plus one per label).
     pub sets: usize,
@@ -126,10 +115,10 @@ pub(crate) struct RankedRebuildStats {
 
 /// Reconciles `set.ranked` with `set.source` in place, a page at a time.
 /// Concurrent writes stay correct: each page is one atomic script, and
-/// [`add`](super::add) and [`remove`](super::remove) keep the copy in step with the source in between.
+/// [`add`](super::add) and [`remove`](super::remove) keep the copy in step with
+/// the source in between.
 pub(super) async fn rebuild_set(
     conn: &mut Connection,
-    trust: &str,
     set: &RankedSet,
     stats: &mut RankedRebuildStats,
 ) -> RedisResult<()> {
@@ -137,8 +126,7 @@ pub(super) async fn rebuild_set(
     let mut pruned = false;
     let mut cursor = 0;
     loop {
-        let (next, scanned, added, removed, small) =
-            reconcile_page(conn, trust, set, cursor).await?;
+        let (next, scanned, added, removed, small) = reconcile_page(conn, set, cursor).await?;
         stats.scanned += scanned;
         stats.added += added;
         stats.removed += removed;
@@ -162,13 +150,12 @@ pub(super) async fn rebuild_set(
 /// `(next cursor, scanned, added, removed, pruned)` for the source page at `cursor`.
 pub(super) async fn reconcile_page(
     conn: &mut Connection,
-    trust: &str,
     set: &RankedSet,
     cursor: u64,
 ) -> RedisResult<(u64, usize, usize, usize, bool)> {
     RECONCILE
         .key(&set.source)
-        .key(trust)
+        .key(ranking_key())
         .key(&set.ranked)
         .arg(cursor)
         .arg(BATCH)
