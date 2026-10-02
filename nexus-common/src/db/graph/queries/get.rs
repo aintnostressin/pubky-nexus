@@ -1699,19 +1699,7 @@ mod tests {
     }
 
     fn build_query(source: StreamSource) -> Query {
-        post_stream(
-            source,
-            StreamSorting::Timeline,
-            SortOrder::Descending,
-            &None,
-            Pagination {
-                limit: Some(10),
-                ..Default::default()
-            },
-            None,
-            false,
-        )
-        .unwrap()
+        build_query_with(source, StreamSorting::Timeline, &None, None, false).unwrap()
     }
 
     fn all_timeline(

@@ -3,7 +3,7 @@ use crate::db::kv::{search, AuthorFilter, RedisResult, ScoreAction, SortOrder};
 use crate::db::queries::get::{global_tags_by_post, global_tags_by_post_engagement};
 use crate::db::{fetch_all_rows_from_graph, RedisOps};
 use crate::models::error::ModelResult;
-use crate::models::post::ranked::{self, RankedSet, TAG_RANKED_POST_TIMELINE};
+use crate::models::post::ranked::{self, RankedSet};
 use crate::models::post::{PostDetails, PostStream, StreamSource};
 use crate::models::tag::post::TagPost;
 use crate::models::tag::traits::TaggersCollection;
@@ -45,7 +45,9 @@ impl RedisOps for PostsByTagSearch {}
 
 impl PostsByTagSearch {
     /// Indexes post tags into global sorted sets for timeline and engagement metrics.
-    pub async fn reindex() -> ModelResult<()> {
+    /// Writes the per-label timelines directly, skipping their ranked copies, so a
+    /// full rebuild must follow, as `reindex::sync` runs one last.
+    pub(crate) async fn reindex() -> ModelResult<()> {
         Self::add_to_global_sorted_set(global_tags_by_post(), TAG_GLOBAL_POST_TIMELINE).await?;
         Self::add_to_global_sorted_set(global_tags_by_post_engagement(), TAG_GLOBAL_POST_ENGAGEMENT)
             .await
@@ -72,42 +74,38 @@ impl PostsByTagSearch {
         sort_by: Option<StreamSorting>,
         pagination: Pagination,
     ) -> RedisResult<Option<Vec<PostsByTagSearch>>> {
-        let index: &[&str] = match sort_by {
-            Some(StreamSorting::TotalEngagement) => &TAG_GLOBAL_POST_ENGAGEMENT,
+        let post_score_list = match sort_by {
+            Some(StreamSorting::TotalEngagement) => {
+                Self::try_from_index_sorted_set(
+                    &[&TAG_GLOBAL_POST_ENGAGEMENT[..], &[label]].concat(),
+                    pagination.start,
+                    pagination.end,
+                    pagination.skip,
+                    pagination.limit,
+                    SortOrder::Descending,
+                    None,
+                )
+                .await?
+            }
             // Default case always: SortBy::Timeline
-            _ => &TAG_GLOBAL_POST_TIMELINE,
+            _ => {
+                Self::try_from_index_sorted_set(
+                    &[&TAG_GLOBAL_POST_TIMELINE[..], &[label]].concat(),
+                    pagination.start,
+                    pagination.end,
+                    pagination.skip,
+                    pagination.limit,
+                    SortOrder::Descending,
+                    None,
+                )
+                .await?
+            }
         };
-        Self::read_label_index(index, label, pagination).await
-    }
 
-    /// [`Self::get_by_label`] for the timeline sort, restricted to posts whose
-    /// author is in the trust ranking. `None` when no ranked author has a post
-    /// with this label.
-    pub async fn get_ranked_by_label(
-        label: &str,
-        pagination: Pagination,
-    ) -> RedisResult<Option<Vec<PostsByTagSearch>>> {
-        Self::read_label_index(&TAG_RANKED_POST_TIMELINE, label, pagination).await
-    }
-
-    /// Newest-first page of the per-label set under `index`.
-    async fn read_label_index(
-        index: &[&str],
-        label: &str,
-        pagination: Pagination,
-    ) -> RedisResult<Option<Vec<PostsByTagSearch>>> {
-        let post_score_list = Self::try_from_index_sorted_set(
-            &[index, &[label]].concat(),
-            pagination.start,
-            pagination.end,
-            pagination.skip,
-            pagination.limit,
-            SortOrder::Descending,
-            None,
-        )
-        .await?;
-
-        Ok(post_score_list.map(|list| list.into_iter().map(Into::into).collect()))
+        match post_score_list {
+            Some(list) => Ok(Some(list.into_iter().map(|t| t.into()).collect())),
+            None => Ok(None),
+        }
     }
 
     /// Posts tagged with `label` whose author is in `observer_id`'s `reach`,
@@ -163,18 +161,20 @@ impl PostsByTagSearch {
     }
 
     /// Adds the post to the label's timeline, and to its ranked copy when the
-    /// author is in the trust ranking. An already-indexed post still runs the
-    /// mirror, so a retry repairs a ranked copy a crash left behind.
+    /// author is in the trust ranking.
     pub async fn put_to_index(author_id: &str, post_id: &str, tag_label: &str) -> RedisResult<()> {
         let post_key_slice: &[&str] = &[author_id, post_id];
         let key_parts = [&TAG_GLOBAL_POST_TIMELINE[..], &[tag_label]].concat();
-        let score = match Self::check_sorted_set_member(None, &key_parts, post_key_slice).await? {
-            Some(_) => None,
-            None => PostDetails::try_from_index_json(post_key_slice, None)
-                .await?
-                .map(|details| details.indexed_at as f64),
-        };
-        ranked::add(&RankedSet::tag(tag_label), &post_key_slice.join(":"), score).await
+        let tag_search = Self::check_sorted_set_member(None, &key_parts, post_key_slice).await?;
+        if tag_search.is_none() {
+            let option = PostDetails::try_from_index_json(post_key_slice, None).await?;
+            if let Some(post_details) = option {
+                let member_key = post_key_slice.join(":");
+                let score = post_details.indexed_at as f64;
+                ranked::add(&RankedSet::tag(tag_label), &member_key, score).await?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn del_from_index(

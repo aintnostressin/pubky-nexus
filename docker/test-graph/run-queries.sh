@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Stop at the first failed import, rather than checking only the last one.
+set -e
+trap 'echo "Error: Query execution failed."' ERR
+
 # Path to the queries file
 MAIN_GRAPH="/test-graph/skunk.cypher"
 # To achieve deterministic tests, each domain will have its own testing graph
@@ -43,11 +47,6 @@ time cypher-shell -u neo4j -p 12345678 -f "$RECOMMENDED_TEST_FILE"
 echo "Importing trust ranking test graph..."
 time cypher-shell -u neo4j -p 12345678 -f "$TRUST_TEST_FILE"
 
-if [[ $? -eq 0 ]]; then
-    echo "Queries executed successfully."
-else
-    echo "Error: Query execution failed."
-    exit 1
-fi
+echo "Queries executed successfully."
 
 echo "Cypher query execution completed."

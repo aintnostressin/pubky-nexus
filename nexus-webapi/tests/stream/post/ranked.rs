@@ -126,31 +126,42 @@ async fn test_all_timeline_hides_unranked_authors() -> Result<()> {
 
 /// pubky-app pages with `start = last_post_score - 1` and treats a short page
 /// as the end of the feed: every page is full until the ranked posts run out,
-/// however many hidden posts sit in between.
+/// however many hidden posts sit in between. Walked on the ranked set and on
+/// the Cypher rule (`kind=short`).
 #[tokio_shared_rt::test(shared)]
 async fn test_all_timeline_pages_stay_full() -> Result<()> {
-    let mut start = WINDOW_START;
-    let mut served = Vec::new();
-    for _ in 0..3 {
-        let page = keys(&format!("{WINDOW}&start={start}&limit=1")).await?;
-        let page_keys = post_keys_in(&page);
-        assert_eq!(page_keys.len(), 1, "a full page while ranked posts remain");
-        served.extend(page_keys);
-        start = page["last_post_score"].as_i64().expect("cursor") - 1;
+    for shape in ["", "&kind=short"] {
+        let mut start = WINDOW_START;
+        let mut served = Vec::new();
+        for _ in 0..3 {
+            let page = keys(&format!("{WINDOW}{shape}&start={start}&limit=1")).await?;
+            let page_keys = post_keys_in(&page);
+            assert_eq!(
+                page_keys.len(),
+                1,
+                "a full page while ranked posts remain{shape}"
+            );
+            served.extend(page_keys);
+            start = page["last_post_score"].as_i64().expect("cursor") - 1;
+        }
+        assert_eq!(served, ranked_window_keys(), "{shape}");
+
+        // Only the hidden observer post is left below the cursor.
+        let end = keys(&format!("{WINDOW}{shape}&start={start}&limit=1")).await?;
+        assert!(post_keys_in(&end).is_empty(), "end of stream{shape}: {end}");
+        assert!(end["last_post_score"].is_null());
+
+        // A head poll: posts newer than a known head, down to `end`.
+        let poll = keys(&format!(
+            "source=all&sorting=timeline{shape}&start={WINDOW_START}&end=1650000000003&limit=10"
+        ))
+        .await?;
+        assert_eq!(
+            post_keys_in(&poll),
+            ranked_window_keys()[..2].to_vec(),
+            "{shape}"
+        );
     }
-    assert_eq!(served, ranked_window_keys());
-
-    // Only the hidden observer post is left below the cursor.
-    let end = keys(&format!("{WINDOW}&start={start}&limit=1")).await?;
-    assert!(post_keys_in(&end).is_empty(), "end of stream: {end}");
-    assert!(end["last_post_score"].is_null());
-
-    // A head poll: posts newer than a known head, down to `end`.
-    let poll = keys(&format!(
-        "source=all&sorting=timeline&start={WINDOW_START}&end=1650000000003&limit=10"
-    ))
-    .await?;
-    assert_eq!(post_keys_in(&poll), ranked_window_keys()[..2].to_vec());
     Ok(())
 }
 

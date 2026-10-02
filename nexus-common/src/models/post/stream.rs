@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use super::ranked::{self, RankedSet, TrustMode, POST_RANKED_TIMELINE_KEY_PARTS};
+use super::ranked::{
+    self, RankedSet, TrustMode, POST_RANKED_TIMELINE_KEY_PARTS, TAG_RANKED_POST_TIMELINE,
+};
 use super::{collection_item_keys, Bookmark, PostCounts, PostDetails, PostView};
 use crate::db::kv::{RedisResult, ScoreAction, SortOrder};
 use crate::db::{get_neo4j_graph, queries, GraphError, GraphResult, RedisOps};
@@ -476,7 +478,7 @@ impl PostStream {
         let ranked = match trust_mode {
             TrustMode::Ranked => true,
             TrustMode::Unbuilt => {
-                ranked::record_unbuilt();
+                super::metrics::record_ranked_unbuilt();
                 false
             }
             TrustMode::Off => false,
@@ -484,13 +486,22 @@ impl PostStream {
 
         let result = match (source, tags) {
             // Global post streams
-            (StreamSource::All, None) => {
-                Self::get_global_posts_keys(sorting, order, start, end, skip, limit, ranked).await?
+            (StreamSource::All, None) if ranked => {
+                let key_parts = &POST_RANKED_TIMELINE_KEY_PARTS;
+                Self::get_ranked_posts_keys(key_parts, order, start, end, skip, limit).await?
             }
-            // Streams by tags
+            (StreamSource::All, None) => {
+                Self::get_global_posts_keys(sorting, order, start, end, skip, limit).await?
+            }
+            // Streams by tags, newest first with the page defaults of `get_posts_keys_by_tag`
+            (StreamSource::All, Some(tags)) if tags.len() == 1 && ranked => {
+                let key_parts = [&TAG_RANKED_POST_TIMELINE[..], &[tags[0].as_str()]].concat();
+                let (skip, limit) = (Some(skip.unwrap_or(0)), Some(limit.unwrap_or(10)));
+                let order = SortOrder::Descending;
+                Self::get_ranked_posts_keys(&key_parts, order, start, end, skip, limit).await?
+            }
             (StreamSource::All, Some(tags)) if tags.len() == 1 => {
-                Self::get_posts_keys_by_tag(&tags[0], sorting, start, end, skip, limit, ranked)
-                    .await?
+                Self::get_posts_keys_by_tag(&tags[0], sorting, start, end, skip, limit).await?
             }
             // Bookmark streams
             (StreamSource::Bookmarks { observer_id }, None) => {
@@ -601,8 +612,6 @@ impl PostStream {
         .map_err(|_| GraphError::QueryTimeout)?
     }
 
-    /// `ranked` reads the timeline's ranked copy (authors in the trust ranking
-    /// only). It has no effect on the engagement sort, which has no ranked copy.
     pub async fn get_global_posts_keys(
         sorting: StreamSorting,
         order: SortOrder,
@@ -610,7 +619,6 @@ impl PostStream {
         end: Option<f64>,
         skip: Option<usize>,
         limit: Option<usize>,
-        ranked: bool,
     ) -> RedisResult<PostKeyStream> {
         let sorted_set = match sorting {
             StreamSorting::TotalEngagement => {
@@ -626,12 +634,16 @@ impl PostStream {
                 .await?
             }
             StreamSorting::Timeline => {
-                let key_parts: &[&str] = match ranked {
-                    true => &POST_RANKED_TIMELINE_KEY_PARTS,
-                    false => &POST_TIMELINE_KEY_PARTS,
-                };
-                Self::try_from_index_sorted_set(key_parts, start, end, skip, limit, order, None)
-                    .await?
+                Self::try_from_index_sorted_set(
+                    &POST_TIMELINE_KEY_PARTS,
+                    start,
+                    end,
+                    skip,
+                    limit,
+                    order,
+                    None,
+                )
+                .await?
             }
         };
         Ok(PostKeyStream::from_scored_entries(
@@ -639,8 +651,6 @@ impl PostStream {
         ))
     }
 
-    /// `ranked` reads the label's ranked timeline (authors in the trust ranking
-    /// only); it is only ever set for the timeline sort.
     pub async fn get_posts_keys_by_tag(
         label: &str,
         sorting: StreamSorting,
@@ -648,7 +658,6 @@ impl PostStream {
         end: Option<f64>,
         skip: Option<usize>,
         limit: Option<usize>,
-        ranked: bool,
     ) -> RedisResult<PostKeyStream> {
         let skip = skip.unwrap_or(0);
         let limit = limit.unwrap_or(10);
@@ -660,10 +669,7 @@ impl PostStream {
             limit: Some(limit),
         };
 
-        let post_search_result = match ranked {
-            true => PostsByTagSearch::get_ranked_by_label(label, pag).await?,
-            false => PostsByTagSearch::get_by_label(label, Some(sorting), pag).await?,
-        };
+        let post_search_result = PostsByTagSearch::get_by_label(label, Some(sorting), pag).await?;
 
         let stream = match post_search_result {
             Some(post_keys) => {
@@ -679,6 +685,24 @@ impl PostStream {
         };
 
         Ok(stream)
+    }
+
+    /// A page of the ranked timeline at `key_parts`: the posts of its source
+    /// timeline whose author is in the trust ranking, read like the source.
+    async fn get_ranked_posts_keys(
+        key_parts: &[&str],
+        order: SortOrder,
+        start: Option<f64>,
+        end: Option<f64>,
+        skip: Option<usize>,
+        limit: Option<usize>,
+    ) -> RedisResult<PostKeyStream> {
+        let sorted_set =
+            Self::try_from_index_sorted_set(key_parts, start, end, skip, limit, order, None)
+                .await?;
+        Ok(PostKeyStream::from_scored_entries(
+            sorted_set.unwrap_or_default(),
+        ))
     }
 
     pub async fn get_author_posts(
@@ -912,12 +936,7 @@ impl PostStream {
     /// the score, and to its ranked copy when the author is in the trust ranking.
     pub async fn add_to_timeline_sorted_set(details: &PostDetails) -> RedisResult<()> {
         let element = format!("{}:{}", details.author, details.id);
-        ranked::add(
-            &RankedSet::global(),
-            &element,
-            Some(details.indexed_at as f64),
-        )
-        .await
+        ranked::add(&RankedSet::global(), &element, details.indexed_at as f64).await
     }
 
     /// Removes the post from the global timeline and its ranked copy.
