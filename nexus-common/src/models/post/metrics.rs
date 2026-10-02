@@ -1,5 +1,4 @@
-//! OpenTelemetry instruments for post streams: the Web-of-Trust ones (spec v3.1
-//! "Metrics") and the trust filter's ranked-set fallback.
+//! OpenTelemetry instruments for Web-of-Trust post streams (spec v3.1 "Metrics").
 //!
 //! Mirrors the `GraphMetrics` pattern in `db::graph::instrumented`: instruments
 //! are built from the global meter and are no-ops when no `SdkMeterProvider` is
@@ -26,10 +25,6 @@
 //! true trusted-member count needs its own traversal, which belongs with the
 //! deferred WoT cache work (a spec non-goal here). `returned_posts` is the cheap
 //! stand-in available from the query we already run.
-//!
-//! Outside the spec, on meter `stream`: `stream.posts.ranked_unbuilt` counts
-//! `source=all` timeline requests served unfiltered because the ranked sets are
-//! not built yet.
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -132,20 +127,6 @@ pub(super) fn record_wot_result(
         }
         None => METRICS.errors.add(1, attrs),
     }
-}
-
-static RANKED_UNBUILT: LazyLock<Counter<u64>> = LazyLock::new(|| {
-    global::meter("stream")
-        .u64_counter("stream.posts.ranked_unbuilt")
-        .with_description(
-            "source=all timeline requests served unfiltered because the ranked sets are not built yet",
-        )
-        .build()
-});
-
-/// Counts a request served unfiltered because the ranked sets are not built yet.
-pub(crate) fn record_ranked_unbuilt() {
-    RANKED_UNBUILT.add(1, &[]);
 }
 
 #[cfg(test)]

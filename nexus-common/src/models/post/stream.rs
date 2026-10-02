@@ -475,14 +475,7 @@ impl PostStream {
 
         // Only the `source=all` arms below have ranked sets; `trust_mode` is
         // `Off` for every other source.
-        let ranked = match trust_mode {
-            TrustMode::Ranked => true,
-            TrustMode::Unbuilt => {
-                super::metrics::record_ranked_unbuilt();
-                false
-            }
-            TrustMode::Off => false,
-        };
+        let ranked = trust_mode == TrustMode::Ranked;
 
         let result = match (source, tags) {
             // Global post streams
