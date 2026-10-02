@@ -1,5 +1,6 @@
 use crate::{
     tags::user::PUBKY_PEER,
+    utils::ranking::without_ranking,
     utils::server::TestServiceServer,
     utils::{get_request, invalid_get_request},
 };
@@ -8,7 +9,7 @@ use axum::http::StatusCode;
 use deadpool_redis::redis::AsyncCommands;
 use nexus_common::db::get_redis_conn;
 use nexus_common::db::RedisOps;
-use nexus_common::models::user::{SocialGraphStatus, USER_SOCIAL_GRAPH_KEY_PARTS};
+use nexus_common::models::user::SocialGraphStatus;
 
 #[tokio_shared_rt::test(shared)]
 async fn test_user_endpoint() -> Result<()> {
@@ -220,9 +221,9 @@ async fn test_deleted_flag_in_details_and_view() -> Result<()> {
 
 // ##### Social graph status #####
 // Fixture: wot.cypher scores D1 0.4, D2 0.2, D1B 0.1 and trust.cypher gives every
-// other user 0.3, except the wot on-ramp accounts. D1 therefore tops the ranking,
-// D2 and D1B sit at its bottom, below the `established` cut, and the spammer is
-// absent from it.
+// other user 0.3, except the wot on-ramp accounts and recommended-sybil.cypher's,
+// which carry 0.3, 0.25 or none. D1 therefore tops the ranking, D2 and D1B sit at
+// its bottom, below the `established` cut, and the spammer is absent from it.
 const WOT_D1: &str = "qjftuwjog819ki1wktuy5tndebce36bmxxwtjjm3z1fr97jk9yuo";
 const WOT_D2: &str = "smf4xrqfhx7stnufkjzhbjyu3rbgb3gga64srqmzcyyoyzefse9y";
 const WOT_D1B: &str = "t5ixbtatg4tq5q5ixg16qqrg1bmem75ksg6cweuftuydwzw91pzy";
@@ -254,14 +255,7 @@ async fn test_social_graph_status() -> Result<()> {
     // With no ranking at all the field must be null, never "new". Production
     // ships with an empty seed set, so a non-optional field would hang a NEW
     // badge on every profile in the app.
-    TestServiceServer::get_test_server().await;
-    let mut redis_conn = get_redis_conn().await?;
-    let key = format!("Sorted:{}", USER_SOCIAL_GRAPH_KEY_PARTS.join(":"));
-    let _: () = redis_conn.del(&key).await?;
-
-    // Probed without `?` so an error between the delete and the rebuild cannot
-    // strand the ranking for every other test.
-    let probe = async {
+    let (unavailable, streamed, posts) = without_ranking(async {
         let unavailable = social_graph_status(WOT_D1).await?;
         // The batch read has to return one slot per requested id even with no
         // ranking, or the positional zip in `UserView::get_by_ids` truncates and
@@ -278,11 +272,8 @@ async fn test_social_graph_status() -> Result<()> {
             stream.as_array().map(Vec::len).unwrap_or_default(),
             posts,
         ))
-    }
-    .await;
-
-    SocialGraphStatus::reindex().await?;
-    let (unavailable, streamed, posts) = probe?;
+    })
+    .await?;
 
     // Present and null, never omitted: the frontend branches on the field
     // existing, and `is_null` alone would also pass for a missing key.

@@ -1573,14 +1573,16 @@ pub fn post_is_safe_to_delete(author_id: &str, post_id: &str) -> Query {
 ///
 /// `trust_rule` keeps only users with a positive trust score and returns the most trusted
 /// first; the caller asks for it once a trust ranking is published. Sybils behind an honest
-/// follow-back stay unranked until the next recompute, which then ranks them low: from there,
-/// the order keeps them out only when `limit` better candidates are in reach.
-/// Ordering reads every candidate before LIMIT applies, which the recommendation cache absorbs.
+/// follow-back stay unranked until the next recompute. After it, the entry account scores like
+/// the follow-backer's other follows and the farm behind it far lower, so the order keeps the
+/// farm out only when `limit` better candidates are in reach. Ties are broken at random: by id,
+/// whoever ground a low-sorting key would win every one. Ordering reads every candidate before
+/// LIMIT applies, which the recommendation cache absorbs.
 pub fn recommend_users(user_id: &str, limit: usize, trust_rule: bool) -> Query {
     let (trust_filter, trust_order) = match trust_rule {
         true => (
             "\n          AND potential.trust > 0",
-            "\n        ORDER BY potential.trust DESC, recommended_user_id ASC",
+            "\n        ORDER BY potential.trust DESC, rand()",
         ),
         false => ("", ""),
     };
@@ -1589,14 +1591,20 @@ pub fn recommend_users(user_id: &str, limit: usize, trust_rule: bool) -> Query {
         format!(
             "
         MATCH (user:User {{id: $user_id}})
-        // Depth 1 is always directly followed, hence excluded below: start at 2.
-        // DISTINCT right after the expand lets the planner prune (one row per reached
-        // node, not per path), so the filters below run once per candidate.
-        MATCH (user)-[:FOLLOWS*2..3]->(potential:User)
-        WITH DISTINCT user, potential
+        // Read once, so skipping who the user already follows is a list lookup
+        // per candidate rather than an expand.
+        WITH user, [(user)-[:FOLLOWS]->(followed) | followed] AS following
+        // Depth 1 is always directly followed, hence skipped: start at 2. DISTINCT
+        // right after the expand lets the planner prune (one row per reached node,
+        // not per path), so the filters below run once per candidate.
+        CALL (user) {{
+            MATCH (user)-[:FOLLOWS*2..3]->(potential:User)
+            RETURN DISTINCT potential
+        }}
+        WITH user, following, potential
         WHERE potential <> user
           AND NOT coalesce(potential.deleted, false){trust_filter}
-          AND NOT (user)-[:FOLLOWS]->(potential)
+          AND NOT potential IN following
           // Degree lookup instead of expand + aggregate; keeps an unordered LIMIT lazy.
           AND COUNT {{ (potential)-[:AUTHORED]->() }} >= 5
         RETURN potential.id AS recommended_user_id{trust_order}
@@ -1788,13 +1796,31 @@ mod tests {
         let ranked = recommend_users("user", 30, true).to_cypher_populated();
         assert!(ranked.contains("AND potential.trust > 0"), "{ranked}");
         // The order has to apply before LIMIT, or it would only sort an arbitrary 30.
-        let order = ranked.find("ORDER BY potential.trust DESC, recommended_user_id ASC");
+        let order = ranked.find("ORDER BY potential.trust DESC, rand()");
         let limit = ranked.find("LIMIT 30");
         assert!(order.is_some() && order < limit, "{ranked}");
 
         let unranked = recommend_users("user", 30, false).to_cypher_populated();
         assert!(!unranked.contains("trust"), "{unranked}");
         assert!(!unranked.contains("ORDER BY"), "{unranked}");
+    }
+
+    /// Without a ranking, which is the default install, the unranked shape is what serves
+    /// recommendations, so the rules both shapes share must not drift into the trust branch.
+    #[test]
+    fn recommend_users_applies_the_shared_rules_in_both_shapes() {
+        for trust_rule in [true, false] {
+            let cypher = recommend_users("user", 30, trust_rule).to_cypher_populated();
+            for rule in [
+                "[:FOLLOWS*2..3]",
+                "potential <> user",
+                "NOT coalesce(potential.deleted, false)",
+                "NOT potential IN following",
+                "COUNT { (potential)-[:AUTHORED]->() } >= 5",
+            ] {
+                assert!(cypher.contains(rule), "missing `{rule}`:\n{cypher}");
+            }
+        }
     }
 
     fn build(source: StreamSource) -> String {

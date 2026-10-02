@@ -3,7 +3,8 @@
 //! viewer outside the ranking, or one Nexus does not know, gets the unfiltered
 //! stream on every shape, Cypher included.
 //!
-//! Fixture: trust.cypher ranks every user except the wot on-ramp accounts, so
+//! Fixture: trust.cypher ranks every user except the wot on-ramp accounts and
+//! the recommended-sybil.cypher farm, whose posts sit far below this window, so
 //! inside the wot window (`indexed_at` 1650000000001..=1650000000014, used by no
 //! other fixture) only D1, D1B and D2 are ranked. Newest first, the window's root
 //! posts are DELETED_USER (014), ARTIST1 (012), BTC5..BTC1 (011..007), SPAMMER

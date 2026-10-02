@@ -1,7 +1,10 @@
 // Sybil attack on recommended users (stream/users with source `recommended`).
-// Kept inert against the global suites the same way recommended.cypher is: post
-// indexed_at far below every window start, no tags, user ids that sort high, and
-// no account with more than two followers.
+// Kept out of the global suites' way as recommended.cypher is: post indexed_at far
+// below every window start, no tags, user ids that sort last in ascending ties, no
+// account with more than two followers, and no trust score above the 0.3 most
+// fixture users carry, so the top of the trust ranking does not move. Its five-post
+// accounts do score 5 as influencers, inside the cached all-time top 100, which no
+// test pins.
 //
 // A farm needs one honest follow-back, nothing else:
 //   FOLLOWER     -> FOLLOWBACKER          an honest user and the account they follow
@@ -13,7 +16,7 @@
 // HONEST_A/B/C, ENTRY and every farm account have 5 posts, the activity threshold.
 // The farm follows no one and nobody honest follows it.
 // Trust: the follow-back came after the last recompute, so ENTRY and the farm are
-// unranked (0.0). HONEST_C (0.35) outranks every other candidate (0.3).
+// unranked (0.0). HONEST_C (0.3) outranks HONEST_A and HONEST_B (0.25).
 
 :param follower => 'y43z4cq94w8d58cjuuuw36146nk6ommekj348oe1b4yh9z8j9hwo';
 :param followbacker => 'y5ef6cm9izid7kmzs6b1xpg54pk6t5pei587eb7jaa67deaeht4o';
@@ -41,8 +44,8 @@ MERGE (u:User {id: $farm[i]}) SET u.name = "sybil_attack_farm_" + toString(i + 1
 // Set on every account, so trust.cypher, which gives 0.3 to users without a score,
 // leaves them alone. The next recompute would rank the farm through FOLLOWBACKER,
 // low enough that the trust order keeps it out of full recommendation pools only.
-MATCH (u:User) WHERE u.id IN [$follower, $followbacker, $honest_a, $honest_b] SET u.trust = 0.3;
-MATCH (u:User {id: $honest_c}) SET u.trust = 0.35;
+MATCH (u:User) WHERE u.id IN [$follower, $followbacker, $honest_c] SET u.trust = 0.3;
+MATCH (u:User) WHERE u.id IN [$honest_a, $honest_b] SET u.trust = 0.25;
 MATCH (u:User) WHERE u.id = $entry OR u.id IN $farm SET u.trust = 0.0;
 
 // ##############################
