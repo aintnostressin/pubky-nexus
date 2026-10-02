@@ -567,7 +567,7 @@ mod tests {
     /// Live tests against the shared Redis and its fixture ranking. Each test
     /// writes only its own labels and authors, and clears them before and
     /// after. A full rebuild, the lock and the ranking key are shared, so
-    /// `.config/nextest.toml` runs these in the `ranked-sets` serial group.
+    /// `.config/nextest.toml` runs each of these alone.
     mod live {
         use super::super::*;
         use crate::db::kv::{release_lock, try_acquire_lock, RedisOps};

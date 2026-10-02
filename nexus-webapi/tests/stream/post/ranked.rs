@@ -11,7 +11,7 @@
 //! posts above the ranked ones and one below.
 //!
 //! These tests depend on the ranking key existing, which `test_social_graph_status`
-//! briefly deletes; `.config/nextest.toml` runs them in one serial group.
+//! briefly deletes; `.config/nextest.toml` runs that test alone.
 use crate::utils::get_request;
 use crate::utils::server::TestServiceServer;
 use anyhow::Result;

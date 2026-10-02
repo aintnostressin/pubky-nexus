@@ -241,8 +241,8 @@ async fn social_graph_status(user_id: &str) -> Result<serde_json::Value> {
 
 /// Both halves live in one test on purpose: the ranking is a single global key,
 /// so a separate test that dropped it could race this one and see its own null.
-/// For the same reason `.config/nextest.toml` serializes it with the
-/// `source=all` filter tests, which need the key to exist.
+/// For the same reason `.config/nextest.toml` runs it alone: the `source=all`
+/// filter tests, among others, need the key to exist.
 #[tokio_shared_rt::test(shared)]
 async fn test_social_graph_status() -> Result<()> {
     assert_eq!(social_graph_status(WOT_D1).await?, "established");
