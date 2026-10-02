@@ -20,8 +20,9 @@ test-group = 'influencers-sorted-set'
 # marker and rebuild every ranked set. Any test reading a
 # filtered stream or a social graph status would see that mid-flight, so these
 # run alone, as cache_setup does below; the tests that only read need no entry.
+# The recommended-users Sybil test drops and rebuilds the ranking the same way.
 [[profile.default.overrides]]
-filter = 'test(=user::views::test_social_graph_status) | test(/^models::post::ranked::tests::live::/)'
+filter = 'test(=user::views::test_social_graph_status) | test(/^models::post::ranked::tests::live::/) | test(=stream::user::recommended_sybil::test_recommended_sybil_farm_is_recommended_without_a_ranking)'
 threads-required = 'num-test-threads'
 
 # nexusd/tests/cache_setup/main.rs calls clear_redis(), which issues FLUSHDB

@@ -1,6 +1,7 @@
 use crate::event_processor::utils::default_moderation_tests;
 use crate::service::utils::HS_IDS;
 use crate::service::utils::{create_mock_event_processors, setup, MockEventProcessorRunner};
+use crate::utils::set_user_trust;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -245,15 +246,7 @@ async fn create_active_user_on_homeserver_with_trust(
     user.put_to_graph().await?;
     set_user_homeserver(&user_id, hs_id).await?;
 
-    if let Some(trust) = trust {
-        let query = Query::new(
-            "prioritization_test_set_trust",
-            "MATCH (u:User {id: $id}) SET u.trust = $trust",
-        )
-        .param("id", user_id.to_string())
-        .param("trust", trust);
-        exec_single_row(query).await?;
-    }
+    set_user_trust(&user_id, trust).await?;
 
     Ok(user_id)
 }

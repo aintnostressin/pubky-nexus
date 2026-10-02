@@ -4,6 +4,7 @@ pub mod list;
 pub mod post_replies;
 pub mod reach;
 pub mod recommended;
+pub mod recommended_sybil;
 pub mod score;
 pub mod search;
 pub mod starter_pack;

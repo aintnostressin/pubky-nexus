@@ -1,3 +1,5 @@
+use nexus_common::db::graph::Query;
+use nexus_common::db::{exec_single_row, GraphResult};
 use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::Event;
 use nexus_watcher::events::{EventHandler, Moderation};
@@ -56,4 +58,21 @@ pub fn default_moderation_tests() -> Arc<Moderation> {
         .expect("Hardcoded test moderation key should be valid");
     let tags = Vec::from(["label_to_moderate".to_string()]);
     Arc::new(Moderation { id, tags })
+}
+
+/// Sets a test user's graph trust score, as a trust recompute would. `None` removes it,
+/// which is how an account created after the last recompute looks.
+pub async fn set_user_trust(user_id: &str, trust: Option<f64>) -> GraphResult<()> {
+    let query = match trust {
+        Some(trust) => Query::new(
+            "test_set_user_trust",
+            "MATCH (u:User {id: $id}) SET u.trust = $trust",
+        )
+        .param("trust", trust),
+        None => Query::new(
+            "test_remove_user_trust",
+            "MATCH (u:User {id: $id}) REMOVE u.trust",
+        ),
+    };
+    exec_single_row(query.param("id", user_id.to_string())).await
 }

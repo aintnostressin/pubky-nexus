@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{Influencers, UserCounts, UserDetails, UserSearch, UserView};
+use super::{Influencers, SocialGraphStatus, UserCounts, UserDetails, UserSearch, UserView};
 
 use crate::db::kv::{sets, RedisError, RedisResult, SortOrder};
 use crate::db::{fetch_all_rows_from_graph, queries, RedisOps};
@@ -21,6 +21,11 @@ pub const CACHE_USER_RECOMMENDED_KEY_PARTS: [&str; 3] = ["Cache", "Users", "Reco
 pub const STARTER_PACK_MAX_SKIP: usize = 100;
 // TTL, 12HR
 pub const CACHE_USER_RECOMMENDED_TTL: i64 = 12 * 60 * 60;
+/// Stands in for an empty pool, which a Redis set cannot hold. Never a user id: those are
+/// 52-character public keys.
+pub const CACHE_USER_RECOMMENDED_EMPTY_MARKER: &str = "none";
+/// Short, so a user whose reach gains a ranked account is not kept waiting.
+pub const CACHE_USER_RECOMMENDED_EMPTY_TTL: i64 = 5 * 60;
 
 #[derive(Deserialize, ToSchema, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -143,6 +148,12 @@ impl UserStream {
             .await
     }
     /// Retrieves recommended user IDs based on the specified criteria.
+    ///
+    /// A cache miss builds the pool and returns it in query order: with a published trust
+    /// ranking, the 30 most trusted ranked candidates, most trusted first; without one, the
+    /// first 30 found, neither filtered nor reordered. Hits draw from that pool at random for
+    /// 12 hours, dropping users deleted since, or absent from a ranking published since. An
+    /// empty pool is cached for five minutes, under a ranking and for a user who follows someone.
     pub async fn get_recommended_ids(
         user_id: &str,
         limit: Option<usize>,
@@ -151,22 +162,36 @@ impl UserStream {
 
         // Attempt to get cached data from Redis
         if let Some(cached_ids) = Self::try_get_cached_recommended(user_id, count).await? {
-            // Filter out deleted users from cached IDs
-            let details_list = UserDetails::mget(&cached_ids).await?;
+            // A pool cached empty holds only the marker.
+            let cached_ids: Vec<String> = cached_ids
+                .into_iter()
+                .filter(|id| id != CACHE_USER_RECOMMENDED_EMPTY_MARKER)
+                .collect();
+            if cached_ids.is_empty() {
+                return Ok(None);
+            }
 
-            // Collect both filtered IDs and deleted IDs in one pass
+            // The pool can predate a deletion, or the ranking it was built under.
+            let (details_list, statuses) = tokio::try_join!(
+                UserDetails::mget(&cached_ids),
+                SocialGraphStatus::get_by_ids(&cached_ids),
+            )?;
+
+            // Collect both kept and stale IDs in one pass
             let mut filtered_ids: Vec<String> = Vec::new();
-            let mut deleted_ids: Vec<String> = Vec::new();
+            let mut stale_ids: Vec<String> = Vec::new();
 
-            for (id, details) in cached_ids.into_iter().zip(details_list) {
+            for ((id, details), status) in cached_ids.into_iter().zip(details_list).zip(statuses) {
                 match details {
-                    Some(ref d) if !d.deleted => filtered_ids.push(id),
-                    _ => deleted_ids.push(id),
+                    Some(ref d) if !d.deleted && status != Some(SocialGraphStatus::New) => {
+                        filtered_ids.push(id)
+                    }
+                    _ => stale_ids.push(id),
                 }
             }
 
-            // Remove deleted users from the cache set to improve cache quality
-            Self::remove_from_cached_recommended(user_id, &deleted_ids).await;
+            // Remove stale users from the cache set to improve cache quality
+            Self::remove_from_cached_recommended(user_id, &stale_ids).await;
 
             return Ok(if filtered_ids.is_empty() {
                 None
@@ -176,7 +201,8 @@ impl UserStream {
         }
 
         // Cache miss; proceed to query Neo4j
-        let query = queries::get::recommend_users(user_id, 30);
+        let trust_rule = SocialGraphStatus::is_published().await?;
+        let query = queries::get::recommend_users(user_id, 30, trust_rule);
         let rows = fetch_all_rows_from_graph(query).await?;
 
         let mut user_ids = Vec::new();
@@ -189,6 +215,12 @@ impl UserStream {
         }
 
         if user_ids.is_empty() {
+            // The trust rule empties the pools of users whose reach holds no ranked account,
+            // so cache that briefly rather than walk the reach on every request. A user who
+            // follows nobody stays uncached: their first follows must show up right away.
+            if trust_rule && Self::follows_anyone(user_id).await? {
+                Self::cache_empty_recommended(user_id).await?;
+            }
             Ok(None)
         } else {
             Self::cache_recommended_users(user_id, &user_ids).await?;
@@ -225,17 +257,36 @@ impl UserStream {
         .await
     }
 
-    /// Helper method to remove deleted users from the cached recommendations.
+    /// Caches an empty pool as a lone marker, for less time than a real pool.
+    async fn cache_empty_recommended(user_id: &str) -> RedisResult<()> {
+        Self::put_index_set(
+            &[user_id],
+            &[CACHE_USER_RECOMMENDED_EMPTY_MARKER],
+            Some(CACHE_USER_RECOMMENDED_EMPTY_TTL),
+            Some(CACHE_USER_RECOMMENDED_KEY_PARTS.join(":")),
+        )
+        .await
+    }
+
+    /// Whether the user follows anyone, by the indexed counts.
+    async fn follows_anyone(user_id: &str) -> RedisResult<bool> {
+        Ok(UserCounts::get_from_index(user_id)
+            .await?
+            .is_some_and(|counts| counts.following > 0))
+    }
+
+    /// Helper method to remove users who can no longer be recommended (deleted, or absent
+    /// from the published ranking) from the cached recommendations.
     /// This improves cache quality by evicting stale entries instead of just filtering them at read time.
-    async fn remove_from_cached_recommended(user_id: &str, deleted_ids: &[String]) {
-        if deleted_ids.is_empty() {
+    async fn remove_from_cached_recommended(user_id: &str, stale_ids: &[String]) {
+        if stale_ids.is_empty() {
             return;
         }
 
         let prefix = CACHE_USER_RECOMMENDED_KEY_PARTS.join(":");
-        let deleted_refs: Vec<&str> = deleted_ids.iter().map(|s| s.as_str()).collect();
+        let stale_refs: Vec<&str> = stale_ids.iter().map(|s| s.as_str()).collect();
 
-        let _ = sets::del(&prefix, user_id, &deleted_refs).await;
+        let _ = sets::del(&prefix, user_id, &stale_refs).await;
     }
 
     /// One deduplicated ranked list of people to follow for a set of interest tags.

@@ -1,6 +1,7 @@
 use crate::{
     event_processor::users::utils::{find_user_counts, find_user_details},
     event_processor::utils::watcher::WatcherTest,
+    utils::set_user_trust,
 };
 use anyhow::Result;
 use chrono::Utc;
@@ -288,17 +289,26 @@ async fn test_delete_recommended_user() -> Result<()> {
         test.create_post(&carol_kp, &post).await?;
     }
 
+    // Only ranked users are recommended while the fixture's trust ranking is
+    // published, and no recompute has scored Carol: give her a score.
+    set_user_trust(&carol_id, Some(0.05)).await?;
+
     // Check if Carol is recommended to Alice
     let alice_recommended_ids_res_1 = UserStream::get_recommended_ids(&alice_id, None).await;
-    let alice_recommended_ids_1 = alice_recommended_ids_res_1.unwrap().unwrap();
-    assert_eq!(alice_recommended_ids_1.len(), 1);
-    assert_eq!(alice_recommended_ids_1.first(), Some(&carol_id));
 
     // Carol deletes her user
     test.cleanup_user(&carol_kp).await?;
 
     // Check if Carol is not recommended anymore to Alice
     let alice_recommended_ids_res_2 = UserStream::get_recommended_ids(&alice_id, None).await;
+
+    // Remove the score before asserting, so a failure cannot leave it on the shared
+    // graph for the next ranking rebuild to pick up.
+    set_user_trust(&carol_id, None).await?;
+
+    let alice_recommended_ids_1 = alice_recommended_ids_res_1.unwrap().unwrap();
+    assert_eq!(alice_recommended_ids_1.len(), 1);
+    assert_eq!(alice_recommended_ids_1.first(), Some(&carol_id));
     let alice_recommended_ids_2 = alice_recommended_ids_res_2.unwrap();
     assert_eq!(alice_recommended_ids_2, None);
 
