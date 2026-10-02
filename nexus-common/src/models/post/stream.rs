@@ -418,7 +418,8 @@ impl PostStream {
         tracing::info!(
             sets = stats.sets,
             scanned = stats.scanned,
-            copied = stats.copied,
+            added = stats.added,
+            removed = stats.removed,
             orphans = stats.orphans,
             dropped = stats.dropped,
             elapsed_ms = started.elapsed().as_millis() as u64,

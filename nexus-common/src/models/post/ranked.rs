@@ -10,9 +10,11 @@
 //! Every incremental write to a source set goes through [`add`] and [`remove`],
 //! which update the ranked copy in the same atomic step; the bulk reindex
 //! writes the sources directly and is followed by a rebuild. Every ranking publish
-//! rebuilds the copies in full ([`rebuild`]), so drift lasts at most until the
-//! next recompute. Readers only trust the ranked sets once a complete rebuild
-//! has run ([`BUILT_AT_KEY`]); before that they serve the unfiltered sets.
+//! reconciles the copies with their sources in place, a page at a time
+//! ([`rebuild`]), so drift lasts at most until the next recompute and no call
+//! holds Redis for more than one page. Readers only trust the ranked sets once a
+//! complete rebuild has run ([`BUILT_AT_KEY`]); before that they serve the
+//! unfiltered sets.
 //!
 //! The scripts take several keys, so they assume a single Redis instance (not
 //! Redis Cluster), as the rest of Nexus does.
@@ -33,33 +35,19 @@ use crate::models::user::USER_SOCIAL_GRAPH_KEY_PARTS;
 /// Ranked copy of the global timeline: `Sorted:Posts:Ranked:Timeline`.
 /// A different second segment from the source set, so a glob for one never matches the other.
 pub const POST_RANKED_TIMELINE_KEY_PARTS: [&str; 3] = ["Posts", "Ranked", "Timeline"];
-/// Where a staged rebuild of the global ranked copy writes before the swap.
-const POST_RANKED_STAGING_TIMELINE_KEY_PARTS: [&str; 3] = ["Posts", "RankedStaging", "Timeline"];
 /// Ranked copies of the per-label timelines: `Sorted:Tags:Ranked:Post:Timeline:<label>`.
 /// A different second segment from the source sets, so a scan for one never matches the other.
 pub const TAG_RANKED_POST_TIMELINE: [&str; 4] = ["Tags", "Ranked", "Post", "Timeline"];
-/// Where a staged rebuild of a per-label ranked copy writes before the swap.
-const TAG_RANKED_STAGING_POST_TIMELINE: [&str; 4] = ["Tags", "RankedStaging", "Post", "Timeline"];
 /// Set once a complete rebuild has run; readers trust the ranked sets only then.
 const BUILT_AT_KEY: &str = "Ranked:Timeline:BuiltAt";
 /// Serializes rebuilds.
 const REBUILD_LOCK_KEY: &str = "lock:ranked-timeline-rebuild";
 
-/// Sets up to this size are rebuilt by one atomic script.
-const ATOMIC_MAX: usize = 500;
-/// Members per `ZSCAN` page in a staged build. Sized so a script stays well
-/// under 10 ms of Redis time: at a million root posts a 1,000-member batch
-/// occasionally took just over 10 ms.
+/// Members per `ZSCAN` page, the most a rebuild call touches. Sized so a call
+/// stays well under 10 ms of Redis time: at 200k root posts the slowest took 3 ms.
 const BATCH: usize = 500;
 /// Keys per `SCAN` page when listing labels; cheap per key, so larger.
 const SCAN_COUNT: usize = 1_000;
-/// TTL on a staging set, refreshed by every batch, so a crashed build cannot
-/// leave writes mirroring into it for long.
-const STAGING_LEASE_SECS: u64 = 3_600;
-/// Seeds a staging set so writes see the build from its first instant, before
-/// any member is copied. It has no `:`, so it can never collide with an
-/// `author:post` member.
-const SENTINEL: &str = "~rebuild";
 /// How long the lock outlives a rebuild that stops renewing it, such as one
 /// whose process was killed. Well under [`LOCK_WAIT`], so a waiting rebuild
 /// outlasts a lock left behind.
@@ -87,8 +75,6 @@ fn ranking_key() -> String {
 pub(crate) struct RankedSet {
     pub source: String,
     pub ranked: String,
-    /// Where a staged build writes before the swap.
-    pub staging: String,
 }
 
 impl RankedSet {
@@ -97,7 +83,6 @@ impl RankedSet {
         RankedSet {
             source: sorted_key(&POST_TIMELINE_KEY_PARTS),
             ranked: sorted_key(&POST_RANKED_TIMELINE_KEY_PARTS),
-            staging: sorted_key(&POST_RANKED_STAGING_TIMELINE_KEY_PARTS),
         }
     }
 
@@ -107,7 +92,6 @@ impl RankedSet {
         RankedSet {
             source: key(&TAG_GLOBAL_POST_TIMELINE),
             ranked: key(&TAG_RANKED_POST_TIMELINE),
-            staging: key(&TAG_RANKED_STAGING_POST_TIMELINE),
         }
     }
 }
@@ -179,31 +163,18 @@ async fn rebuild_locked(
     }
 
     let tags = scan_tag_keys(conn).await?;
-    let labels = tags.sources.iter().map(|label| RankedSet::tag(label));
+    // A ranked set normally empties, and so vanishes, with its source; one that
+    // outlived its source drifted, and reconciling it against the missing
+    // source empties it.
+    stats.orphans = tags.ranked.difference(&tags.sources).count();
+    let labels = tags
+        .sources
+        .union(&tags.ranked)
+        .map(|label| RankedSet::tag(label));
     for set in std::iter::once(RankedSet::global()).chain(labels) {
         keep_lock(lock, &mut renewed).await?;
         rebuild_set(conn, &trust, &set, &mut stats).await?;
     }
-    // The sweeps below rely on no other rebuild running.
-    keep_lock(lock, &mut renewed).await?;
-
-    // A ranked set normally empties, and so vanishes, with its source; one that
-    // outlived its source drifted. Re-checked here, as a label may have been
-    // tagged again since the scan.
-    for label in tags.ranked.difference(&tags.sources) {
-        let set = RankedSet::tag(label);
-        let source_exists: bool = conn.exists(&set.source).await?;
-        if !source_exists {
-            let _: () = conn.unlink(&set.ranked).await?;
-            stats.orphans += 1;
-        }
-    }
-    // Left by a build that crashed; the lock guarantees none is running now.
-    let leftovers = tags
-        .staging
-        .iter()
-        .map(|label| RankedSet::tag(label).staging);
-    unlink_keys(conn, leftovers).await?;
 
     let built_at = chrono::Utc::now().timestamp_millis();
     let _: () = conn.set(BUILT_AT_KEY, built_at).await?;
@@ -211,8 +182,8 @@ async fn rebuild_locked(
 }
 
 /// Renews the rebuild lock once [`LOCK_RENEW`] has passed since `renewed`, and
-/// stops the rebuild if the lock was lost: another rebuild may hold it by then,
-/// and two builds would overwrite each other's staging sets.
+/// stops the rebuild if the lock was lost: by then another rebuild may hold it,
+/// and that one finishes the job.
 async fn keep_lock(lock: &LockLease, renewed: &mut Instant) -> RedisResult<()> {
     if renewed.elapsed() < LOCK_RENEW {
         return Ok(());
@@ -230,15 +201,10 @@ async fn keep_lock(lock: &LockLease, renewed: &mut Instant) -> RedisResult<()> {
 /// to the unfiltered sets before any ranked set disappears.
 async fn drop_all(conn: &mut Connection) -> RedisResult<()> {
     let _: () = conn.del(BUILT_AT_KEY).await?;
-    let global = RankedSet::global();
-    let _: () = conn.unlink(&[&global.ranked, &global.staging]).await?;
+    let _: () = conn.unlink(RankedSet::global().ranked).await?;
     let tags = scan_tag_keys(conn).await?;
     let ranked = tags.ranked.iter().map(|label| RankedSet::tag(label).ranked);
-    let staging = tags
-        .staging
-        .iter()
-        .map(|label| RankedSet::tag(label).staging);
-    unlink_keys(conn, ranked.chain(staging)).await
+    unlink_keys(conn, ranked).await
 }
 
 /// The labels of every per-label family, from one pass over the keyspace:
@@ -249,7 +215,6 @@ async fn scan_tag_keys(conn: &mut Connection) -> RedisResult<TagKeys> {
     let prefix = |parts: &[&str]| format!("{}:", sorted_key(parts));
     let source_prefix = prefix(&TAG_GLOBAL_POST_TIMELINE);
     let ranked_prefix = prefix(&TAG_RANKED_POST_TIMELINE);
-    let staging_prefix = prefix(&TAG_RANKED_STAGING_POST_TIMELINE);
     let [tags_part, _, post_part, timeline_part] = TAG_RANKED_POST_TIMELINE;
     let pattern = format!("{SORTED_PREFIX}:{tags_part}:*:{post_part}:{timeline_part}:*");
 
@@ -269,8 +234,6 @@ async fn scan_tag_keys(conn: &mut Connection) -> RedisResult<TagKeys> {
                 tags.sources.insert(label.to_string());
             } else if let Some(label) = key.strip_prefix(ranked_prefix.as_str()) {
                 tags.ranked.insert(label.to_string());
-            } else if let Some(label) = key.strip_prefix(staging_prefix.as_str()) {
-                tags.staging.insert(label.to_string());
             }
         }
         if next == 0 {
@@ -286,7 +249,6 @@ async fn scan_tag_keys(conn: &mut Connection) -> RedisResult<TagKeys> {
 struct TagKeys {
     sources: BTreeSet<String>,
     ranked: BTreeSet<String>,
-    staging: BTreeSet<String>,
 }
 
 /// How the trust ranking applies to one in-scope request.
@@ -337,94 +299,96 @@ impl TrustMode {
     }
 }
 
-/// Lua shared by the scripts below: whether `member` (`author:post`) has its
-/// author in the ranking at `KEYS[2]`. One definition, so writes and rebuilds
-/// always agree on who counts as ranked.
-const IS_RANKED: &str = r"
-local function is_ranked(member)
-    local sep = string.find(member, ':', 1, true)
-    return sep and redis.call('ZSCORE', KEYS[2], string.sub(member, 1, sep - 1))
+/// Lua shared by the scripts below. Each check takes a whole page in one
+/// command, so a script makes a few calls per page rather than a few per post,
+/// and writes and rebuilds agree on who counts as ranked.
+/// - `ranked_flags(members)`: for each `author:post`, whether its author is in
+///   the ranking at `KEYS[2]`.
+/// - `prune(ranked, source, members)`: removes from `ranked` the `members` no
+///   longer in `source`, returning how many went.
+const LUA_HELPERS: &str = r"
+local function ranked_flags(members)
+    local authors = {}
+    for i, member in ipairs(members) do
+        local sep = string.find(member, ':', 1, true)
+        authors[i] = sep and string.sub(member, 1, sep - 1) or ''
+    end
+    if #authors == 0 then return {} end
+    return redis.call('ZMSCORE', KEYS[2], unpack(authors))
+end
+local function prune(ranked, source, members)
+    if #members == 0 then return 0 end
+    local scores, gone = redis.call('ZMSCORE', source, unpack(members)), {}
+    for i, member in ipairs(members) do
+        if not scores[i] then gone[#gone + 1] = member end
+    end
+    if #gone == 0 then return 0 end
+    return redis.call('ZREM', ranked, unpack(gone))
 end
 ";
 
 /// Writes a member to a source set and, when its author is in the ranking, to
-/// the ranked copy and a running build's staging set at the same score. One
-/// atomic step, so the copy never disagrees with the source.
+/// the ranked copy at the same score. One atomic step, so the copy never
+/// disagrees with the source.
 static ADD: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         &[
-            IS_RANKED,
+            LUA_HELPERS,
             r"redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1])
-              if not is_ranked(ARGV[1]) then return 0 end
+              if not ranked_flags({ARGV[1]})[1] then return 0 end
               redis.call('ZADD', KEYS[3], ARGV[2], ARGV[1])
-              if redis.call('EXISTS', KEYS[4]) == 1 then
-                  redis.call('ZADD', KEYS[4], ARGV[2], ARGV[1])
-              end
               return 1",
         ]
         .concat(),
     )
 });
 
-/// Rebuilds a small set in one atomic step, dropping any staging set a crashed
-/// build left behind. Returns `{size, copied}`, with `copied = -1` when the
-/// source is larger than `ARGV[1]` and must be staged instead.
-static REBUILD_SMALL: LazyLock<Script> = LazyLock::new(|| {
+/// Reconciles one `ZSCAN` page of a source set with its ranked copy: the page's
+/// ranked authors' posts are written at the source's score, everyone else's
+/// removed. A first call also prunes a ranked set small enough for one page of
+/// posts no longer in the source, so a small set takes one call. Returns
+/// `{next cursor, scanned, added, removed, pruned}`.
+static RECONCILE: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         &[
-            IS_RANKED,
-            r"local size = redis.call('ZCARD', KEYS[1])
-              if size > tonumber(ARGV[1]) then return {size, -1} end
-              redis.call('UNLINK', KEYS[3], KEYS[4])
-              local entries = redis.call('ZRANGE', KEYS[1], 0, -1, 'WITHSCORES')
-              local copied = 0
-              for i = 1, #entries, 2 do
-                  if is_ranked(entries[i]) then
-                      redis.call('ZADD', KEYS[3], entries[i + 1], entries[i])
-                      copied = copied + 1
+            LUA_HELPERS,
+            r"local added, removed, pruned = 0, 0, 0
+              if ARGV[1] == '0' and redis.call('ZCARD', KEYS[3]) <= tonumber(ARGV[2]) then
+                  removed = prune(KEYS[3], KEYS[1], redis.call('ZRANGE', KEYS[3], 0, -1))
+                  pruned = 1
+              end
+              local page = redis.call('ZSCAN', KEYS[1], ARGV[1], 'COUNT', ARGV[2])
+              local entries, members = page[2], {}
+              for i = 1, #entries, 2 do members[#members + 1] = entries[i] end
+              local flags, keep, drop = ranked_flags(members), {}, {}
+              for j, member in ipairs(members) do
+                  if flags[j] then
+                      keep[#keep + 1] = entries[2 * j]
+                      keep[#keep + 1] = member
+                  else
+                      drop[#drop + 1] = member
                   end
               end
-              return {size, copied}",
+              if #keep > 0 then added = redis.call('ZADD', KEYS[3], 'CH', unpack(keep)) end
+              if #drop > 0 then removed = removed + redis.call('ZREM', KEYS[3], unpack(drop)) end
+              return {page[1], #members, added, removed, pruned}",
         ]
         .concat(),
     )
 });
 
-/// Copies one `ZSCAN` page of a staged build, at the scores the scan read in the
-/// same atomic step. Returns `{next cursor, scanned, copied}`.
-static COPY_BATCH: LazyLock<Script> = LazyLock::new(|| {
+/// Removes, from one `ZSCAN` page of a ranked set, the posts no longer in its
+/// source. Returns `{next cursor, removed}`.
+static PRUNE: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         &[
-            IS_RANKED,
+            LUA_HELPERS,
             r"local page = redis.call('ZSCAN', KEYS[1], ARGV[1], 'COUNT', ARGV[2])
-              local entries = page[2]
-              local copied = 0
-              for i = 1, #entries, 2 do
-                  if is_ranked(entries[i]) then
-                      redis.call('ZADD', KEYS[3], entries[i + 1], entries[i])
-                      copied = copied + 1
-                  end
-              end
-              redis.call('EXPIRE', KEYS[3], ARGV[3])
-              return {page[1], #entries / 2, copied}",
+              local members = {}
+              for i = 1, #page[2], 2 do members[#members + 1] = page[2][i] end
+              return {page[1], prune(KEYS[1], KEYS[2], members)}",
         ]
         .concat(),
-    )
-});
-
-/// Installs a finished staging set: drops the sentinel and the current ranked
-/// set (`UNLINK` frees it off the main thread), then renames the staging set
-/// into place. A staging set left empty means no ranked member, so the ranked
-/// set ends up absent.
-static SWAP: LazyLock<Script> = LazyLock::new(|| {
-    Script::new(
-        r"redis.call('ZREM', KEYS[1], ARGV[1])
-          redis.call('UNLINK', KEYS[2])
-          if redis.call('EXISTS', KEYS[1]) == 1 then
-              redis.call('RENAME', KEYS[1], KEYS[2])
-              redis.call('PERSIST', KEYS[2])
-          end
-          return 1",
     )
 });
 
@@ -436,7 +400,6 @@ pub(crate) async fn add(set: &RankedSet, member: &str, score: f64) -> RedisResul
         .key(&set.source)
         .key(ranking_key())
         .key(&set.ranked)
-        .key(&set.staging)
         .arg(member)
         .arg(score)
         .invoke_async(&mut conn)
@@ -444,8 +407,7 @@ pub(crate) async fn add(set: &RankedSet, member: &str, score: f64) -> RedisResul
     Ok(())
 }
 
-/// Removes `member` from `set.source`, its ranked copy and a running build's
-/// staging set in one transaction, so a swap cannot land between the removals.
+/// Removes `member` from `set.source` and its ranked copy in one transaction.
 pub(crate) async fn remove(set: &RankedSet, member: &str) -> RedisResult<()> {
     let mut conn = get_redis_conn().await?;
     let _: () = redis::pipe()
@@ -453,8 +415,6 @@ pub(crate) async fn remove(set: &RankedSet, member: &str) -> RedisResult<()> {
         .zrem(&set.source, member)
         .ignore()
         .zrem(&set.ranked, member)
-        .ignore()
-        .zrem(&set.staging, member)
         .ignore()
         .query_async(&mut conn)
         .await?;
@@ -468,14 +428,19 @@ pub(crate) struct RankedRebuildStats {
     pub sets: usize,
     /// Source members examined.
     pub scanned: usize,
-    /// Members written to a ranked set.
-    pub copied: usize,
-    /// Ranked sets removed because their source set no longer exists.
+    /// Members added to, or rescored in, a ranked set.
+    pub added: usize,
+    /// Members removed from a ranked set.
+    pub removed: usize,
+    /// Ranked sets whose source set no longer existed.
     pub orphans: usize,
     /// No ranking existed, so every ranked set was dropped instead.
     pub dropped: bool,
 }
 
+/// Reconciles `set.ranked` with `set.source` in place, a page at a time.
+/// Concurrent writes stay correct: each page is one atomic script, and
+/// [`add`] and [`remove`] keep the copy in step with the source in between.
 async fn rebuild_set(
     conn: &mut Connection,
     trust: &str,
@@ -483,79 +448,63 @@ async fn rebuild_set(
     stats: &mut RankedRebuildStats,
 ) -> RedisResult<()> {
     stats.sets += 1;
-    if let Some((scanned, copied)) = rebuild_small(conn, trust, set).await? {
-        stats.scanned += scanned;
-        stats.copied += copied;
-        return Ok(());
-    }
-
-    // Too big for one atomic step: build into the staging set, then swap.
-    let _: () = redis::pipe()
-        .unlink(&set.staging)
-        .ignore()
-        .zadd(&set.staging, SENTINEL, 0)
-        .ignore()
-        .expire(&set.staging, STAGING_LEASE_SECS as i64)
-        .ignore()
-        .query_async(conn)
-        .await?;
-    let mut cursor: u64 = 0;
+    let mut pruned = false;
+    let mut cursor = 0;
     loop {
-        let (next, scanned, copied) = copy_batch(conn, trust, set, cursor).await?;
+        let (next, scanned, added, removed, small) =
+            reconcile_page(conn, trust, set, cursor).await?;
         stats.scanned += scanned;
-        stats.copied += copied;
+        stats.added += added;
+        stats.removed += removed;
+        pruned |= small;
         if next == 0 {
             break;
         }
         cursor = next;
     }
-    swap(conn, set).await
+    // A ranked set too big to prune in the first call, a page at a time.
+    let mut cursor = 0;
+    while !pruned {
+        let (next, removed) = prune_page(conn, set, cursor).await?;
+        stats.removed += removed;
+        pruned = next == 0;
+        cursor = next;
+    }
+    Ok(())
 }
 
-/// `Some((scanned, copied))` once rebuilt, `None` when the set is too big.
-async fn rebuild_small(
-    conn: &mut Connection,
-    trust: &str,
-    set: &RankedSet,
-) -> RedisResult<Option<(usize, usize)>> {
-    let (size, copied): (i64, i64) = REBUILD_SMALL
-        .key(&set.source)
-        .key(trust)
-        .key(&set.ranked)
-        .key(&set.staging)
-        .arg(ATOMIC_MAX)
-        .invoke_async(conn)
-        .await?;
-    Ok((copied >= 0).then_some((size as usize, copied as usize)))
-}
-
-/// `(next cursor, scanned, copied)` for the page at `cursor`.
-async fn copy_batch(
+/// `(next cursor, scanned, added, removed, pruned)` for the source page at `cursor`.
+async fn reconcile_page(
     conn: &mut Connection,
     trust: &str,
     set: &RankedSet,
     cursor: u64,
-) -> RedisResult<(u64, usize, usize)> {
-    let (next, scanned, copied): (u64, i64, i64) = COPY_BATCH
+) -> RedisResult<(u64, usize, usize, usize, bool)> {
+    RECONCILE
         .key(&set.source)
         .key(trust)
-        .key(&set.staging)
+        .key(&set.ranked)
         .arg(cursor)
         .arg(BATCH)
-        .arg(STAGING_LEASE_SECS)
         .invoke_async(conn)
-        .await?;
-    Ok((next, scanned as usize, copied as usize))
+        .await
+        .map_err(Into::into)
 }
 
-async fn swap(conn: &mut Connection, set: &RankedSet) -> RedisResult<()> {
-    let _: i64 = SWAP
-        .key(&set.staging)
+/// `(next cursor, removed)` for the ranked page at `cursor`.
+async fn prune_page(
+    conn: &mut Connection,
+    set: &RankedSet,
+    cursor: u64,
+) -> RedisResult<(u64, usize)> {
+    PRUNE
         .key(&set.ranked)
-        .arg(SENTINEL)
+        .key(&set.source)
+        .arg(cursor)
+        .arg(BATCH)
         .invoke_async(conn)
-        .await?;
-    Ok(())
+        .await
+        .map_err(Into::into)
 }
 
 async fn unlink_keys(
@@ -602,23 +551,11 @@ mod tests {
         let global = RankedSet::global();
         assert_eq!(global.source, "Sorted:Posts:Global:Timeline");
         assert_eq!(global.ranked, "Sorted:Posts:Ranked:Timeline");
-        assert_eq!(global.staging, "Sorted:Posts:RankedStaging:Timeline");
         let tag = RankedSet::tag("bitcoin");
         assert_eq!(tag.source, "Sorted:Tags:Global:Post:Timeline:bitcoin");
         assert_eq!(tag.ranked, "Sorted:Tags:Ranked:Post:Timeline:bitcoin");
-        assert_eq!(
-            tag.staging,
-            "Sorted:Tags:RankedStaging:Post:Timeline:bitcoin"
-        );
         // A scan or glob for one family of keys must never match another.
-        let families = [
-            global.source,
-            global.ranked,
-            global.staging,
-            tag.source,
-            tag.ranked,
-            tag.staging,
-        ];
+        let families = [global.source, global.ranked, tag.source, tag.ranked];
         for (i, a) in families.iter().enumerate() {
             for (j, b) in families.iter().enumerate() {
                 let prefix = b.trim_end_matches("bitcoin");
@@ -663,7 +600,7 @@ mod tests {
             let mut conn = get_redis_conn().await?;
             let keys = labels.iter().flat_map(|label| {
                 let set = RankedSet::tag(label);
-                [set.source, set.ranked, set.staging]
+                [set.source, set.ranked]
             });
             unlink_keys(&mut conn, keys).await?;
             let authors = [ALICE, BOB, CAROL];
@@ -731,33 +668,9 @@ mod tests {
                 members(&set.ranked).await?,
                 owned(&[("test-ranked-alice:p1", 10.0)])
             );
-            // No build is running, so nothing is written to a staging set.
-            assert!(!exists(&set.staging).await?);
-            cleanup(&[label]).await
-        }
-
-        #[tokio_shared_rt::test(shared)]
-        async fn writes_go_through_to_a_running_build() -> TestResult {
-            let label = "test-ranked-write-through";
-            setup(&[label]).await?;
-            rank(&[ALICE]).await?;
-            let set = RankedSet::tag(label);
-            zadd(&set.staging, &[(0.0, SENTINEL)]).await?;
-
-            add(&set, "test-ranked-alice:p1", 10.0).await?;
-            assert_eq!(
-                members(&set.ranked).await?,
-                owned(&[("test-ranked-alice:p1", 10.0)])
-            );
-            assert_eq!(
-                members(&set.staging).await?,
-                owned(&[(SENTINEL, 0.0), ("test-ranked-alice:p1", 10.0)])
-            );
 
             remove(&set, "test-ranked-alice:p1").await?;
-            assert!(!exists(&set.source).await?);
             assert!(!exists(&set.ranked).await?);
-            assert_eq!(members(&set.staging).await?, owned(&[(SENTINEL, 0.0)]));
             cleanup(&[label]).await
         }
 
@@ -803,11 +716,12 @@ mod tests {
             cleanup(&labels).await
         }
 
-        /// Past the atomic limit, across `ZSCAN` pages and a run of equal
-        /// scores longer than a page.
+        /// Across `ZSCAN` pages and a run of equal scores longer than a page,
+        /// with a ranked set too big to prune in the first call: posts gone from
+        /// the source and an unranked author's posts are removed.
         #[tokio_shared_rt::test(shared)]
-        async fn rebuild_stages_large_sets() -> TestResult {
-            let label = "test-ranked-staged";
+        async fn rebuild_reconciles_large_sets() -> TestResult {
+            let label = "test-ranked-large";
             setup(&[label]).await?;
             rank(&[ALICE, BOB]).await?;
             let set = RankedSet::tag(label);
@@ -817,6 +731,15 @@ mod tests {
             posts.extend((0..900).map(|i| (format!("{CAROL}:P{i:05}"), 500.0 + i as f64)));
             let entries: Vec<(f64, &str)> = posts.iter().map(|(m, s)| (*s, m.as_str())).collect();
             zadd(&set.source, &entries).await?;
+            let gone: Vec<String> = (0..600).map(|i| format!("{BOB}:GONE{i:05}")).collect();
+            let mut stale: Vec<(f64, &str)> = gone.iter().map(|m| (3_000.0, m.as_str())).collect();
+            stale.extend(
+                entries
+                    .iter()
+                    .filter(|(_, m)| m.starts_with(CAROL))
+                    .take(50),
+            );
+            zadd(&set.ranked, &stale).await?;
 
             let mut conn = get_redis_conn().await?;
             let mut stats = RankedRebuildStats::default();
@@ -828,65 +751,64 @@ mod tests {
                 .collect();
             expected.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
             assert_eq!(members(&set.ranked).await?, expected);
-            assert!(!exists(&set.staging).await?, "staging set left behind");
-            let ttl: i64 = conn.ttl(&set.ranked).await?;
-            assert_eq!(ttl, -1, "the ranked set kept the staging lease");
+            assert_eq!(
+                stats.removed, 650,
+                "600 posts gone, 50 by an unranked author"
+            );
             cleanup(&[label]).await
         }
 
-        /// Writes landing during a staged build: a member deleted after its
-        /// page was copied is not resurrected, and one created after its region
-        /// was scanned is kept.
+        /// Writes landing mid-rebuild: a post deleted after its page was
+        /// reconciled is not resurrected, and one created meanwhile is kept.
         #[tokio_shared_rt::test(shared)]
-        async fn staged_build_keeps_concurrent_writes() -> TestResult {
+        async fn writes_during_a_rebuild_are_kept() -> TestResult {
             let label = "test-ranked-concurrent";
             setup(&[label]).await?;
             rank(&[ALICE]).await?;
             let set = RankedSet::tag(label);
-            zadd(
-                &set.source,
-                &[(1.0, "test-ranked-alice:p1"), (2.0, "test-ranked-alice:p2")],
-            )
-            .await?;
-            zadd(&set.staging, &[(0.0, SENTINEL)]).await?;
-
-            let mut conn = get_redis_conn().await?;
-            let (next, scanned, copied) = copy_batch(&mut conn, &ranking_key(), &set, 0).await?;
-            assert_eq!((next, scanned, copied), (0, 2, 2));
-
-            // Deleted, then created, while the build is still running.
-            remove(&set, "test-ranked-alice:p2").await?;
-            add(&set, "test-ranked-alice:p3", 3.0).await?;
-
-            swap(&mut conn, &set).await?;
-
-            assert_eq!(
-                members(&set.ranked).await?,
-                owned(&[("test-ranked-alice:p1", 1.0), ("test-ranked-alice:p3", 3.0)])
-            );
-            assert!(!exists(&set.staging).await?);
-            let ttl: i64 = conn.ttl(&set.ranked).await?;
-            assert_eq!(ttl, -1, "the ranked set kept the staging lease");
-            cleanup(&[label]).await
-        }
-
-        #[tokio_shared_rt::test(shared)]
-        async fn small_rebuild_defers_a_set_past_the_atomic_limit() -> TestResult {
-            let label = "test-ranked-defer";
-            setup(&[label]).await?;
-            rank(&[ALICE]).await?;
-            let set = RankedSet::tag(label);
-            let posts: Vec<String> = (0..=ATOMIC_MAX)
-                .map(|i| format!("{ALICE}:P{i:05}"))
-                .collect();
+            let posts: Vec<String> = (0..1_200).map(|i| format!("{ALICE}:P{i:05}")).collect();
             let entries: Vec<(f64, &str)> = posts.iter().map(|m| (1.0, m.as_str())).collect();
             zadd(&set.source, &entries).await?;
 
             let mut conn = get_redis_conn().await?;
-            let rebuilt = rebuild_small(&mut conn, &ranking_key(), &set).await?;
+            let (mut cursor, ..) = reconcile_page(&mut conn, &ranking_key(), &set, 0).await?;
+            assert_ne!(cursor, 0, "the set spans several pages");
+            let reconciled: Vec<String> = conn.zrange(&set.ranked, 0, 0).await?;
+            let deleted = reconciled.first().ok_or("nothing reconciled")?;
+            remove(&set, deleted).await?;
+            add(&set, "test-ranked-alice:NEW", 2.0).await?;
+            while cursor != 0 {
+                (cursor, ..) = reconcile_page(&mut conn, &ranking_key(), &set, cursor).await?;
+            }
 
-            assert_eq!(rebuilt, None);
-            assert!(!exists(&set.ranked).await?, "nothing written on deferral");
+            let source = members(&set.source).await?;
+            assert_eq!(members(&set.ranked).await?, source);
+            assert!(!source.iter().any(|(m, _)| m == deleted));
+            assert!(source.iter().any(|(m, _)| m == "test-ranked-alice:NEW"));
+            cleanup(&[label]).await
+        }
+
+        /// A set small enough for one page, its ranked copy included, takes one call.
+        #[tokio_shared_rt::test(shared)]
+        async fn a_small_set_is_reconciled_in_one_call() -> TestResult {
+            let label = "test-ranked-small";
+            setup(&[label]).await?;
+            rank(&[ALICE]).await?;
+            let set = RankedSet::tag(label);
+            let posts = [(1.0, "test-ranked-alice:p1"), (2.0, "test-ranked-bob:p2")];
+            zadd(&set.source, &posts).await?;
+            // Stale: a post gone from the source, and an unranked author's post.
+            let stale = [(3.0, "test-ranked-alice:gone"), (2.0, "test-ranked-bob:p2")];
+            zadd(&set.ranked, &stale).await?;
+
+            let mut conn = get_redis_conn().await?;
+            let page = reconcile_page(&mut conn, &ranking_key(), &set, 0).await?;
+
+            assert_eq!(page, (0, 2, 1, 2, true));
+            assert_eq!(
+                members(&set.ranked).await?,
+                owned(&[("test-ranked-alice:p1", 1.0)])
+            );
             cleanup(&[label]).await
         }
 
@@ -895,18 +817,17 @@ mod tests {
         /// fixture's ranked sets back before anything is asserted.
         #[tokio_shared_rt::test(shared)]
         async fn rebuild_without_a_ranking_drops_every_ranked_set() -> TestResult {
-            let labels = ["test-ranked-drop-x", "test-ranked-drop-y"];
-            setup(&labels).await?;
-            let [x, y] = labels.map(RankedSet::tag);
-            zadd(&x.ranked, &[(1.0, "test-ranked-alice:p1")]).await?;
-            zadd(&y.staging, &[(0.0, SENTINEL)]).await?;
+            let label = "test-ranked-drop";
+            setup(&[label]).await?;
+            let set = RankedSet::tag(label);
+            zadd(&set.ranked, &[(1.0, "test-ranked-alice:p1")]).await?;
             let global = RankedSet::global();
 
             park_ranking().await?;
             let dropped = rebuild().await;
             let survivors = async {
                 let mut survivors = Vec::new();
-                for key in [BUILT_AT_KEY, &global.ranked, &x.ranked, &y.staging] {
+                for key in [BUILT_AT_KEY, &global.ranked, &set.ranked] {
                     if exists(key).await? {
                         survivors.push(key.to_string());
                     }
@@ -922,35 +843,26 @@ mod tests {
             assert!(survivors?.is_empty(), "survived without a ranking");
             // The source sets are not the rebuild's to touch.
             assert!(source_kept?);
-            cleanup(&labels).await
+            cleanup(&[label]).await
         }
 
+        /// A ranked set whose source is gone is emptied by reconciling it.
         #[tokio_shared_rt::test(shared)]
-        async fn rebuild_removes_orphans_and_leftovers() -> TestResult {
-            let labels = ["test-ranked-live", "test-ranked-gone", "test-ranked-dead"];
+        async fn rebuild_empties_ranked_sets_whose_source_is_gone() -> TestResult {
+            let labels = ["test-ranked-live", "test-ranked-gone"];
             setup(&labels).await?;
             rank(&[ALICE]).await?;
-            let [live, gone, dead] = labels.map(RankedSet::tag);
+            let [live, gone] = labels.map(RankedSet::tag);
             zadd(&live.source, &[(1.0, "test-ranked-alice:p1")]).await?;
-            // A ranked set whose source vanished, and leftovers of a crashed
-            // build, including the global set's (staged, as the fixture is past
-            // the atomic limit).
             zadd(&gone.ranked, &[(2.0, "test-ranked-alice:p2")]).await?;
-            zadd(&live.staging, &[(0.0, SENTINEL)]).await?;
-            zadd(&dead.staging, &[(0.0, SENTINEL)]).await?;
-            zadd(&RankedSet::global().staging, &[(0.0, SENTINEL)]).await?;
 
             let stats = rebuild().await?;
 
             assert!(stats.orphans >= 1);
-            for key in [
-                &gone.ranked,
-                &live.staging,
-                &dead.staging,
-                &RankedSet::global().staging,
-            ] {
-                assert!(!exists(key).await?, "{key} left behind");
-            }
+            assert!(
+                !exists(&gone.ranked).await?,
+                "orphaned ranked set left behind"
+            );
             assert_eq!(
                 members(&live.ranked).await?,
                 owned(&[("test-ranked-alice:p1", 1.0)])
