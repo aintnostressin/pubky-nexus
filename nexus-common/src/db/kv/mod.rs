@@ -14,6 +14,6 @@ pub use index::search::AuthorFilter;
 pub use index::sets;
 pub use index::sorted_sets::{ScoreAction, SortOrder, SORTED_PREFIX};
 pub use last_save::get_last_rdb_save_time;
-pub use lock::{release_lock, try_acquire_lock};
+pub use lock::{new_lock_token, release_lock, try_acquire_lock, LockLease};
 pub use setup::setup_cache;
 pub use traits::RedisOps;
