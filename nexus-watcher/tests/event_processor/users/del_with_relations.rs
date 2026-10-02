@@ -4,6 +4,8 @@ use crate::{
 };
 use anyhow::Result;
 use chrono::Utc;
+use nexus_common::db::graph::exec::exec_single_row;
+use nexus_common::db::graph::Query;
 use nexus_common::models::user::{UserCounts, UserSearch, UserStream, UserView};
 use nexus_watcher::events::handlers;
 use pubky::Keypair;
@@ -287,6 +289,15 @@ async fn test_delete_recommended_user() -> Result<()> {
         };
         test.create_post(&carol_kp, &post).await?;
     }
+
+    // Only ranked users are recommended while the fixture's trust ranking is
+    // published, and no recompute has scored Carol: give her a score.
+    let set_trust = Query::new(
+        "delete_recommended_user_set_trust",
+        "MATCH (u:User {id: $id}) SET u.trust = 0.05",
+    )
+    .param("id", carol_id.clone());
+    exec_single_row(set_trust).await?;
 
     // Check if Carol is recommended to Alice
     let alice_recommended_ids_res_1 = UserStream::get_recommended_ids(&alice_id, None).await;

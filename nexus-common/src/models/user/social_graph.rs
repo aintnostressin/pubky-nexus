@@ -69,6 +69,16 @@ impl SocialGraphStatus {
             .flatten())
     }
 
+    /// Whether a ranking is published. A rebuild with nothing to rank drops the
+    /// key, so this stays false until the trust job first succeeds, as on an
+    /// install with no seed set.
+    pub async fn is_published() -> RedisResult<bool> {
+        let (population, _) =
+            Self::index_sorted_set_card_and_members(&USER_SOCIAL_GRAPH_KEY_PARTS, &[], None)
+                .await?;
+        Ok(population > 0)
+    }
+
     /// Maps raw ranks to statuses.
     ///
     /// An empty ranking means it was never built, which is not the same as

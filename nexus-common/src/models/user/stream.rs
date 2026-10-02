@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{Influencers, UserCounts, UserDetails, UserSearch, UserView};
+use super::{Influencers, SocialGraphStatus, UserCounts, UserDetails, UserSearch, UserView};
 
 use crate::db::kv::{sets, RedisError, RedisResult, SortOrder};
 use crate::db::{fetch_all_rows_from_graph, queries, RedisOps};
@@ -143,6 +143,9 @@ impl UserStream {
             .await
     }
     /// Retrieves recommended user IDs based on the specified criteria.
+    ///
+    /// Once a trust ranking is published, only ranked users are recommended, most trusted
+    /// first; without one, candidates are neither filtered nor reordered.
     pub async fn get_recommended_ids(
         user_id: &str,
         limit: Option<usize>,
@@ -176,7 +179,8 @@ impl UserStream {
         }
 
         // Cache miss; proceed to query Neo4j
-        let query = queries::get::recommend_users(user_id, 30);
+        let trust_rule = SocialGraphStatus::is_published().await?;
+        let query = queries::get::recommend_users(user_id, 30, trust_rule);
         let rows = fetch_all_rows_from_graph(query).await?;
 
         let mut user_ids = Vec::new();

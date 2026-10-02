@@ -3,6 +3,7 @@ use serde_json::Value;
 use server::TestServiceServer;
 
 pub mod recommended;
+pub mod recommended_sybil;
 pub mod search_reach;
 pub mod server;
 

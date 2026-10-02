@@ -15,6 +15,7 @@ RESOURCES_TEST_FILE="/test-graph/mocks/resources.cypher"
 WOT_TEST_FILE="/test-graph/mocks/wot.cypher"
 SEARCH_REACH_TEST_FILE="/test-graph/mocks/search-reach.cypher"
 RECOMMENDED_TEST_FILE="/test-graph/mocks/recommended.cypher"
+RECOMMENDED_SYBIL_TEST_FILE="/test-graph/mocks/recommended-sybil.cypher"
 # Runs last: it scores every user the files above created (see the file).
 TRUST_TEST_FILE="/test-graph/mocks/trust.cypher"
 
@@ -44,6 +45,8 @@ echo "Importing reach search test graph..."
 time cypher-shell -u neo4j -p 12345678 -f "$SEARCH_REACH_TEST_FILE"
 echo "Importing recommended users test graph..."
 time cypher-shell -u neo4j -p 12345678 -f "$RECOMMENDED_TEST_FILE"
+echo "Importing recommended users Sybil attack graph..."
+time cypher-shell -u neo4j -p 12345678 -f "$RECOMMENDED_SYBIL_TEST_FILE"
 echo "Importing trust ranking test graph..."
 time cypher-shell -u neo4j -p 12345678 -f "$TRUST_TEST_FILE"
 

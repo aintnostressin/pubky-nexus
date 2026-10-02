@@ -1570,24 +1570,39 @@ pub fn post_is_safe_to_delete(author_id: &str, post_id: &str) -> Query {
 /// Find user recommendations: active users (with 5+ posts) who are 2-3 degrees of separation away
 /// from the given user, but not directly followed by them.
 /// Deleted users are filtered in Cypher; only the user ID is projected (no name column).
-pub fn recommend_users(user_id: &str, limit: usize) -> Query {
+///
+/// `trust_rule` keeps only users with a positive trust score and returns the most trusted
+/// first; the caller asks for it once a trust ranking is published. Sybils behind an honest
+/// follow-back stay unranked until the next recompute, which then ranks them low: from there,
+/// the order keeps them out only when `limit` better candidates are in reach.
+/// Ordering reads every candidate before LIMIT applies, which the recommendation cache absorbs.
+pub fn recommend_users(user_id: &str, limit: usize, trust_rule: bool) -> Query {
+    let (trust_filter, trust_order) = match trust_rule {
+        true => (
+            "\n          AND potential.trust > 0",
+            "\n        ORDER BY potential.trust DESC, recommended_user_id ASC",
+        ),
+        false => ("", ""),
+    };
     Query::new(
         "recommend_users",
-        "
-        MATCH (user:User {id: $user_id})
+        format!(
+            "
+        MATCH (user:User {{id: $user_id}})
         // Depth 1 is always directly followed, hence excluded below: start at 2.
         // DISTINCT right after the expand lets the planner prune (one row per reached
         // node, not per path), so the filters below run once per candidate.
         MATCH (user)-[:FOLLOWS*2..3]->(potential:User)
         WITH DISTINCT user, potential
         WHERE potential <> user
-          AND NOT coalesce(potential.deleted, false)
+          AND NOT coalesce(potential.deleted, false){trust_filter}
           AND NOT (user)-[:FOLLOWS]->(potential)
-          // Degree lookup instead of expand + aggregate; keeps LIMIT lazy.
-          AND COUNT { (potential)-[:AUTHORED]->() } >= 5
-        RETURN potential.id AS recommended_user_id
+          // Degree lookup instead of expand + aggregate; keeps an unordered LIMIT lazy.
+          AND COUNT {{ (potential)-[:AUTHORED]->() }} >= 5
+        RETURN potential.id AS recommended_user_id{trust_order}
         LIMIT $limit
-    ",
+    "
+        ),
     )
     .param("user_id", user_id.to_string())
     .param("limit", limit as i64)
@@ -1766,6 +1781,20 @@ mod tests {
         ] {
             assert!(build_query_with(source, sorting, &None, None, true).is_err());
         }
+    }
+
+    #[test]
+    fn recommend_users_ranks_by_trust_only_when_asked() {
+        let ranked = recommend_users("user", 30, true).to_cypher_populated();
+        assert!(ranked.contains("AND potential.trust > 0"), "{ranked}");
+        // The order has to apply before LIMIT, or it would only sort an arbitrary 30.
+        let order = ranked.find("ORDER BY potential.trust DESC, recommended_user_id ASC");
+        let limit = ranked.find("LIMIT 30");
+        assert!(order.is_some() && order < limit, "{ranked}");
+
+        let unranked = recommend_users("user", 30, false).to_cypher_populated();
+        assert!(!unranked.contains("trust"), "{unranked}");
+        assert!(!unranked.contains("ORDER BY"), "{unranked}");
     }
 
     fn build(source: StreamSource) -> String {
