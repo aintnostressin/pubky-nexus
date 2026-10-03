@@ -12,9 +12,9 @@
 //! writes the sources directly and is followed by a rebuild. Every ranking publish
 //! reconciles the copies with their sources in place, a page at a time
 //! ([`rebuild()`]), so drift lasts at most until the next recompute and no call
-//! holds Redis for more than one page. Readers only trust the ranked sets once a
-//! complete rebuild has run ([`BUILT_AT_KEY`]); before that they serve the
-//! unfiltered sets.
+//! holds Redis for more than one page. Nothing is filtered until a complete
+//! rebuild has run ([`BUILT_AT_KEY`]): before that every shape, Cypher included,
+//! serves the unfiltered stream, so the filter switches on everywhere at once.
 //!
 //! The scripts take several keys, so they assume a single Redis instance (not
 //! Redis Cluster), as the rest of Nexus does.
@@ -39,7 +39,8 @@ pub const POST_RANKED_TIMELINE_KEY_PARTS: [&str; 3] = ["Posts", "Ranked", "Timel
 /// Ranked copies of the per-label timelines: `Sorted:Tags:Ranked:Post:Timeline:<label>`.
 /// A different second segment from the source sets, so a scan for one never matches the other.
 pub const TAG_RANKED_POST_TIMELINE: [&str; 4] = ["Tags", "Ranked", "Post", "Timeline"];
-/// Set once a complete rebuild has run; readers trust the ranked sets only then.
+/// Set once a complete rebuild has run; nothing is filtered before. Deleting it
+/// turns the filter off on every shape until the next rebuild.
 const BUILT_AT_KEY: &str = "Ranked:Timeline:BuiltAt";
 
 /// The key of the sorted set at `parts`.
@@ -81,13 +82,11 @@ impl RankedSet {
 /// How the trust ranking applies to one in-scope request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrustMode {
-    /// Served exactly as without the filter.
+    /// Served exactly as without the filter: no ranking, a viewer outside it,
+    /// or no complete rebuild yet.
     Off,
     /// Filtered: Redis shapes read the ranked sets, Cypher shapes add the rule.
     Ranked,
-    /// Filtered on Cypher only: the ranked sets have not been built yet, so the
-    /// Redis shapes serve the unfiltered sets.
-    Unbuilt,
 }
 
 impl TrustMode {
@@ -114,11 +113,14 @@ impl TrustMode {
     /// `filtered` says whether the filter applies to the request at all: a
     /// ranking exists and the viewer, if any, is in it. A viewer outside the
     /// ranking, including one Nexus does not know, gets the unfiltered stream.
+    /// `built` says a complete rebuild has run. Until then no shape filters, so
+    /// a deploy onto an instance that already publishes a ranking (for the
+    /// badge) switches the filter on at its first rebuild, on every shape at once.
     pub fn decide(filtered: bool, built: bool) -> Self {
-        match (filtered, built) {
-            (false, _) => TrustMode::Off,
-            (true, true) => TrustMode::Ranked,
-            (true, false) => TrustMode::Unbuilt,
+        if filtered && built {
+            TrustMode::Ranked
+        } else {
+            TrustMode::Off
         }
     }
 }

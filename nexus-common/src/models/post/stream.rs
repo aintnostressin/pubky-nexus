@@ -314,7 +314,7 @@ impl PostStream {
                 &tags,
                 pagination,
                 kind,
-                trust_mode != TrustMode::Off,
+                trust_mode == TrustMode::Ranked,
             )
             .await
             .map_err(Into::into),

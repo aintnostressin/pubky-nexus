@@ -5,7 +5,7 @@ fn decide_covers_every_state() {
     assert_eq!(TrustMode::decide(false, false), TrustMode::Off);
     assert_eq!(TrustMode::decide(false, true), TrustMode::Off);
     assert_eq!(TrustMode::decide(true, true), TrustMode::Ranked);
-    assert_eq!(TrustMode::decide(true, false), TrustMode::Unbuilt);
+    assert_eq!(TrustMode::decide(true, false), TrustMode::Off);
 }
 
 #[test]
@@ -36,11 +36,13 @@ mod live {
 
     use redis::AsyncCommands;
 
+    use pubky_app_specs::PubkyAppPostKind;
+
     use super::super::rebuild::{rebuild_set, reconcile_page, unlink_keys, RankedRebuildStats};
     use super::super::*;
-    use crate::db::kv::RedisOps;
-    use crate::models::post::PostStream;
-    use crate::types::DynError;
+    use crate::db::kv::{RedisOps, SortOrder};
+    use crate::models::post::{KindFilter, PostStream, StreamSource, TrustFilter};
+    use crate::types::{DynError, Pagination, StreamSorting};
     use crate::{StackConfig, StackManager};
 
     type TestResult = Result<(), DynError>;
@@ -336,6 +338,28 @@ mod live {
         cleanup(&[label]).await
     }
 
+    /// `kind=short` over the fixture's wot window, a Cypher shape. Its hidden
+    /// authors' posts (the on-ramp accounts, the spammer) sit among ranked ones.
+    async fn wot_window_short(trust_filter: Option<TrustFilter>) -> Result<Vec<String>, DynError> {
+        let window = Pagination {
+            start: Some(1650000000014.0),
+            end: Some(1650000000001.0),
+            skip: Some(0),
+            limit: Some(50),
+        };
+        let stream = PostStream::get_post_keys(
+            StreamSource::All,
+            window,
+            SortOrder::Descending,
+            StreamSorting::Timeline,
+            None,
+            Some(KindFilter::Kind(PubkyAppPostKind::Short)),
+            trust_filter,
+        )
+        .await?;
+        Ok(stream.map(|stream| stream.post_keys).unwrap_or_default())
+    }
+
     /// The marker and the ranking are restored before anything is asserted.
     #[tokio_shared_rt::test(shared)]
     async fn load_reflects_the_ranking_marker_and_viewer() -> TestResult {
@@ -347,11 +371,15 @@ mod live {
         let anonymous = TrustMode::load(None).await;
         let stranger = TrustMode::load(Some("test-ranked-stranger")).await;
 
+        // Without the marker no shape filters, Cypher included.
         let mut conn = get_redis_conn().await?;
         let built_at: String = conn.get(BUILT_AT_KEY).await?;
         let _: () = conn.del(BUILT_AT_KEY).await?;
         let unbuilt = TrustMode::load(None).await;
+        let unbuilt_short = wot_window_short(Some(TrustFilter::default())).await;
         let _: () = conn.set(BUILT_AT_KEY, built_at).await?;
+        let built_short = wot_window_short(Some(TrustFilter::default())).await?;
+        let unfiltered_short = wot_window_short(None).await?;
 
         park_ranking().await?;
         let no_ranking = [
@@ -363,7 +391,12 @@ mod live {
         assert_eq!(ranked?, TrustMode::Ranked);
         assert_eq!(anonymous?, TrustMode::Ranked);
         assert_eq!(stranger?, TrustMode::Off);
-        assert_eq!(unbuilt?, TrustMode::Unbuilt);
+        assert_eq!(unbuilt?, TrustMode::Off);
+        assert_eq!(unbuilt_short?, unfiltered_short);
+        assert_ne!(
+            built_short, unfiltered_short,
+            "the window must hide someone"
+        );
         for mode in no_ranking {
             assert_eq!(mode?, TrustMode::Off);
         }
