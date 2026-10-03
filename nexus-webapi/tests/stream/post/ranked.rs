@@ -13,9 +13,12 @@
 //! These tests depend on the ranking key existing, which `test_social_graph_status`
 //! briefly deletes; `.config/nextest.toml` runs that test alone.
 use crate::utils::get_request;
+use crate::utils::recommended::{D4, DELETED};
 use crate::utils::search_reach::UNKNOWN_USER;
 use crate::utils::server::TestServiceServer;
 use anyhow::Result;
+use nexus_common::db::fetch_key_from_graph;
+use nexus_common::db::graph::Query;
 use nexus_common::db::kv::SortOrder;
 use nexus_common::models::post::{KindFilter, PostStream, StreamSource};
 use nexus_common::types::{Pagination, StreamSorting};
@@ -108,8 +111,8 @@ async fn unfiltered_keys(
 
 /// No viewer: every shape serves only the ranked authors, on the keys route and
 /// the hydrated one. The plain stream reads the ranked set; `kind`,
-/// `exclude_kinds` and several tags go to Cypher, which keeps authors with a
-/// positive trust score.
+/// `exclude_kinds` and several tags go to Cypher, which keeps the authors the
+/// ranking would: a positive trust score and a profile that isn't deleted.
 #[tokio_shared_rt::test(shared)]
 async fn test_all_timeline_hides_unranked_authors() -> Result<()> {
     for shape in ["", "&kind=short", "&exclude_kinds=long"] {
@@ -130,6 +133,68 @@ async fn test_all_timeline_hides_unranked_authors() -> Result<()> {
         unfiltered_keys(Some(&["bitcoin", "opensource"]), None, first_page(50)).await?;
     assert!(!unfiltered.is_empty());
     assert_eq!(post_keys_in(&page), unfiltered);
+    Ok(())
+}
+
+const DELETED_START: i64 = 1600000001034;
+const DELETED_END: i64 = 1600000001029;
+
+/// A deleted profile keeps its node, its posts and the score a recompute gives
+/// it. The ranking skips deleted users and the Cypher rule runs the same test,
+/// so its posts are hidden on every shape. recommended.cypher's deleted user has
+/// five root posts (`indexed_at` 1600000001030..=034) above a ranked one (029).
+#[tokio_shared_rt::test(shared)]
+async fn test_all_timeline_hides_deleted_authors() -> Result<()> {
+    // Unscored, the trust check alone would hide it, and this test would pass
+    // without the deletion check.
+    TestServiceServer::get_test_server().await;
+    let query = Query::new(
+        "test_user_trust",
+        "MATCH (u:User {id: $id}) RETURN u.trust AS trust",
+    )
+    .param("id", DELETED);
+    let trust = fetch_key_from_graph::<Option<f64>>(query, "trust")
+        .await?
+        .flatten();
+    assert!(trust.is_some_and(|trust| trust > 0.0), "{trust:?}");
+
+    let ranked = format!("{D4}:RECPOSTD4X005");
+    let mut window_keys: Vec<String> = (1..=5)
+        .rev()
+        .map(|n| format!("{DELETED}:RECPOSTDEL00{n}"))
+        .collect();
+    window_keys.push(ranked.clone());
+    let window = Pagination {
+        start: Some(DELETED_START as f64),
+        end: Some(DELETED_END as f64),
+        skip: Some(0),
+        limit: Some(50),
+    };
+    for (shape, kind) in [
+        ("", None),
+        (
+            "&kind=short",
+            Some(KindFilter::Kind(PubkyAppPostKind::Short)),
+        ),
+        (
+            "&exclude_kinds=long",
+            Some(KindFilter::Exclude(vec![PubkyAppPostKind::Long])),
+        ),
+    ] {
+        assert_eq!(
+            unfiltered_keys(None, kind, window).await?,
+            window_keys,
+            "{shape}"
+        );
+        let query = format!(
+            "source=all&sorting=timeline&start={DELETED_START}&end={DELETED_END}&limit=50{shape}"
+        );
+        assert_eq!(
+            post_keys_in(&keys(&query).await?),
+            [ranked.as_str()],
+            "{shape}"
+        );
+    }
     Ok(())
 }
 

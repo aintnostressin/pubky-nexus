@@ -6,8 +6,10 @@
 // endorsers (wot.cypher: D1 0.4, D2 0.2, D1B 0.1), which keeps D1 at the top
 // of the ranking and D2, D1B below the `established` cut (user/views.rs). The
 // wot on-ramp accounts stay unranked: stream/post/ranked.rs hides their
-// posts. Only wot.cypher tags with the starter-pack labels, so these scores do
-// not touch stream/user/starter_pack.rs.
+// posts. recommended.cypher's deleted account is scored on purpose, as a
+// recompute scores a followed deleted account: ranked.rs checks that every
+// path still hides it. Only wot.cypher tags with the starter-pack labels, so
+// these scores do not touch stream/user/starter_pack.rs.
 // A GDS recompute rewrites `trust` for every user, so run the nexusd suite last and reseed.
 MATCH (u:User)
 WHERE u.trust IS NULL AND NOT u.id IN [

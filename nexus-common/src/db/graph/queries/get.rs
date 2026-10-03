@@ -296,8 +296,8 @@ pub fn get_user_tag_pairs() -> Query {
     )
 }
 
-/// Users carrying positive trust, highest first: the ranked population behind
-/// the social graph badge.
+/// Users carrying positive trust, deleted profiles aside, highest first: the
+/// ranked population behind the social graph badge.
 ///
 /// A node unreachable from the seed set may carry `0.0` or no `trust` property
 /// at all, and `null > 0` is null, so both drop out here. Only positive scores
@@ -310,14 +310,24 @@ pub fn get_user_tag_pairs() -> Query {
 pub fn get_trust_ranked_user_ids() -> Query {
     Query::new(
         "get_trust_ranked_user_ids",
-        "
+        format!(
+            "
         MATCH (u:User)
-        WHERE u.trust > 0
-          AND NOT coalesce(u.deleted, false)
+        WHERE {}
         RETURN u.id AS user_id
         ORDER BY u.trust DESC, user_id ASC
         ",
+            ranked_user("u")
+        ),
     )
+}
+
+/// Who counts as ranked, for the user bound to `var`. Both the ranking above
+/// (which the Redis-backed streams read) and the `source=all` stream rule use
+/// it, so the two paths hide the same authors. A deleted profile keeps its node
+/// and the score the recompute gives every `:User`, so deletion is checked too.
+fn ranked_user(var: &str) -> String {
+    format!("{var}.trust > 0 AND NOT coalesce({var}.deleted, false)")
 }
 
 /// Users whose profile carries any of the given tag labels, scored by distinct
@@ -1155,7 +1165,8 @@ pub fn get_files_by_ids(key_pair: &[&[&str]]) -> Query {
 }
 
 /// Builds the graph query for a post stream. `trust_rule` keeps only posts
-/// whose author has a positive trust score; the caller decides when it applies
+/// whose author is ranked, by the same test as the ranking
+/// (`get_trust_ranked_user_ids`); the caller decides when it applies
 /// (`source=all` with `sorting=timeline`, a ranking exists, and the request has
 /// no viewer or a ranked one).
 pub fn post_stream(
@@ -1355,7 +1366,8 @@ pub fn post_stream(
         // author in the first MATCH reads `trust` for every candidate instead:
         // 37-49% more DB hits on `exclude_kinds` and multi-tag streams (mock data).
         true => cypher.push_str(&format!(
-            "WITH DISTINCT p\n{timeline_order}\nMATCH (p)<-[:AUTHORED]-(author:User)\nWHERE author.trust > 0\n"
+            "WITH DISTINCT p\n{timeline_order}\nMATCH (p)<-[:AUTHORED]-(author:User)\nWHERE {}\n",
+            ranked_user("author")
         )),
         false => cypher.push_str("WITH DISTINCT p, author\n"),
     }
@@ -1716,17 +1728,30 @@ mod tests {
         Ok(query.to_cypher_populated())
     }
 
-    const TRUST_RULE: &str = "WHERE author.trust > 0";
+    fn trust_rule() -> String {
+        format!("WHERE {}", ranked_user("author"))
+    }
 
     #[test]
     fn post_stream_adds_the_trust_rule_only_when_asked() -> GraphResult<()> {
         let tags = Some(vec!["a".to_string(), "b".to_string()]);
         let kind = Some(KindFilter::Kind(pubky_app_specs::PubkyAppPostKind::Short));
         for (tags, kind) in [(None, kind.clone()), (tags.clone(), None), (tags, kind)] {
-            assert!(all_timeline(&tags, kind.clone(), true)?.contains(TRUST_RULE));
+            assert!(all_timeline(&tags, kind.clone(), true)?.contains(&trust_rule()));
             assert!(!all_timeline(&tags, kind, false)?.contains("author.trust"));
         }
         Ok(())
+    }
+
+    /// The Cypher rule and the ranking behind the ranked sets hide the same
+    /// authors.
+    #[test]
+    fn trust_rule_and_ranking_share_the_ranked_test() {
+        let ranking = get_trust_ranked_user_ids().to_cypher_populated();
+        assert!(
+            ranking.contains(&format!("WHERE {}", ranked_user("u"))),
+            "{ranking}"
+        );
     }
 
     /// The posts are filtered and sorted before the author is matched, so the
@@ -1736,6 +1761,7 @@ mod tests {
         let kind = Some(KindFilter::Kind(pubky_app_specs::PubkyAppPostKind::Short));
         let cypher = all_timeline(&Some(vec!["a".to_string(), "b".to_string()]), kind, true)?;
         assert!(cypher.starts_with("MATCH (p:Post)\n"), "{cypher}");
+        let rule = trust_rule();
         // In the order they must appear.
         let clauses = [
             "MATCH (:User)-[tag:TAGGED]->(p)",
@@ -1743,7 +1769,7 @@ mod tests {
             "NOT ( (p)-[:REPLIED]->(:Post) )",
             "WITH DISTINCT p\nORDER BY p.indexed_at DESC, p.id DESC",
             "MATCH (p)<-[:AUTHORED]-(author:User)",
-            TRUST_RULE,
+            rule.as_str(),
             "RETURN author.id AS author_id",
         ];
         let positions: Vec<Option<usize>> = clauses.iter().map(|c| cypher.find(c)).collect();

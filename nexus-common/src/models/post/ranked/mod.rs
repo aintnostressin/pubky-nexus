@@ -47,7 +47,7 @@ fn sorted_key(parts: &[&str]) -> String {
     format!("{SORTED_PREFIX}:{}", parts.join(":"))
 }
 
-/// The trust ranking: users with a positive trust score.
+/// The trust ranking: users with a positive trust score whose profile isn't deleted.
 fn ranking_key() -> String {
     sorted_key(&USER_SOCIAL_GRAPH_KEY_PARTS)
 }
