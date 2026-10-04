@@ -7,7 +7,7 @@ use chrono::Utc;
 use nexus_common::db::kv::ScoreAction;
 use nexus_common::models::resource::stream::ResourceStream;
 use nexus_common::models::resource::tag::TagResource;
-use nexus_common::models::tag::traits::{TagCollection, TaggersCollection};
+use nexus_common::models::tag::traits::TaggersCollection;
 use nexus_watcher::events::handlers;
 use pubky::Keypair;
 use pubky::ResourcePath;
@@ -83,7 +83,6 @@ async fn test_resource_tag_del_retry_no_double_decrement() -> Result<()> {
     TagResource(vec![user1_id.clone()])
         .del_from_index(&resource_id, Some(app), label)
         .await?;
-    TagResource::update_index_score(&resource_id, None, label, ScoreAction::Decrement(1.0)).await?;
     ResourceStream::update_global_taggers_count(&resource_id, ScoreAction::Decrement(1.0)).await?;
     ResourceStream::update_tag_taggers_count(label, &resource_id, ScoreAction::Decrement(1.0))
         .await?;
@@ -112,24 +111,13 @@ async fn test_resource_tag_del_retry_no_double_decrement() -> Result<()> {
     // Only user2's TAGGED edge should remain in the graph
     assert_eq!(count_resource_tags(&resource_id).await?, 1);
 
-    // Taggers count must be 1 (not 0): the retry must not double-decrement
-    let cache_tags = <TagResource as TagCollection>::get_from_index(
-        &resource_id,
-        None,
-        None,
-        None,
-        None,
-        None,
-        false,
-    )
-    .await?;
-    let details = cache_tags.expect("TagResource cache should still exist");
+    // The tag list is read from the graph, so it shows the remaining tagger
+    let details = TagResource::get_by_id(&resource_id, None, None, None, None)
+        .await?
+        .expect("Resource should still have a tag list");
     assert_eq!(details.len(), 1, "Should still have 1 label");
     assert_eq!(details[0].label, label);
-    assert_eq!(
-        details[0].taggers_count, 1,
-        "Taggers count must be 1 after retry, not double-decremented to 0"
-    );
+    assert_eq!(details[0].taggers_count, 1, "One tagger must remain");
 
     // All taggers counts must be 1 (not 0)
     for count_key_parts in [
@@ -172,7 +160,7 @@ async fn test_resource_tag_del_retry_no_double_decrement() -> Result<()> {
 
 /// The same user tags the same external URI with the same label from TWO
 /// different app namespaces, creating two app-scoped TAGGED edges whose put
-/// events each incremented all five taggers counts. The retry gate must be
+/// events each incremented all four taggers counts. The retry gate must be
 /// app-scoped: a retry of the first app's delete must not double-decrement,
 /// and the second app's delete must still run its decrements so that every
 /// count reaches zero and the resource is evicted from all timelines.
@@ -250,7 +238,6 @@ async fn test_resource_tag_del_multi_app_full_cleanup() -> Result<()> {
     TagResource(vec![user_id.clone()])
         .del_from_index(&resource_id, Some(app1), label)
         .await?;
-    TagResource::update_index_score(&resource_id, None, label, ScoreAction::Decrement(1.0)).await?;
     ResourceStream::update_global_taggers_count(&resource_id, ScoreAction::Decrement(1.0)).await?;
     ResourceStream::update_tag_taggers_count(label, &resource_id, ScoreAction::Decrement(1.0))
         .await?;
@@ -299,7 +286,7 @@ async fn test_resource_tag_del_multi_app_full_cleanup() -> Result<()> {
     }
 
     // Delete the app2 tag: its app-scoped tagger set still holds the member,
-    // so all five decrements must run and zero out every count
+    // so all four decrements must run and zero out every count
     test.del(&user_kp, &path2).await?;
 
     assert_eq!(count_resource_tags(&resource_id).await?, 0);

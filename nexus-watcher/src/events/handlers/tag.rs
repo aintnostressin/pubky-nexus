@@ -139,13 +139,6 @@ async fn put_sync_resource(
 
             let indexing_results = nexus_common::traced_join!(
                 tracing::info_span!("index.write", phase = "tag_resource");
-                // Update tag label score on Resource
-                TagResource::update_index_score(
-                    resource_id,
-                    None,
-                    tag_label,
-                    ScoreAction::Increment(1.0),
-                ),
                 // Add tagger to Resource's label tagger set
                 TagResource::add_tagger_to_index(resource_id, None, &tagger_id, tag_label),
                 // Add tagger to the app-scoped tagger set. The TAGGED edge is
@@ -192,7 +185,6 @@ async fn put_sync_resource(
             indexing_results.8?;
             indexing_results.9?;
             indexing_results.10?;
-            indexing_results.11?;
 
             Ok(())
         }
@@ -751,26 +743,13 @@ async fn del_sync_resource(
 ) -> Result<(), EventProcessorError> {
     // Step 1: Decrement scores and remove tagger from sets
     let score_results = tokio::join!(
-        // Guarded: Decrement label score in the resource
-        async {
-            if tagger_in_index {
-                TagResource::update_index_score(
-                    resource_id,
-                    None,
-                    tag_label,
-                    ScoreAction::Decrement(1.0),
-                )
-                .await?;
-            }
-            Ok::<(), EventProcessorError>(())
-        },
         async {
             // Idempotent: Delete the tagger from the tag list (SREM)
             TagResource(vec![tagger_id.to_string()])
                 .del_from_index(resource_id, None, tag_label)
                 .await?;
             // Idempotent: Delete the tagger from the app-scoped tagger set
-            // that gates the decrements above (SREM)
+            // that gates the decrements below (SREM)
             if let Some(a) = app {
                 TagResource(vec![tagger_id.to_string()])
                     .del_from_index(resource_id, Some(a), tag_label)
@@ -830,7 +809,6 @@ async fn del_sync_resource(
     score_results.1?;
     score_results.2?;
     score_results.3?;
-    score_results.4?;
 
     // Step 2: Check remaining scores and remove from timelines only when zero.
     remove_timeline_if_empty(

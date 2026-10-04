@@ -454,20 +454,38 @@ pub fn get_resource_by_id(resource_id: &str) -> Query {
     .param("resource_id", resource_id)
 }
 
-/// Retrieve all tags on a Resource node
-pub fn resource_tags(resource_id: &str) -> Query {
+/// Tags on a Resource node. Labels are ordered by tagger count, then label, and
+/// paginated with `skip_tags`/`limit_tags`. Each label carries its full
+/// `taggers_count`, at most `limit_taggers` tagger ids, and whether `viewer_id`
+/// is among all of its taggers, not only the listed ones. A missing Resource
+/// returns `exists = false`; an existing one without tags returns `tags = []`.
+pub fn resource_tags(
+    resource_id: &str,
+    viewer_id: Option<&str>,
+    skip_tags: usize,
+    limit_tags: usize,
+    limit_taggers: usize,
+) -> Query {
     Query::new(
         "resource_tags",
         "
         OPTIONAL MATCH (r:Resource {id: $resource_id})
+        OPTIONAL MATCH (viewer:User {id: $viewer_id})
         CALL {
-            WITH r
+            WITH r, viewer
             MATCH (tagger:User)-[tag:TAGGED]->(r)
-            WITH tag.label AS name, collect(DISTINCT tagger.id) AS tagger_ids
+            // Collect nodes, not ids: only the listed taggers' ids are read,
+            // and the viewer check compares nodes
+            WITH viewer, tag.label AS name, collect(DISTINCT tagger) AS taggers
+            WITH viewer, name, taggers, SIZE(taggers) AS taggers_count
+            ORDER BY taggers_count DESC, name ASC
+            SKIP $skip_tags
+            LIMIT $limit_tags
             RETURN collect({
                 label: name,
-                taggers: tagger_ids,
-                taggers_count: SIZE(tagger_ids)
+                taggers: [tagger IN taggers[0..$limit_taggers] | tagger.id],
+                taggers_count: taggers_count,
+                relationship: viewer IS NOT NULL AND viewer IN taggers
             }) AS tags
         }
         RETURN
@@ -476,6 +494,10 @@ pub fn resource_tags(resource_id: &str) -> Query {
     ",
     )
     .param("resource_id", resource_id)
+    .param("viewer_id", viewer_id)
+    .param("skip_tags", skip_tags as i64)
+    .param("limit_tags", limit_tags as i64)
+    .param("limit_taggers", limit_taggers as i64)
 }
 
 /// Query a stream of Resources with optional app and tag filters.

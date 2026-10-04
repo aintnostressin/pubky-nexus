@@ -4,8 +4,8 @@ use super::resource_utils::{
 use crate::event_processor::utils::watcher::WatcherTest;
 use anyhow::Result;
 use chrono::Utc;
+use nexus_common::db::RedisOps;
 use nexus_common::models::resource::tag::TagResource;
-use nexus_common::models::tag::traits::TagCollection;
 use pubky::Keypair;
 use pubky::ResourcePath;
 use pubky_app_specs::traits::HashId;
@@ -24,7 +24,7 @@ async fn test_homeserver_del_resource_tag() -> Result<()> {
         name: "Watcher:ResourceTag:Del".to_string(),
         status: None,
     };
-    let _user_id = test.create_user(&user_kp, &user).await?;
+    let user_id = test.create_user(&user_kp, &user).await?;
 
     let target_uri = "https://example.com/to-be-deleted";
     let label = "temporary";
@@ -60,12 +60,13 @@ async fn test_homeserver_del_resource_tag() -> Result<()> {
         "Resource node should be deleted when no tags remain"
     );
 
-    // Verify Redis cache is cleaned up
-    let cache_tags =
-        TagResource::get_from_index(&resource_id, None, None, None, None, None, false).await?;
-    // Should be None or empty
-    let is_empty = cache_tags.is_none_or(|v| v.is_empty() || v[0].taggers_count == 0);
-    assert!(is_empty, "TagResource cache should be empty after DEL");
+    // Verify the tag list is gone with the Resource node
+    let tags = TagResource::get_by_id(&resource_id, None, None, None, None).await?;
+    assert!(tags.is_none(), "Deleted Resource should have no tag list");
+
+    // Verify the tagger is removed from the label's tagger set
+    let (_, is_member) = TagResource::check_set_member(&[&resource_id, label], &user_id).await?;
+    assert!(!is_member, "Tagger should be removed from the tagger set");
 
     // Verify global taggers count decremented
     let global_count =
