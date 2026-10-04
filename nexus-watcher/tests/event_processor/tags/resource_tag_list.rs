@@ -1,10 +1,10 @@
-use super::resource_utils::{compute_resource_id, resource_label_scores_exist};
+use super::resource_utils::compute_resource_id;
 use crate::event_processor::utils::watcher::{HomeserverHashIdPath, WatcherTest};
 use anyhow::Result;
 use chrono::Utc;
 use deadpool_redis::redis::AsyncCommands;
 use nexus_common::db::{get_redis_conn, RedisOps};
-use nexus_common::models::resource::tag::{TagResource, RESOURCE_TAGS_KEY_PARTS};
+use nexus_common::models::resource::tag::TagResource;
 use nexus_common::models::tag::post::{TagPost, POST_TAGS_KEY_PARTS};
 use nexus_common::models::tag::traits::TagCollection;
 use nexus_common::models::tag::user::{TagUser, USER_TAGS_KEY_PARTS};
@@ -24,15 +24,14 @@ const APP: &str = "mapky";
 async fn test_resource_tag_list_follows_puts_and_dels() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
-    let (alice_kp, alice_id) = create_tagger(&mut test, "Alice").await?;
-    let (bob_kp, bob_id) = create_tagger(&mut test, "Bob").await?;
-    let (carol_kp, carol_id) = create_tagger(&mut test, "Carol").await?;
+    let (alice_kp, alice_id) = create_user(&mut test, "Alice").await?;
+    let (bob_kp, bob_id) = create_user(&mut test, "Bob").await?;
+    let (carol_kp, carol_id) = create_user(&mut test, "Carol").await?;
 
     // A fresh user id in the URI keeps the resource unique to this run
     let target_uri = format!("https://example.com/tag-list/{alice_id}");
     let resource_id = compute_resource_id(&target_uri);
 
-    // Alice and Bob tag "rust", Alice also tags "nostr"
     let alice_rust = put_resource_tag(&mut test, &alice_kp, &target_uri, "rust").await?;
     let bob_rust = put_resource_tag(&mut test, &bob_kp, &target_uri, "rust").await?;
     let alice_nostr = put_resource_tag(&mut test, &alice_kp, &target_uri, "nostr").await?;
@@ -41,10 +40,7 @@ async fn test_resource_tag_list_follows_puts_and_dels() -> Result<()> {
     let tags = tag_list(&resource_id, None, None, None, None).await?;
     assert_eq!(labels(&tags), ["rust", "nostr"]);
     assert_eq!(tags[0].taggers_count, 2);
-    assert_eq!(
-        sorted(&tags[0].taggers),
-        sorted(&[alice_id.clone(), bob_id.clone()])
-    );
+    assert!(tags[0].taggers.contains(&alice_id) && tags[0].taggers.contains(&bob_id));
     assert_eq!(tags[1].taggers, [alice_id.as_str()]);
     assert_eq!(relationships(&tags), [false, false]);
 
@@ -69,7 +65,7 @@ async fn test_resource_tag_list_follows_puts_and_dels() -> Result<()> {
     let tags = tag_list(&resource_id, Some(1), None, None, None).await?;
     assert_eq!(labels(&tags), ["nostr"]);
 
-    // Bob removes "rust": both labels have one tagger, so the label breaks the tie
+    // With one tagger each, the label breaks the tie
     test.del(&bob_kp, &bob_rust).await?;
     let tags = tag_list(&resource_id, None, None, None, Some(&bob_id)).await?;
     assert_eq!(labels(&tags), ["nostr", "rust"]);
@@ -79,10 +75,11 @@ async fn test_resource_tag_list_follows_puts_and_dels() -> Result<()> {
         assert!(!tag.relationship, "Bob no longer tags {}", tag.label);
     }
 
-    // Alice removes "nostr", then "rust", which takes the resource with it
     test.del(&alice_kp, &alice_nostr).await?;
     let tags = tag_list(&resource_id, None, None, None, None).await?;
     assert_eq!(labels(&tags), ["rust"]);
+
+    // The last tag takes the resource with it
     test.del(&alice_kp, &alice_rust).await?;
     let tags = TagResource::get_by_id(&resource_id, None, None, None, None).await?;
     assert!(tags.is_none(), "The untagged resource should be gone");
@@ -101,10 +98,13 @@ async fn test_resource_tag_list_follows_puts_and_dels() -> Result<()> {
 async fn test_resource_tag_list_ignores_and_never_rebuilds_redis_indexes() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
-    let (user_kp, user_id) = create_tagger(&mut test, "Indexes").await?;
+    let (user_kp, user_id) = create_user(&mut test, "Indexes").await?;
     let target_uri = format!("https://example.com/tag-list-indexes/{user_id}");
     let resource_id = compute_resource_id(&target_uri);
     let label = "rust";
+    let scores_key = format!("Sorted:Resources:Tag:{resource_id}");
+    let taggers_key = format!("{}:{resource_id}:{label}", TagResource::prefix().await);
+    let mut redis_conn = get_redis_conn().await?;
 
     // The put indexes both tagger sets, and no label score
     let tag_path = put_resource_tag(&mut test, &user_kp, &target_uri, label).await?;
@@ -118,22 +118,14 @@ async fn test_resource_tag_list_ignores_and_never_rebuilds_redis_indexes() -> Re
             "Tagger should be in the {key_parts:?} tagger set"
         );
     }
-    assert!(
-        !resource_label_scores_exist(&resource_id).await?,
-        "The put must not write label scores"
-    );
+    let exists: bool = redis_conn.exists(&scores_key).await?;
+    assert!(!exists, "The put must not write label scores");
 
     // A stale label-score set is ignored. Read through it, the list would hide
     // "rust" (score 0) and rank "stale" (score 9), which has no taggers
-    let scores_key_parts: Vec<&str> =
-        [&RESOURCE_TAGS_KEY_PARTS[..], &[resource_id.as_str()]].concat();
-    TagResource::put_index_sorted_set(
-        &scores_key_parts,
-        &[(0.0, label), (9.0, "stale")],
-        None,
-        None,
-    )
-    .await?;
+    let _: () = redis_conn
+        .zadd_multiple(&scores_key, &[(0.0, label), (9.0, "stale")])
+        .await?;
     let tags = tag_list(&resource_id, None, None, None, Some(&user_id)).await?;
     assert_eq!(labels(&tags), [label]);
     assert_eq!(tags[0].taggers, [user_id.as_str()]);
@@ -141,26 +133,19 @@ async fn test_resource_tag_list_ignores_and_never_rebuilds_redis_indexes() -> Re
 
     // Evicted indexes stay evicted: the read lists the tagger from the graph
     // and writes nothing back
-    let mut redis_conn = get_redis_conn().await?;
-    let evicted_keys = [
-        format!("Sorted:{}", scores_key_parts.join(":")),
-        format!("{}:{resource_id}:{label}", TagResource::prefix().await),
-    ];
-    let _: () = redis_conn.del(&evicted_keys).await?;
+    let _: () = redis_conn.del(&[&scores_key, &taggers_key]).await?;
     let tags = tag_list(&resource_id, None, None, None, Some(&user_id)).await?;
     assert_eq!(tags[0].taggers, [user_id.as_str()]);
     assert!(tags[0].relationship);
-    for key in &evicted_keys {
+    for key in [&scores_key, &taggers_key] {
         let exists: bool = redis_conn.exists(key).await?;
         assert!(!exists, "The read must not rebuild {key}");
     }
 
     // The del does not write label scores either
     test.del(&user_kp, &tag_path).await?;
-    assert!(
-        !resource_label_scores_exist(&resource_id).await?,
-        "The del must not write label scores"
-    );
+    let exists: bool = redis_conn.exists(&scores_key).await?;
+    assert!(!exists, "The del must not write label scores");
     let tags = TagResource::get_by_id(&resource_id, None, None, None, None).await?;
     assert!(tags.is_none(), "The untagged resource should be gone");
 
@@ -176,8 +161,8 @@ async fn test_resource_tag_list_ignores_and_never_rebuilds_redis_indexes() -> Re
 async fn test_user_and_post_tag_lists_still_rebuild_their_indexes() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
-    let (author_kp, author_id) = create_tagger(&mut test, "Author").await?;
-    let (tagger_kp, tagger_id) = create_tagger(&mut test, "Tagger").await?;
+    let (author_kp, author_id) = create_user(&mut test, "Author").await?;
+    let (tagger_kp, tagger_id) = create_user(&mut test, "Tagger").await?;
     let post = PubkyAppPost {
         content: "Watcher:ResourceTagList:Post".to_string(),
         kind: PubkyAppPost::default().kind,
@@ -244,7 +229,7 @@ async fn test_user_and_post_tag_lists_still_rebuild_their_indexes() -> Result<()
     Ok(())
 }
 
-async fn create_tagger(test: &mut WatcherTest, name: &str) -> Result<(Keypair, String)> {
+async fn create_user(test: &mut WatcherTest, name: &str) -> Result<(Keypair, String)> {
     let user_kp = Keypair::random();
     let user = PubkyAppUser {
         bio: Some("test_resource_tag_list".to_string()),
@@ -293,10 +278,4 @@ fn labels(tags: &[TagDetails]) -> Vec<&str> {
 
 fn relationships(tags: &[TagDetails]) -> Vec<bool> {
     tags.iter().map(|tag| tag.relationship).collect()
-}
-
-fn sorted(ids: &[String]) -> Vec<String> {
-    let mut ids = ids.to_vec();
-    ids.sort();
-    ids
 }

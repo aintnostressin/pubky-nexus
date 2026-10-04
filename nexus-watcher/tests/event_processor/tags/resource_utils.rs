@@ -1,9 +1,7 @@
 use anyhow::Result;
-use deadpool_redis::redis::AsyncCommands;
 use nexus_common::db::graph::Query;
-use nexus_common::db::{fetch_key_from_graph, get_redis_conn, RedisOps};
+use nexus_common::db::{fetch_key_from_graph, RedisOps};
 use nexus_common::models::resource::stream::ResourceStream;
-use nexus_common::models::resource::tag::RESOURCE_TAGS_KEY_PARTS;
 use serde::{Deserialize, Serialize};
 
 /// Graph query result for a Resource tag
@@ -69,14 +67,6 @@ pub async fn check_resource_in_sorted_set(
 pub fn compute_resource_id(uri: &str) -> String {
     let (normalized, _) = nexus_common::universal_tag::normalize::normalize_uri(uri).unwrap();
     nexus_common::universal_tag::normalize::resource_id(&normalized)
-}
-
-/// Whether the retired label-score sorted set of a resource,
-/// `Sorted:Resources:Tag:{resource_id}`, exists in Redis
-pub async fn resource_label_scores_exist(resource_id: &str) -> Result<bool> {
-    let key = format!("Sorted:{}:{resource_id}", RESOURCE_TAGS_KEY_PARTS.join(":"));
-    let mut redis_conn = get_redis_conn().await?;
-    Ok(redis_conn.exists(key).await?)
 }
 
 fn resource_tag_query(resource_id: &str, label: &str) -> Query {

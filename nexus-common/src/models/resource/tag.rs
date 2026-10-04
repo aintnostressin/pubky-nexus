@@ -9,11 +9,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-/// Key parts of the per-resource label-score sorted set,
-/// `Sorted:Resources:Tag:{resource_id}`. Retired: nothing writes or reads it,
-/// resource tag lists come from the graph.
-pub const RESOURCE_TAGS_KEY_PARTS: [&str; 2] = ["Resources", "Tag"];
-
 #[derive(Serialize, Deserialize, Debug, Clone, ToSchema, Default)]
 pub struct TagResource(pub Vec<String>);
 
@@ -30,14 +25,12 @@ impl RedisOps for TagResource {
     }
 }
 
-// Not a `TagCollection`: that trait serves tag lists from a label-score sorted
-// set and refills it on a miss. Resource tag lists come from the graph alone.
 impl TaggersCollection for TagResource {}
 
 impl TagResource {
-    /// Tags on a resource, read from the graph on every call. Resource tag lists
-    /// have no Redis index, so a read can neither serve a stale one nor rebuild
-    /// it. Returns `None` only when the resource does not exist.
+    /// Tags on a resource, read from the graph on every call: unlike user and
+    /// post tags, there is no `TagCollection` index to serve stale or rebuild.
+    /// Returns `None` only when the resource does not exist.
     /// `skip_tags`/`limit_tags`/`limit_taggers` default to 0 / 5 / 5 and are
     /// capped at `MAX_TAG_PAGE`, as for user and post tags.
     pub async fn get_by_id(
@@ -58,18 +51,14 @@ impl TagResource {
     }
 
     /// Adds `tagger_id` to the label's tagger set, scoped to `app` when given:
-    /// `Resource:Taggers:{resource_id}[:{app}]:{label}`. Same key layout as
-    /// `TaggersCollection::del_from_index`, which removes the member again.
+    /// `Resource:Taggers:{resource_id}[:{app}]:{label}`.
     pub async fn add_tagger_to_index(
         resource_id: &str,
         app: Option<&str>,
         tagger_id: &str,
         label: &str,
     ) -> RedisResult<()> {
-        let key = match app {
-            Some(app) => vec![resource_id, app, label],
-            None => vec![resource_id, label],
-        };
+        let key = Self::create_label_index(resource_id, app, label, false);
         Self::put_index_set(&key, &[tagger_id], None, None).await
     }
 
