@@ -89,7 +89,7 @@ pub(super) fn translate_put(
             reason: SkipReason::Blob,
         },
         (_, resource) => {
-            return Err(EventProcessorError::internal_error(format!(
+            return Err(EventProcessorError::SpecValidation(format!(
                 "The v0 reader returned another object kind for a {resource} resource: {uri}"
             )))
         }
