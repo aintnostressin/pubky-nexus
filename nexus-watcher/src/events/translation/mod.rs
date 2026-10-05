@@ -207,6 +207,7 @@ mod tests {
     #[test]
     fn skip_reason_names_the_routes_skipped_before_any_fetch() {
         let cases = [
+            (format!("pub/pubky.app/mutes/{OTHER}"), SkipReason::Mute),
             ("pub/pubky.app/last_read".to_string(), SkipReason::LastRead),
             (format!("pub/pubky.app/feeds/{HASH}"), SkipReason::Feed),
             (format!("pub/pubky.app/blobs/{HASH}"), SkipReason::Blob),
@@ -237,7 +238,6 @@ mod tests {
             "pub/pubky.app/profile.json".to_string(),
             format!("pub/pubky.app/posts/{TS}"),
             format!("pub/pubky.app/follows/{OTHER}"),
-            format!("pub/pubky.app/mutes/{OTHER}"),
             format!("pub/pubky.app/bookmarks/{HASH}"),
             format!("pub/pubky.app/tags/{HASH}"),
             format!("pub/pubky.app/files/{TS}"),
@@ -401,6 +401,7 @@ mod tests {
         }
     }
 
+    /// Parsing skips a mute before any fetch; the translation still names it.
     #[test]
     fn put_mute_is_skipped() {
         match put(
