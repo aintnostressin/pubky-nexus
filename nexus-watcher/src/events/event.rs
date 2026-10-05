@@ -52,8 +52,8 @@ impl fmt::Display for EventType {
 pub enum ParseResult {
     /// Successfully parsed into a known, actionable event.
     Parsed(Event),
-    /// Known resource that Nexus does not handle (a v0 last-read, feed or blob), or a path in a
-    /// `social` epoch that is not indexed. Nothing is fetched for it.
+    /// Known resource that Nexus does not handle (a v0 mute, last-read, feed or blob), or a path in
+    /// a `social` epoch that is not indexed. Nothing is fetched for it.
     Skipped { reason: SkipReason },
     /// URI matched no route: it has no namespace to route on, or its namespace's parser rejects
     /// it (an app-specific path that is not a universal tag, a social path without an epoch).
@@ -204,7 +204,7 @@ fn epoch_label(version: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::translation::test_support::{uri, HASH, TS};
+    use crate::events::translation::test_support::{uri, HASH, OTHER, TS};
 
     /// The reason of a skipped line, or a panic naming what came back.
     fn skipped(line: &str) -> SkipReason {
@@ -255,6 +255,16 @@ mod tests {
         ];
         for (path, expected) in cases {
             assert_eq!(skipped(&format!("PUT {}", uri(&path))), expected, "{path}");
+        }
+    }
+
+    /// Mutes are not indexed, so neither a write nor a deletion of one costs a fetch.
+    #[test]
+    fn v0_mute_lines_are_skipped() {
+        let path = format!("pub/pubky.app/mutes/{OTHER}");
+        for event_type in [EventType::Put, EventType::Del] {
+            let line = format!("{event_type} {}", uri(&path));
+            assert_eq!(skipped(&line), SkipReason::Mute, "{line}");
         }
     }
 

@@ -16,6 +16,7 @@ pub(super) fn skip_reason(
     match parsed {
         ExtendedParsedUri::PubkyApp { resource, .. } => match resource {
             Resource::Unknown => Err(unknown_resource(uri)),
+            Resource::Mute(_) => Ok(Some(SkipReason::Mute)),
             Resource::LastRead => Ok(Some(SkipReason::LastRead)),
             Resource::Feed(_) => Ok(Some(SkipReason::Feed)),
             Resource::Blob(_) => Ok(Some(SkipReason::Blob)),
