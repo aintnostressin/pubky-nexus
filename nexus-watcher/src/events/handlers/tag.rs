@@ -16,11 +16,12 @@ use nexus_common::universal_tag::normalize::{
     classify_uri, normalize_uri, resource_id, UriCategory,
 };
 use pubky_social_specs::legacy_v0::{
-    user_uri_builder, ExtendedParsedUri, ParsedUri, PubkyAppTag, PubkyId, Resource,
+    user_uri_builder, ExtendedParsedUri, ParsedUri, PubkyId, Resource,
 };
 use tracing::debug;
 
 use super::utils::{fail_on_blacklisted_hs, post_kind, post_relationships_is_reply};
+use super::TagInput;
 
 #[derive(Debug)]
 struct TagStorageUri {
@@ -29,10 +30,10 @@ struct TagStorageUri {
     app: Option<String>,
 }
 
-/// `event_uri` is the address of the tag file, stored as the edge `uri`; `tag.uri` is its target.
+/// `event_uri` is the address of the tag file, stored as the edge `uri`; `tag.target` is its target.
 #[tracing::instrument(name = "tag.put", skip_all, fields(user_id = %tagger_id, tag_id = %tag_id))]
 pub async fn sync_put(
-    tag: PubkyAppTag,
+    tag: TagInput,
     event_uri: String,
     tagger_id: PubkyId,
     tag_id: String,
@@ -41,7 +42,8 @@ pub async fn sync_put(
     debug!("Indexing tag");
 
     // Parse the embeded URI to extract author_id and post_id using parse_tagged_post_uri
-    let parsed_uri = ParsedUri::try_from(tag.uri.as_str()).map_err(EventProcessorError::generic)?;
+    let parsed_uri =
+        ParsedUri::try_from(tag.target.as_str()).map_err(EventProcessorError::generic)?;
     let user_id = parsed_uri.user_id;
     let indexed_at = Utc::now().timestamp_millis();
 
@@ -50,8 +52,15 @@ pub async fn sync_put(
         Resource::Post(post_id) => {
             // Place the tag on post
             put_sync_post(
-                tagger_id, user_id, &post_id, &tag_id, &event_uri, &tag.label, &tag.uri,
-                indexed_at, ingestor,
+                tagger_id,
+                user_id,
+                &post_id,
+                &tag_id,
+                &event_uri,
+                &tag.label,
+                &tag.target,
+                indexed_at,
+                ingestor,
             )
             .await
         }
@@ -72,7 +81,7 @@ pub async fn sync_put(
 /// Classifies the tagged URI: if it's an Internal-Known resource (Post/User), delegates
 /// to the existing flow. Otherwise creates/updates a generic Resource node.
 pub async fn sync_put_resource(
-    tag: PubkyAppTag,
+    tag: TagInput,
     event_uri: String,
     tagger_id: PubkyId,
     tag_id: String,
@@ -81,14 +90,14 @@ pub async fn sync_put_resource(
 ) -> Result<(), EventProcessorError> {
     debug!(%app, "Indexing resource tag");
 
-    match classify_uri(&tag.uri) {
+    match classify_uri(&tag.target) {
         UriCategory::InternalKnown => {
             // The tagged URI is a known Post/User — delegate to existing flow
             sync_put(tag, event_uri, tagger_id, tag_id, ingestor).await
         }
         UriCategory::InternalUnknown | UriCategory::External => {
             let (normalized, scheme) =
-                normalize_uri(&tag.uri).map_err(EventProcessorError::generic)?;
+                normalize_uri(&tag.target).map_err(EventProcessorError::generic)?;
             let res_id = resource_id(&normalized);
             let indexed_at = Utc::now().timestamp_millis();
 

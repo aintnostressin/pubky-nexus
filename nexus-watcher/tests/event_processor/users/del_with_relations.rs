@@ -472,7 +472,12 @@ async fn test_live_user_with_sentinel_name_is_not_tombstoned() -> Result<()> {
         ..user
     };
     let user_pubky_id = PubkyId::try_from(user_id.as_str()).map_err(anyhow::Error::msg)?;
-    handlers::user::sync_put(renamed, user_uri_builder(user_id.clone()), user_pubky_id).await?;
+    handlers::user::sync_put(
+        renamed.into(),
+        user_uri_builder(user_id.clone()),
+        user_pubky_id,
+    )
+    .await?;
 
     // The node keeps the sentinel name and is still live
     let stored = find_user_details(&user_id).await?;
