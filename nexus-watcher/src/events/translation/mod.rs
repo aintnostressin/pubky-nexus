@@ -28,9 +28,10 @@ pub enum SkipReason {
     UnsupportedEpoch { version: String },
 }
 
-/// One handler call, carrying the inputs that handler takes, whichever epoch wrote the object.
+/// A PUT's handler call, carrying the inputs that handler takes, whichever epoch wrote the object.
+/// Apart from [`TranslatedDel`] so a PUT cannot translate to a deletion.
 #[derive(Debug)]
-pub enum Translated {
+pub enum TranslatedPut {
     PutUser {
         user_id: PubkyId,
         user: UserInput,
@@ -62,6 +63,15 @@ pub enum Translated {
         file: FileInput,
         uri: String,
     },
+    Skip {
+        reason: SkipReason,
+    },
+}
+
+/// A DEL's handler call, from the ids in the path.
+/// Apart from [`TranslatedPut`] so a DEL cannot translate to a write.
+#[derive(Debug)]
+pub enum TranslatedDel {
     DelUser {
         user_id: PubkyId,
     },
@@ -95,7 +105,7 @@ pub fn translate_put(
     route: &EventRoute,
     uri: &str,
     bytes: &[u8],
-) -> Result<Translated, EventProcessorError> {
+) -> Result<TranslatedPut, EventProcessorError> {
     match route {
         EventRoute::Legacy(parsed) => legacy::translate_put(parsed, uri, bytes),
         EventRoute::Social { .. }
@@ -106,7 +116,7 @@ pub fn translate_put(
 
 /// Maps a DEL to its handler call from the ids in the path. `uri` is the event URI as received,
 /// which the tag handler takes.
-pub fn translate_del(route: &EventRoute, uri: &str) -> Result<Translated, EventProcessorError> {
+pub fn translate_del(route: &EventRoute, uri: &str) -> Result<TranslatedDel, EventProcessorError> {
     match route {
         EventRoute::Legacy(parsed) => legacy::translate_del(parsed, uri),
         EventRoute::Social { .. }
@@ -156,13 +166,13 @@ mod tests {
         )
     }
 
-    fn put(path: &str, json: &str) -> Translated {
+    fn put(path: &str, json: &str) -> TranslatedPut {
         let uri = uri(path);
         translate_put(&route(&uri), &uri, json.as_bytes())
             .unwrap_or_else(|e| panic!("{path} should translate: {e}"))
     }
 
-    fn del(path: &str) -> Translated {
+    fn del(path: &str) -> TranslatedDel {
         let uri = uri(path);
         translate_del(&route(&uri), &uri).unwrap_or_else(|e| panic!("{path} should translate: {e}"))
     }
@@ -171,7 +181,7 @@ mod tests {
     fn put_user() {
         let json = r#"{"name":"Alice","bio":"Hi","image":null,"links":null,"status":null}"#;
         match put("pub/pubky.app/profile.json", json) {
-            Translated::PutUser { user_id, user } => {
+            TranslatedPut::PutUser { user_id, user } => {
                 assert_eq!(user_id, host());
                 assert_eq!(user.name, "Alice");
             }
@@ -185,7 +195,7 @@ mod tests {
         let json =
             r#"{"content":"Hello","kind":"short","parent":null,"embed":null,"attachments":null}"#;
         match put(&format!("pub/pubky.app/posts/{post_id}"), json) {
-            Translated::PutPost {
+            TranslatedPut::PutPost {
                 author_id,
                 post_id: id,
                 post,
@@ -204,7 +214,7 @@ mod tests {
             &format!("pub/pubky.app/follows/{OTHER}"),
             r#"{"created_at":1}"#,
         ) {
-            Translated::PutFollow {
+            TranslatedPut::PutFollow {
                 user_id,
                 followee_id,
             } => {
@@ -221,7 +231,7 @@ mod tests {
         let json = format!(r#"{{"uri":"{target}","label":"rust","created_at":1}}"#);
         let id = tag_id(&target, "rust");
         match put(&format!("pub/pubky.app/tags/{id}"), &json) {
-            Translated::PutTag {
+            TranslatedPut::PutTag {
                 tagger_id,
                 tag_id,
                 tag,
@@ -241,7 +251,7 @@ mod tests {
         let json = r#"{"uri":"https://example.com/","label":"maps","created_at":1}"#;
         let id = tag_id("https://example.com/", "maps");
         match put(&format!("pub/mapky/tags/{id}"), json) {
-            Translated::PutTag {
+            TranslatedPut::PutTag {
                 tagger_id,
                 tag_id,
                 app,
@@ -265,7 +275,7 @@ mod tests {
         let id = bookmark.create_id();
         let json = format!(r#"{{"uri":"{target}","created_at":1}}"#);
         match put(&format!("pub/pubky.app/bookmarks/{id}"), &json) {
-            Translated::PutBookmark {
+            TranslatedPut::PutBookmark {
                 user_id,
                 bookmark_id,
                 bookmark,
@@ -287,7 +297,7 @@ mod tests {
         );
         let path = format!("pub/pubky.app/files/{file_id}");
         match put(&path, &json) {
-            Translated::PutFile {
+            TranslatedPut::PutFile {
                 user_id,
                 file_id: id,
                 file,
@@ -308,7 +318,7 @@ mod tests {
             &format!("pub/pubky.app/mutes/{OTHER}"),
             r#"{"created_at":1}"#,
         ) {
-            Translated::Skip { reason } => assert_eq!(reason, SkipReason::Mute),
+            TranslatedPut::Skip { reason } => assert_eq!(reason, SkipReason::Mute),
             other => panic!("expected Skip, got {other:?}"),
         }
     }
@@ -322,14 +332,14 @@ mod tests {
         let skipped = translate_put(&route(&blob_uri), &blob_uri, blob).unwrap();
         assert!(matches!(
             skipped,
-            Translated::Skip {
+            TranslatedPut::Skip {
                 reason: SkipReason::Blob
             }
         ));
 
         assert!(matches!(
             put("pub/pubky.app/last_read", r#"{"timestamp":1}"#),
-            Translated::Skip {
+            TranslatedPut::Skip {
                 reason: SkipReason::LastRead
             }
         ));
@@ -350,7 +360,7 @@ mod tests {
         let feed_path = format!("pub/pubky.app/feeds/{}", feed.create_id());
         assert!(matches!(
             put(&feed_path, &serde_json::to_string(&feed).unwrap()),
-            Translated::Skip {
+            TranslatedPut::Skip {
                 reason: SkipReason::Feed
             }
         ));
@@ -374,25 +384,25 @@ mod tests {
     fn del_maps_each_resource_to_its_handler_inputs() {
         assert!(matches!(
             del("pub/pubky.app/profile.json"),
-            Translated::DelUser { user_id } if user_id == host()
+            TranslatedDel::DelUser { user_id } if user_id == host()
         ));
         assert!(matches!(
             del(&format!("pub/pubky.app/posts/{TS}")),
-            Translated::DelPost { author_id, post_id } if author_id == host() && post_id == TS
+            TranslatedDel::DelPost { author_id, post_id } if author_id == host() && post_id == TS
         ));
         assert!(matches!(
             del(&format!("pub/pubky.app/follows/{OTHER}")),
-            Translated::DelFollow { user_id, followee_id }
+            TranslatedDel::DelFollow { user_id, followee_id }
                 if user_id == host() && followee_id == other()
         ));
         assert!(matches!(
             del(&format!("pub/pubky.app/bookmarks/{HASH}")),
-            Translated::DelBookmark { user_id, bookmark_id }
+            TranslatedDel::DelBookmark { user_id, bookmark_id }
                 if user_id == host() && bookmark_id == HASH
         ));
         assert!(matches!(
             del(&format!("pub/pubky.app/files/{TS}")),
-            Translated::DelFile { user_id, file_id } if user_id == host() && file_id == TS
+            TranslatedDel::DelFile { user_id, file_id } if user_id == host() && file_id == TS
         ));
     }
 
@@ -403,7 +413,7 @@ mod tests {
             "pub/mapky/tags/ABC123".into(),
         ] {
             match del(&path) {
-                Translated::DelTag { uri: event_uri } => assert_eq!(event_uri, uri(&path)),
+                TranslatedDel::DelTag { uri: event_uri } => assert_eq!(event_uri, uri(&path)),
                 other => panic!("expected DelTag, got {other:?}"),
             }
         }
@@ -419,7 +429,7 @@ mod tests {
         ];
         for (path, expected) in cases {
             match del(&path) {
-                Translated::Skip { reason } => assert_eq!(reason, expected, "{path}"),
+                TranslatedDel::Skip { reason } => assert_eq!(reason, expected, "{path}"),
                 other => panic!("{path}: expected Skip, got {other:?}"),
             }
         }

@@ -11,7 +11,7 @@ use std::{
     sync::Arc,
 };
 use tracing::debug;
-use translation::Translated;
+use translation::{TranslatedDel, TranslatedPut};
 
 mod fetch;
 pub mod handlers;
@@ -121,22 +121,22 @@ pub async fn handle_put_event(
     let blob = fetch_capped(response, MAX_RESOURCE_SIZE as u64).await?;
 
     match translation::translate_put(&event.route, &event.uri, blob.as_slice())? {
-        Translated::PutUser { user_id, user } => handlers::user::sync_put(user, user_id).await?,
-        Translated::PutPost {
+        TranslatedPut::PutUser { user_id, user } => handlers::user::sync_put(user, user_id).await?,
+        TranslatedPut::PutPost {
             author_id,
             post_id,
             post,
         } => handlers::post::sync_put(post, author_id, post_id, &ingestor).await?,
-        Translated::PutFollow {
+        TranslatedPut::PutFollow {
             user_id,
             followee_id,
         } => handlers::follow::sync_put(user_id, followee_id, &ingestor).await?,
-        Translated::PutBookmark {
+        TranslatedPut::PutBookmark {
             user_id,
             bookmark_id,
             bookmark,
         } => handlers::bookmark::sync_put(user_id, bookmark, bookmark_id).await?,
-        Translated::PutTag {
+        TranslatedPut::PutTag {
             tagger_id,
             tag_id,
             tag,
@@ -154,7 +154,7 @@ pub async fn handle_put_event(
                 handlers::tag::sync_put(tag, tagger_id, tag_id, &ingestor).await?
             }
         }
-        Translated::PutFile {
+        TranslatedPut::PutFile {
             user_id,
             file_id,
             file,
@@ -171,18 +171,7 @@ pub async fn handle_put_event(
             )
             .await?
         }
-        Translated::Skip { reason } => debug!(?reason, "PUT event not handled"),
-        Translated::DelUser { .. }
-        | Translated::DelPost { .. }
-        | Translated::DelFollow { .. }
-        | Translated::DelTag { .. }
-        | Translated::DelBookmark { .. }
-        | Translated::DelFile { .. } => {
-            return Err(EventProcessorError::internal_error(format!(
-                "PUT event translated to a deletion: {}",
-                event.uri
-            )))
-        }
+        TranslatedPut::Skip { reason } => debug!(?reason, "PUT event not handled"),
     }
     Ok(())
 }
@@ -194,34 +183,23 @@ pub async fn handle_del_event(
     ingestor: Arc<UserIngestor>,
 ) -> Result<(), EventProcessorError> {
     match translation::translate_del(&event.route, &event.uri)? {
-        Translated::DelUser { user_id } => handlers::user::del(user_id).await?,
-        Translated::DelPost { author_id, post_id } => {
+        TranslatedDel::DelUser { user_id } => handlers::user::del(user_id).await?,
+        TranslatedDel::DelPost { author_id, post_id } => {
             handlers::post::del(author_id, post_id, &ingestor).await?
         }
-        Translated::DelFollow {
+        TranslatedDel::DelFollow {
             user_id,
             followee_id,
         } => handlers::follow::del(user_id, followee_id).await?,
-        Translated::DelBookmark {
+        TranslatedDel::DelBookmark {
             user_id,
             bookmark_id,
         } => handlers::bookmark::del(user_id, bookmark_id).await?,
-        Translated::DelTag { uri } => handlers::tag::del(&uri).await?,
-        Translated::DelFile { user_id, file_id } => {
+        TranslatedDel::DelTag { uri } => handlers::tag::del(&uri).await?,
+        TranslatedDel::DelFile { user_id, file_id } => {
             handlers::file::del(&user_id, file_id, files_path).await?
         }
-        Translated::Skip { reason } => debug!(?reason, "DEL event not handled"),
-        Translated::PutUser { .. }
-        | Translated::PutPost { .. }
-        | Translated::PutFollow { .. }
-        | Translated::PutTag { .. }
-        | Translated::PutBookmark { .. }
-        | Translated::PutFile { .. } => {
-            return Err(EventProcessorError::internal_error(format!(
-                "DEL event translated to a write: {}",
-                event.uri
-            )))
-        }
+        TranslatedDel::Skip { reason } => debug!(?reason, "DEL event not handled"),
     }
     Ok(())
 }
