@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 /// Labelled by `epoch` and `resource` kind only, never by user or object id.
 static EPOCH_SKIPPED: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter(METER_NAME)
-        .u64_counter("watcher.events.skipped")
+        .u64_counter("watcher.epoch.skipped")
         .with_description(
             "Events skipped before fetching because their social epoch is not indexed",
         )
@@ -192,10 +192,11 @@ fn record_skip(uri: &str, route: &EventRoute) {
 }
 
 /// The `epoch` label of an unsupported version. The segment comes from an untrusted path, so only
-/// canonical spellings in the `u8` range of the spec's epochs get a label of their own.
+/// canonical spellings of the spec's `social` epochs, `v1` to `v255`, get a label of their own:
+/// epoch 0 spells itself `pubky.app`, never `social/v0`.
 fn epoch_label(version: &str) -> String {
     match version.strip_prefix('v').map(str::parse::<u8>) {
-        Some(Ok(epoch)) if version == format!("v{epoch}") => version.to_string(),
+        Some(Ok(epoch)) if epoch > 0 && version == format!("v{epoch}") => version.to_string(),
         _ => UNKNOWN_LABEL.to_string(),
     }
 }
@@ -290,8 +291,10 @@ mod tests {
 
     #[test]
     fn epoch_label_bounds_untrusted_versions() {
+        assert_eq!(epoch_label("v1"), "v1");
         assert_eq!(epoch_label("v2"), "v2");
         assert_eq!(epoch_label("v255"), "v255");
+        assert_eq!(epoch_label("v0"), "unknown");
         assert_eq!(epoch_label("v256"), "unknown");
         assert_eq!(epoch_label("v02"), "unknown");
         assert_eq!(epoch_label("v123456789012"), "unknown");
