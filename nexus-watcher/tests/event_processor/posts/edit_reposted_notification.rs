@@ -2,6 +2,7 @@ use crate::event_processor::utils::watcher::WatcherTest;
 use anyhow::Result;
 use nexus_common::{
     models::notification::{Notification, NotificationBody, PostChangedSource},
+    models::post::PostKind,
     types::Pagination,
 };
 use pubky::Keypair;
@@ -87,7 +88,7 @@ async fn test_edit_reposted_post_notification() -> Result<()> {
     {
         assert_eq!(
             post_kind,
-            &PubkyAppPostKind::Short,
+            &PostKind::Short,
             "An edited note should report post_kind = Short"
         );
         assert_eq!(

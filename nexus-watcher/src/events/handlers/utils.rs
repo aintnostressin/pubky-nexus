@@ -1,9 +1,8 @@
 use crate::errors::EventProcessorError;
 use nexus_common::models::{
     error::{ModelError, ModelResult},
-    post::{PostDetails, PostRelationships},
+    post::{PostDetails, PostKind, PostRelationships},
 };
-use pubky_social_specs::legacy_v0::PubkyAppPostKind;
 
 /// Classifies the outcome of a best-effort user ingestion attempted while
 /// handling an [`OperationOutcome::MissingDependency`](nexus_common::db::OperationOutcome::MissingDependency).
@@ -38,14 +37,11 @@ pub(super) async fn post_relationships_is_reply(
 }
 
 /// The post's kind; a missing target reads back as `Unknown`.
-pub async fn post_kind(
-    author_id: &str,
-    post_id: &str,
-) -> Result<PubkyAppPostKind, EventProcessorError> {
+pub async fn post_kind(author_id: &str, post_id: &str) -> Result<PostKind, EventProcessorError> {
     Ok(PostDetails::get_by_id(author_id, post_id)
         .await?
         .map(|details| details.kind)
-        .unwrap_or(PubkyAppPostKind::Unknown))
+        .unwrap_or(PostKind::Unknown))
 }
 
 /// Whether a post is a Collection. A missing/unknown target defaults to `false`
@@ -54,5 +50,5 @@ pub async fn post_is_collection(
     author_id: &str,
     post_id: &str,
 ) -> Result<bool, EventProcessorError> {
-    Ok(post_kind(author_id, post_id).await? == PubkyAppPostKind::Collection)
+    Ok(post_kind(author_id, post_id).await? == PostKind::Collection)
 }
