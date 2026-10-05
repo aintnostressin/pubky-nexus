@@ -8,20 +8,22 @@ use nexus_common::models::{
     traits::Collection,
     user::{UserCounts, UserDetails, UserSearch, UsersByTagSearch},
 };
-use pubky_social_specs::legacy_v0::{PubkyAppUser, PubkyId};
+use pubky_social_specs::legacy_v0::PubkyId;
 use tracing::debug;
+
+use super::UserInput;
 
 /// `uri` is the address the profile was read from: the event path.
 #[tracing::instrument(name = "user.put", skip_all, fields(user_id = %user_id))]
 pub async fn sync_put(
-    user: PubkyAppUser,
+    user: UserInput,
     uri: String,
     user_id: PubkyId,
 ) -> Result<(), EventProcessorError> {
     debug!("Indexing user profile");
 
     // Step 1: Create `UserDetails` object
-    let user_details = UserDetails::from_homeserver(user, &user_id);
+    let user_details = user.into_details(&user_id);
 
     // Step 2: Save to graph, with the address the profile was read from
     user_details.put_profile_to_graph(&uri).await?;
