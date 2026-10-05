@@ -1,7 +1,7 @@
 use crate::db::kv::RedisResult;
 use crate::db::{fetch_row_from_graph, queries, GraphResult, RedisOps};
 use crate::models::error::ModelResult;
-use pubky_app_specs::{post_uri_builder, ParsedUri, PubkyAppPost, PubkyId, Resource};
+use pubky_social_specs::legacy_v0::{post_uri_builder, ParsedUri, PubkyAppPost, PubkyId, Resource};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use utoipa::ToSchema;
 
@@ -147,7 +147,7 @@ impl PostRelationships {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_app_specs::{file_uri_builder, PubkyAppPostEmbed, PubkyAppPostKind};
+    use pubky_social_specs::legacy_v0::{file_uri_builder, PubkyAppPostEmbed, PubkyAppPostKind};
 
     const AUTHOR: &str = "4snwyct86m383rsduhw5xgcxpw7c63j3pq8x4ycqikxgik8y64ro";
 

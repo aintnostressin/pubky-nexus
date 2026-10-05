@@ -9,9 +9,9 @@ use nexus_common::models::post::{
     PostStream, POST_TOTAL_ENGAGEMENT_KEY_PARTS,
 };
 use nexus_common::models::user::{UserCounts, UserIngestor};
-use pubky_app_specs::{
-    post_uri_builder, ParsedUri, PubkyAppCollectionContent, PubkyAppPost, PubkyAppPostKind,
-    PubkyId, Resource,
+use pubky_social_specs::legacy_v0::{
+    post_uri_builder, user_uri_builder, ParsedUri, PubkyAppCollectionContent, PubkyAppPost,
+    PubkyAppPostKind, PubkyId, Resource,
 };
 use tracing::{debug, Instrument};
 
@@ -57,11 +57,7 @@ pub async fn sync_put(
                 fail_on_blacklisted_hs(ingestor.maybe_ingest_author_of_post(reposted_uri).await)?;
             }
             if dependency_event_keys.is_empty() {
-                let author_uri = author_id
-                    .to_uri()
-                    .try_to_uri_str()
-                    .map_err(EventProcessorError::generic)?;
-                dependency_event_keys.push(author_uri);
+                dependency_event_keys.push(user_uri_builder(author_id.to_string()));
             }
             return Err(EventProcessorError::missing_dependencies(
                 dependency_event_keys,

@@ -1,4 +1,4 @@
-use pubky_app_specs::{post_uri_builder, user_uri_builder};
+use pubky_social_specs::legacy_v0::{post_uri_builder, user_uri_builder};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
