@@ -6,6 +6,7 @@ use nexus_common::db::PubkyConnector;
 use nexus_common::models::file::FileDetails;
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::models::traits::Collection;
+use nexus_common::types::PubkyIdExt;
 use nexus_common::utils::test_utils::default_ingestor_tests;
 use nexus_common::{StackConfig, StackManager};
 use nexus_watcher::errors::EventProcessorError;
@@ -140,7 +141,8 @@ impl WatcherTest {
         testnet.create_http_relay().await?;
 
         // Create a random homeserver with a random public key
-        let homeserver_id = PubkyId::from(testnet.create_random_homeserver().await?.public_key());
+        let homeserver_id =
+            PubkyId::from_public_key(&testnet.create_random_homeserver().await?.public_key());
         Homeserver::persist_if_unknown(homeserver_id.clone())
             .await
             .unwrap();
@@ -245,7 +247,7 @@ impl WatcherTest {
         let pubky = PubkyConnector::get()?;
 
         let signer = pubky.signer(user_kp.clone());
-        let hs_pk = self.homeserver_id.to_public_key();
+        let hs_pk = self.homeserver_id.to_public_key()?;
         signer.signup(&hs_pk, None).await?;
 
         Ok(())

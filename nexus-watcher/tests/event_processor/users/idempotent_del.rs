@@ -3,6 +3,7 @@ use crate::event_processor::utils::watcher::WatcherTest;
 use anyhow::Result;
 use nexus_common::db::RedisOps;
 use nexus_common::models::user::{UserCounts, UserDetails, UserSearch};
+use nexus_common::types::PubkyIdExt;
 use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::handlers::user;
 use pubky::Keypair;
@@ -41,7 +42,7 @@ async fn test_user_del_idempotent() -> Result<()> {
     );
 
     // Simulate retry: call del() directly — graph node is gone so expect SkipIndexing
-    let user_pubky = PubkyId::from(user_kp.public_key());
+    let user_pubky = PubkyId::from_public_key(&user_kp.public_key());
     let result = user::del(user_pubky).await;
     assert!(
         matches!(result, Err(EventProcessorError::SkipIndexing)),
@@ -112,7 +113,7 @@ async fn test_user_del_graph_last_recovery() -> Result<()> {
     );
 
     // Retry: call del() directly — should recover and complete successfully
-    let user_pubky = PubkyId::from(user_kp.public_key());
+    let user_pubky = PubkyId::from_public_key(&user_kp.public_key());
     user::del(user_pubky).await?;
 
     // Verify full cleanup after recovery

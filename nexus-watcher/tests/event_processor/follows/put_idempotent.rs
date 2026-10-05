@@ -8,7 +8,7 @@ use nexus_common::{
         follow::{Followers, Following, UserFollows},
         notification::Notification,
     },
-    types::Pagination,
+    types::{Pagination, PubkyIdExt},
     utils::test_utils::default_ingestor_tests,
 };
 use nexus_watcher::events::handlers::follow;
@@ -72,8 +72,8 @@ async fn test_follow_put_idempotent() -> Result<()> {
     let notification_count_before = notifications_before.len();
 
     // Simulate retry: call sync_put directly with the same follower/followee
-    let follower_pubky = PubkyId::from(follower_kp.clone());
-    let followee_pubky = PubkyId::from(followee_kp.clone());
+    let follower_pubky = PubkyId::from_public_key(&follower_kp.public_key());
+    let followee_pubky = PubkyId::from_public_key(&followee_kp.public_key());
     follow::sync_put(follower_pubky, followee_pubky, &default_ingestor_tests()).await?;
 
     // Verify counts are unchanged (not doubled)
@@ -168,8 +168,8 @@ async fn test_follow_put_recovers_missing_indexes() -> Result<()> {
     let notifications_before = Notification::get_by_id(&followee_id, Pagination::default()).await?;
 
     // Simulate retry: sync_put hits Updated (graph edge exists) and runs recovery
-    let follower_pubky = PubkyId::from(follower_kp.clone());
-    let followee_pubky = PubkyId::from(followee_kp.clone());
+    let follower_pubky = PubkyId::from_public_key(&follower_kp.public_key());
+    let followee_pubky = PubkyId::from_public_key(&followee_kp.public_key());
     follow::sync_put(follower_pubky, followee_pubky, &default_ingestor_tests()).await?;
 
     // Verify both indexes are recovered

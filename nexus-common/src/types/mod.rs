@@ -1,8 +1,10 @@
 mod pagination;
+mod pubky_id;
 pub mod routes;
 mod timeframe;
 
 pub use pagination::Pagination;
+pub use pubky_id::{NotAPublicKey, PubkyIdExt};
 pub use timeframe::{CacheTimeframe, Timeframe};
 
 use serde::de::{self, Deserializer};

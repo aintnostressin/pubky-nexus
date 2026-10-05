@@ -4043,15 +4043,13 @@ dependencies = [
 
 [[package]]
 name = "pubky-app-specs"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f6eccc1430eb48d63632d14fe47d051b6d12ca688bed9ac11678f8dc14e8f8a"
+version = "0.8.1"
+source = "git+https://github.com/aintnostressin/pubky-social-specs?branch=chore%2Foptional-sdk-dependency-0x#ff6013a5ff1caca1759e81dc666c03896c19730c"
 dependencies = [
  "base32",
  "blake3",
  "js-sys",
  "mime",
- "pubky",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

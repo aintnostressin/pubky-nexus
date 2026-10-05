@@ -8,6 +8,7 @@ use pubky::{Keypair, PublicKey};
 use pubky_app_specs::PubkyId;
 
 use crate::models::user::UserIngestor;
+use crate::types::PubkyIdExt;
 
 /// Generates a random public key.
 pub fn random_pk() -> PublicKey {
@@ -16,7 +17,7 @@ pub fn random_pk() -> PublicKey {
 
 /// Generates a random z32-encoded public key, usable as a user or HS ID.
 pub fn random_pubky_id() -> PubkyId {
-    PubkyId::from(random_pk())
+    PubkyId::from_public_key(&random_pk())
 }
 
 /// Default user ingestor for tests: empty HS blacklist (ingest everything).

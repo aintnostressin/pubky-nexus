@@ -5,6 +5,7 @@ use crate::models::error::{ModelError, ModelResult};
 use crate::models::homeserver::HsBlacklist;
 use crate::models::traits::Collection;
 use crate::models::user::{set_user_homeserver, UserDetails, UserHsCursor};
+use crate::types::PubkyIdExt;
 use crate::StackConfig;
 
 /// Ingests previously-unknown users unless their HS is blacklisted.
@@ -55,7 +56,8 @@ impl UserIngestor {
 
         let pubky = PubkyConnector::get().map_err(ModelError::from_generic)?;
 
-        let Some(hs_pk) = pubky.get_homeserver_of(&user_id.to_public_key()).await else {
+        let user_pk = user_id.to_public_key().map_err(ModelError::from_generic)?;
+        let Some(hs_pk) = pubky.get_homeserver_of(&user_pk).await else {
             return Ok(None);
         };
 

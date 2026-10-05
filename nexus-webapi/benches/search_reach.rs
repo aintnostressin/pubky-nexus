@@ -20,7 +20,7 @@ use nexus_common::{
         follow::reach::reach_authors,
         post::search::{PostsByContentSearch, MAX_REACH_AUTHORS_FT},
     },
-    types::{StreamReach, WotDepth},
+    types::{PubkyIdExt, StreamReach, WotDepth},
 };
 use pubky_app_specs::PubkyId;
 use setup::run_setup;
@@ -68,7 +68,7 @@ fn unstored_author(i: usize) -> PubkyId {
     let mut secret = [0u8; 32];
     secret[..10].copy_from_slice(b"benchreach");
     secret[24..].copy_from_slice(&(i as u64).to_le_bytes());
-    PubkyId::from(pubky::Keypair::from_secret(&secret))
+    PubkyId::from_public_key(&pubky::Keypair::from_secret(&secret).public_key())
 }
 
 fn reach_cases() -> Vec<(String, StreamReach)> {

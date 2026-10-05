@@ -204,13 +204,14 @@ mod tests {
     use pubky_app_specs::PubkyId;
 
     use crate::db::kv::RedisError;
-    use crate::{types::DynError, StackConfig, StackManager};
+    use crate::types::{DynError, PubkyIdExt};
+    use crate::{StackConfig, StackManager};
 
     use super::*;
 
     #[test]
     fn test_deserialize_cursor_from_string() {
-        let id = PubkyId::from(Keypair::random().public_key());
+        let id = PubkyId::from_public_key(&Keypair::random().public_key());
         for (cursor, expected) in [("\"0000000000000\"", 0), ("\"42\"", 42)] {
             let json = format!(r#"{{"id":"{id}","cursor":{cursor}}}"#);
             let homeserver: Homeserver = serde_json::from_str(&json).unwrap();
@@ -221,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_deserialize_cursor_from_number() {
-        let id = PubkyId::from(Keypair::random().public_key());
+        let id = PubkyId::from_public_key(&Keypair::random().public_key());
         for (cursor, expected) in [("0", 0), ("1234567890123", 1_234_567_890_123)] {
             let json = format!(r#"{{"id":"{id}","cursor":{cursor}}}"#);
             let homeserver: Homeserver = serde_json::from_str(&json).unwrap();
@@ -235,7 +236,7 @@ mod tests {
         StackManager::setup(&StackConfig::default()).await?;
 
         let keys = Keypair::random();
-        let id = PubkyId::from(keys.public_key());
+        let id = PubkyId::from_public_key(&keys.public_key());
 
         let hs = Homeserver::new(id.clone());
         hs.put_to_graph()
@@ -258,7 +259,7 @@ mod tests {
         StackManager::setup(&StackConfig::default()).await?;
 
         let keys = Keypair::random();
-        let id = PubkyId::from(keys.public_key());
+        let id = PubkyId::from_public_key(&keys.public_key());
 
         let hs = Homeserver::new(id.clone());
         hs.put_to_index()
@@ -280,7 +281,7 @@ mod tests {
     async fn test_cursor_forwards_accepted() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await?;
 
-        let id = PubkyId::from(Keypair::random().public_key());
+        let id = PubkyId::from_public_key(&Keypair::random().public_key());
         Homeserver::try_from_cursor(id.clone(), "100")
             .await?
             .put_to_index()
@@ -302,7 +303,7 @@ mod tests {
     async fn test_cursor_backwards_rejected_by_put_to_index() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await?;
 
-        let id = PubkyId::from(Keypair::random().public_key());
+        let id = PubkyId::from_public_key(&Keypair::random().public_key());
         Homeserver::try_from_cursor(id.clone(), "500")
             .await?
             .put_to_index()
@@ -329,7 +330,7 @@ mod tests {
     async fn test_cursor_backwards_rejected_by_try_from_cursor() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await?;
 
-        let id = PubkyId::from(Keypair::random().public_key());
+        let id = PubkyId::from_public_key(&Keypair::random().public_key());
         Homeserver::try_from_cursor(id.clone(), "300")
             .await?
             .put_to_index()
@@ -353,7 +354,7 @@ mod tests {
     async fn test_cursor_equal_value_accepted() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await?;
 
-        let id = PubkyId::from(Keypair::random().public_key());
+        let id = PubkyId::from_public_key(&Keypair::random().public_key());
         Homeserver::try_from_cursor(id.clone(), "200")
             .await?
             .put_to_index()

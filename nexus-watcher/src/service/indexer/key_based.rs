@@ -9,6 +9,7 @@ use futures::StreamExt;
 use nexus_common::db::PubkyConnector;
 use nexus_common::models::homeserver::HsBlacklist;
 use nexus_common::models::user::UserHsCursor;
+use nexus_common::types::PubkyIdExt;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky::errors::RequestError;
@@ -159,7 +160,10 @@ impl TEventProcessor for KeyBasedEventProcessor {
             return Err(EventProcessorError::HsBlacklisted { hs_id });
         }
 
-        let hs_pk = self.homeserver_id.to_public_key();
+        let hs_pk = self
+            .homeserver_id
+            .to_public_key()
+            .map_err(EventProcessorError::generic)?;
 
         let users = self
             .resolve_users_with_cursors()

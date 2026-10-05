@@ -8,7 +8,7 @@ use nexus_common::db::{
     PubkyConnector,
 };
 use nexus_common::models::user::{set_user_homeserver, set_user_homeserver_stale};
-use nexus_common::types::DynError;
+use nexus_common::types::{DynError, PubkyIdExt};
 use nexus_common::WatcherConfig;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use opentelemetry::{global, KeyValue};
@@ -40,7 +40,7 @@ impl PkdnsHomeserverResolver for PubkyConnectorResolver {
     async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<Option<PubkyId>> {
         let pubky = PubkyConnector::get()?;
         match pubky.get_homeserver_of(user_pk).await {
-            Some(hs_pk) => Ok(Some(PubkyId::from(hs_pk))),
+            Some(hs_pk) => Ok(Some(PubkyId::from_public_key(&hs_pk))),
             None => Ok(None),
         }
     }

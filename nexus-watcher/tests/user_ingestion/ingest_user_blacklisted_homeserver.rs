@@ -4,6 +4,7 @@ use anyhow::Result;
 use chrono::Utc;
 use nexus_common::models::error::ModelError;
 use nexus_common::models::user::{UserDetails, UserIngestor};
+use nexus_common::types::PubkyIdExt;
 use nexus_common::utils::test_utils::random_pubky_id;
 use nexus_watcher::events::handlers;
 use nexus_watcher::EventProcessorError;
@@ -27,8 +28,8 @@ async fn test_maybe_ingest_user_aborts_on_blacklisted_homeserver() -> Result<()>
     let user_id = user_kp.public_key().to_z32();
     test.register_user_in_hs(&user_kp, &hs_pk).await?;
 
-    let ingestor = UserIngestor::new([PubkyId::from(hs_pk.clone())]);
-    let user_pubky_id = PubkyId::from(user_kp.public_key());
+    let ingestor = UserIngestor::new([PubkyId::from_public_key(&hs_pk)]);
+    let user_pubky_id = PubkyId::from_public_key(&user_kp.public_key());
 
     let err = ingestor
         .maybe_ingest_user(&user_pubky_id)
@@ -59,7 +60,7 @@ async fn test_maybe_ingest_user_ingests_when_not_blacklisted() -> Result<()> {
     let user_id = user_kp.public_key().to_z32();
     test.register_user_in_hs(&user_kp, &hs_pk).await?;
 
-    let user_pubky_id = PubkyId::from(user_kp.public_key());
+    let user_pubky_id = PubkyId::from_public_key(&user_kp.public_key());
     UserIngestor::default()
         .maybe_ingest_user(&user_pubky_id)
         .await?;
@@ -92,10 +93,10 @@ async fn test_follow_of_user_on_blacklisted_homeserver_is_dropped() -> Result<()
     };
     test.create_user(&follower_kp, &follower_user).await?;
 
-    let ingestor = UserIngestor::new([PubkyId::from(hs_pk.clone())]);
+    let ingestor = UserIngestor::new([PubkyId::from_public_key(&hs_pk)]);
     let err = handlers::follow::sync_put(
-        PubkyId::from(follower_kp.public_key()),
-        PubkyId::from(followee_kp.public_key()),
+        PubkyId::from_public_key(&follower_kp.public_key()),
+        PubkyId::from_public_key(&followee_kp.public_key()),
         &ingestor,
     )
     .await
@@ -145,7 +146,7 @@ async fn test_reply_to_post_on_blacklisted_homeserver_is_dropped() -> Result<()>
     };
     let reply_id = reply.create_id();
 
-    let ingestor = UserIngestor::new([PubkyId::from(parent_hs_pk.clone())]);
+    let ingestor = UserIngestor::new([PubkyId::from_public_key(&parent_hs_pk)]);
     let err = handlers::post::sync_put(reply, random_pubky_id(), reply_id, &ingestor)
         .await
         .expect_err("reply to a post on a blacklisted HS must fail");
@@ -201,7 +202,7 @@ async fn test_repost_of_post_on_blacklisted_homeserver_is_dropped() -> Result<()
     };
     let repost_id = repost.create_id();
 
-    let ingestor = UserIngestor::new([PubkyId::from(original_hs_pk.clone())]);
+    let ingestor = UserIngestor::new([PubkyId::from_public_key(&original_hs_pk)]);
     let err = handlers::post::sync_put(repost, random_pubky_id(), repost_id, &ingestor)
         .await
         .expect_err("repost of a post on a blacklisted HS must fail");
@@ -251,7 +252,7 @@ async fn test_tag_post_on_blacklisted_homeserver_is_dropped() -> Result<()> {
     };
     let tag_id = tag.create_id();
 
-    let ingestor = UserIngestor::new([PubkyId::from(post_hs_pk.clone())]);
+    let ingestor = UserIngestor::new([PubkyId::from_public_key(&post_hs_pk)]);
     let err = handlers::tag::sync_put(tag, random_pubky_id(), tag_id, &ingestor)
         .await
         .expect_err("tag on a post hosted by a blacklisted HS must fail");
@@ -290,7 +291,7 @@ async fn test_tag_user_on_blacklisted_homeserver_is_dropped() -> Result<()> {
     };
     let tag_id = tag.create_id();
 
-    let ingestor = UserIngestor::new([PubkyId::from(tagged_hs_pk.clone())]);
+    let ingestor = UserIngestor::new([PubkyId::from_public_key(&tagged_hs_pk)]);
     let err = handlers::tag::sync_put(tag, random_pubky_id(), tag_id, &ingestor)
         .await
         .expect_err("tag on a user hosted by a blacklisted HS must fail");

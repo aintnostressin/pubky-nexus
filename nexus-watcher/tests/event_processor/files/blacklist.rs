@@ -4,6 +4,7 @@ use chrono::Utc;
 use nexus_common::models::file::FileDetails;
 use nexus_common::models::traits::Collection;
 use nexus_common::models::user::UserIngestor;
+use nexus_common::types::PubkyIdExt;
 use nexus_common::utils::test_utils::random_pubky_id;
 use nexus_common::DEFAULT_MAX_FILE_SIZE;
 use nexus_watcher::events::handlers::file::sync_put;
@@ -45,7 +46,7 @@ async fn setup_user_with_blob(
         created_at: Utc::now().timestamp_millis(),
     };
 
-    let user_pubky_id = PubkyId::from(user_kp.public_key());
+    let user_pubky_id = PubkyId::from_public_key(&user_kp.public_key());
     Ok((user_pubky_id, file, user_id, blob_absolute_url))
 }
 
