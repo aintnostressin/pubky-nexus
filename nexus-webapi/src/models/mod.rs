@@ -31,7 +31,7 @@ pub use nexus_common::models::post::PostKind;
 pub use post::{PostStreamDetailed, PostViewDetailed};
 pub use post_kinds::PostKinds;
 pub use post_search_query::PostSearchQuery;
-pub use pubky_social_specs::legacy_v0::PubkyId;
+pub use pubky_social_specs::PubkyId;
 pub use resource_id::ResourceId;
 pub use tag_label::TagLabel;
 pub use user_id_prefix::UserIdPrefix;
