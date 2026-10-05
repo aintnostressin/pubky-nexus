@@ -1,4 +1,5 @@
-//! The `pubky.app` arm: objects read with the frozen v0 reader, ids taken from the v0 path.
+//! The `pubky.app` arm: objects read with the frozen v0 reader and copied into the handler inputs,
+//! ids taken from the v0 path.
 
 use super::{SkipReason, Translated};
 use crate::errors::EventProcessorError;
@@ -20,11 +21,14 @@ pub(super) fn translate_put(
 
     let user_id = parsed.user_id().clone();
     let translated = match (object, resource) {
-        (PubkyAppObject::User(user), Resource::User) => Translated::PutUser { user_id, user },
+        (PubkyAppObject::User(user), Resource::User) => Translated::PutUser {
+            user_id,
+            user: user.into(),
+        },
         (PubkyAppObject::Post(post), Resource::Post(post_id)) => Translated::PutPost {
             author_id: user_id,
             post_id: post_id.clone(),
-            post,
+            post: post.into(),
         },
         (PubkyAppObject::Follow(_), Resource::Follow(followee_id)) => Translated::PutFollow {
             user_id,
@@ -33,7 +37,7 @@ pub(super) fn translate_put(
         (PubkyAppObject::Tag(tag), Resource::Tag(tag_id)) => Translated::PutTag {
             tagger_id: user_id,
             tag_id: tag_id.clone(),
-            tag,
+            tag: tag.into(),
             app: match parsed {
                 ExtendedParsedUri::UniversalTag { app, .. } => Some(app.clone()),
                 ExtendedParsedUri::PubkyApp { .. } => None,
@@ -43,13 +47,13 @@ pub(super) fn translate_put(
             Translated::PutBookmark {
                 user_id,
                 bookmark_id: bookmark_id.clone(),
-                bookmark,
+                bookmark: bookmark.into(),
             }
         }
         (PubkyAppObject::File(file), Resource::File(file_id)) => Translated::PutFile {
             user_id,
             file_id: file_id.clone(),
-            file,
+            file: file.into(),
             uri: uri.to_string(),
         },
         (PubkyAppObject::Mute(_), _) => skip(SkipReason::Mute),

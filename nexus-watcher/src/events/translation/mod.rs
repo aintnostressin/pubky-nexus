@@ -8,9 +8,8 @@ mod route;
 pub use route::{route, EventRoute};
 
 use crate::errors::EventProcessorError;
-use pubky_social_specs::legacy_v0::{
-    PubkyAppBookmark, PubkyAppFile, PubkyAppPost, PubkyAppTag, PubkyAppUser, PubkyId,
-};
+use crate::events::handlers::{BookmarkInput, FileInput, PostInput, TagInput, UserInput};
+use pubky_social_specs::legacy_v0::PubkyId;
 
 /// Why an event is deliberately left unhandled.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,17 +28,17 @@ pub enum SkipReason {
     UnsupportedEpoch { version: String },
 }
 
-/// One handler call, carrying the inputs that handler takes. The objects are the v0 types.
+/// One handler call, carrying the inputs that handler takes, whichever epoch wrote the object.
 #[derive(Debug)]
 pub enum Translated {
     PutUser {
         user_id: PubkyId,
-        user: PubkyAppUser,
+        user: UserInput,
     },
     PutPost {
         author_id: PubkyId,
         post_id: String,
-        post: PubkyAppPost,
+        post: PostInput,
     },
     PutFollow {
         user_id: PubkyId,
@@ -49,18 +48,18 @@ pub enum Translated {
     PutTag {
         tagger_id: PubkyId,
         tag_id: String,
-        tag: PubkyAppTag,
+        tag: TagInput,
         app: Option<String>,
     },
     PutBookmark {
         user_id: PubkyId,
         bookmark_id: String,
-        bookmark: PubkyAppBookmark,
+        bookmark: BookmarkInput,
     },
     PutFile {
         user_id: PubkyId,
         file_id: String,
-        file: PubkyAppFile,
+        file: FileInput,
         uri: String,
     },
     DelUser {
@@ -128,8 +127,8 @@ mod tests {
     use chrono::Utc;
     use pubky_social_specs::legacy_v0::traits::HashId;
     use pubky_social_specs::legacy_v0::{
-        tag_id, PubkyAppBlob, PubkyAppFeed, PubkyAppFeedConfig, PubkyAppFeedLayout,
-        PubkyAppFeedReach, PubkyAppFeedSort,
+        tag_id, PubkyAppBlob, PubkyAppBookmark, PubkyAppFeed, PubkyAppFeedConfig,
+        PubkyAppFeedLayout, PubkyAppFeedReach, PubkyAppFeedSort,
     };
 
     const HOST: &str = "operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo";
@@ -273,7 +272,7 @@ mod tests {
             } => {
                 assert_eq!(user_id, host());
                 assert_eq!(bookmark_id, id);
-                assert_eq!(bookmark.uri, target);
+                assert_eq!(bookmark.target, target);
             }
             other => panic!("expected PutBookmark, got {other:?}"),
         }

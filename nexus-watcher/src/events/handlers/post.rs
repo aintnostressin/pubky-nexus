@@ -10,28 +10,28 @@ use nexus_common::models::post::{
 };
 use nexus_common::models::user::{UserCounts, UserIngestor};
 use pubky_social_specs::legacy_v0::{
-    post_uri_builder, user_uri_builder, ParsedUri, PubkyAppCollectionContent, PubkyAppPost,
-    PubkyAppPostKind, PubkyId, Resource,
+    post_uri_builder, user_uri_builder, ParsedUri, PubkyAppCollectionContent, PubkyId, Resource,
 };
 use tracing::{debug, Instrument};
 
 use super::utils::{fail_on_blacklisted_hs, post_kind, post_relationships_is_reply};
+use super::PostInput;
 
 #[tracing::instrument(name = "post.put", skip_all, fields(user_id = %author_id, post_id = %post_id))]
 pub async fn sync_put(
-    post: PubkyAppPost,
+    post: PostInput,
     author_id: PubkyId,
     post_id: String,
     ingestor: &UserIngestor,
 ) -> Result<(), EventProcessorError> {
     debug!("Indexing post");
     // Create PostDetails object
-    let post_details = PostDetails::from_homeserver(post.clone(), &author_id, &post_id);
+    let post_details = post.clone().into_details(&author_id, &post_id);
     // We avoid indexing replies into global feed sorted sets
     let is_reply = post.parent.is_some();
-    let is_collection = post.kind == PubkyAppPostKind::Collection;
+    let is_collection = post.kind == PostKind::Collection;
     // PRE-INDEX operation, identify the post relationship
-    let mut post_relationships = PostRelationships::from_homeserver(&post);
+    let mut post_relationships = post.relationships();
 
     let existed = match post_details.put_to_graph(&post_relationships).await? {
         OperationOutcome::CreatedOrDeleted => false,
@@ -125,7 +125,7 @@ pub async fn sync_put(
         &post_id,
         &post_details.content,
         &mut post_relationships,
-        post.kind.clone().into(),
+        post.kind.clone(),
     )
     .await?;
 
@@ -374,7 +374,7 @@ async fn recover_post_index_state(
 }
 
 async fn sync_edit(
-    post: &PubkyAppPost,
+    post: &PostInput,
     author_id: PubkyId,
     post_id: String,
     post_details: PostDetails,
@@ -545,8 +545,8 @@ fn curated_items(
 /// Best-effort ingestion of the user of every URI in a Collection's
 /// `items` envelope. No-op for non-Collection posts; failures (malformed URI,
 /// blacklisted HS) are logged and skipped so the Collection is still indexed.
-async fn ingest_collection_item_authors(post: &PubkyAppPost, ingestor: &UserIngestor) {
-    if post.kind != PubkyAppPostKind::Collection {
+async fn ingest_collection_item_authors(post: &PostInput, ingestor: &UserIngestor) {
+    if post.kind != PostKind::Collection {
         return;
     }
     let Ok(envelope) = serde_json::from_str::<PubkyAppCollectionContent>(&post.content) else {
@@ -591,11 +591,11 @@ pub async fn del(
                 .and_then(|replied_uri| replied_uri.try_to_uri_str().ok());
 
             // We store a dummy that is still a reply if it was one already.
-            let dummy_deleted_post = PubkyAppPost {
+            let dummy_deleted_post = PostInput {
                 content: "[DELETED]".to_string(),
                 parent,
                 embed: None,
-                kind: PubkyAppPostKind::Short,
+                kind: PostKind::Short,
                 attachments: None,
                 lock: None,
             };

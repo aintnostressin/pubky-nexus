@@ -5,6 +5,7 @@ use chrono::Utc;
 use nexus_common::db::{fetch_all_rows_from_graph, queries, RedisOps};
 use nexus_common::models::tag::user::TagUser;
 use nexus_common::models::user::{UserDetails, UsersByTagSearch};
+use nexus_watcher::events::handlers::UserInput;
 use pubky::Keypair;
 use pubky_social_specs::legacy_v0::{PubkyAppTag, PubkyAppUser, PubkyId};
 
@@ -306,16 +307,14 @@ async fn test_sync_index_score_removal_guard() -> Result<()> {
     );
 
     // Guard cleared: the derive restores the member from the set cardinality
-    let restored = UserDetails::from_homeserver(
-        PubkyAppUser {
-            bio: None,
-            image: None,
-            links: None,
-            name: "Watcher:GuardCheck:Restored".to_string(),
-            status: None,
-        },
-        &pubky_id,
-    );
+    let restored = UserInput {
+        bio: None,
+        image: None,
+        links: None,
+        name: "Watcher:GuardCheck:Restored".to_string(),
+        status: None,
+    }
+    .into_details(&pubky_id);
     restored.put_index_json(&[&user_id], None, None).await?;
     UsersByTagSearch::sync_index_score(&user_id, label).await?;
     let score = check_member_user_tag_taggers(&user_id, label)

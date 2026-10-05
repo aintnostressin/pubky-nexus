@@ -52,7 +52,7 @@ async fn test_post_put_recovers_after_partial_redis_write() -> Result<()> {
     // Retry: invoke sync_put directly. Graph reports `Updated`, the handler
     // takes the recovery path and rebuilds the Redis state from the graph.
     handlers::post::sync_put(
-        post.clone(),
+        post.clone().into(),
         pubky_id(&user_id)?,
         post_id.clone(),
         &default_ingestor_tests(),
@@ -109,7 +109,7 @@ async fn test_post_put_replay_after_full_success_is_noop() -> Result<()> {
     // Replay sync_put with identical content. Handler must hit the
     // `existed == Some(matching)` branch and early-return.
     handlers::post::sync_put(
-        post.clone(),
+        post.clone().into(),
         pubky_id(&user_id)?,
         post_id.clone(),
         &default_ingestor_tests(),
@@ -201,7 +201,7 @@ async fn test_post_put_recovers_mention_edge() -> Result<()> {
     // Retry: graph reports Updated, handler enters recovery path, which
     // calls merge_mention_edges and then reindexes Redis state.
     handlers::post::sync_put(
-        post.clone(),
+        post.clone().into(),
         pubky_id(&alice_id)?,
         post_id.clone(),
         &default_ingestor_tests(),
@@ -302,7 +302,7 @@ async fn test_post_put_recovers_reply_preserves_parent_sorted_sets() -> Result<(
     // Some(parent) branch that re-adds the reply to the parent's post-reply
     // sorted set.
     handlers::post::sync_put(
-        reply_post.clone(),
+        reply_post.clone().into(),
         pubky_id(&bob_id)?,
         reply_id.clone(),
         &default_ingestor_tests(),
@@ -431,7 +431,7 @@ async fn test_post_put_recovers_repost_preserves_parent_state() -> Result<()> {
     // `reposted` field, and PostCounts::reindex must put the repost back in
     // the engagement sorted set (is_reply = false from graph).
     handlers::post::sync_put(
-        repost.clone(),
+        repost.clone().into(),
         pubky_id(&bob_id)?,
         repost_id.clone(),
         &default_ingestor_tests(),
