@@ -15,9 +15,8 @@ use nexus_common::types::Pagination;
 use nexus_common::universal_tag::normalize::{
     classify_uri, normalize_uri, resource_id, UriCategory,
 };
-use pubky_social_specs::legacy_v0::{
-    user_uri_builder, ExtendedParsedUri, ParsedUri, PubkyId, Resource,
-};
+use pubky_social_specs::legacy_v0::{user_uri_builder, ExtendedParsedUri, ParsedUri, Resource};
+use pubky_social_specs::PubkyId;
 use tracing::debug;
 
 use super::utils::{fail_on_permanent_ingest_error, post_kind, post_relationships_is_reply};

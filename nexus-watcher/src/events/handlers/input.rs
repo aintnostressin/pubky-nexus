@@ -6,9 +6,9 @@ use nexus_common::models::file::{FileDetails, FileUrls};
 use nexus_common::models::post::{PostDetails, PostKind, PostRelationships};
 use nexus_common::models::user::{UserDetails, UserLink};
 use pubky_social_specs::legacy_v0::{
-    ParsedUri, PubkyAppBookmark, PubkyAppFile, PubkyAppPost, PubkyAppTag, PubkyAppUser, PubkyId,
-    Resource,
+    ParsedUri, PubkyAppBookmark, PubkyAppFile, PubkyAppPost, PubkyAppTag, PubkyAppUser, Resource,
 };
+use pubky_social_specs::PubkyId;
 
 /// A post as the post handler reads it.
 #[derive(Debug, Clone)]
