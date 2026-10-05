@@ -2,6 +2,10 @@
 //! [`skip_reason`] picks the routed events parsing skips before any fetch, [`is_canonical`] the
 //! alias paths it rejects, and [`translate_put`] and [`translate_del`] turn a routed event into the
 //! handler call that indexes it. Pure functions: no I/O, no database, no homeserver.
+//!
+//! No translation failure can change on a retry, so each is an error the retry queue drops: a
+//! route or resource translation cannot handle is `InvalidEventLine`, a payload the reader rejects
+//! or classifies inconsistently with its path is `SpecValidation`.
 
 mod legacy;
 mod route;
@@ -161,7 +165,7 @@ pub fn translate_del(route: &EventRoute, uri: &str) -> Result<TranslatedDel, Eve
 
 /// Parsing skips or rejects every route but `Legacy` before an event exists, so this is a bug.
 fn untranslatable_route_error(uri: &str) -> EventProcessorError {
-    EventProcessorError::internal_error(format!("No translation for the route of {uri}"))
+    EventProcessorError::InvalidEventLine(format!("No translation for the route of {uri}"))
 }
 
 #[cfg(test)]
@@ -530,9 +534,9 @@ mod tests {
     }
 
     /// Only legacy routes become events; any other route reaching translation is a bug and must
-    /// surface as an error, not a panic.
+    /// surface as an error the retry queue drops, not a panic.
     #[test]
-    fn non_legacy_routes_are_internal_errors() {
+    fn non_legacy_routes_are_invalid_event_lines() {
         let paths = [
             format!("pub/social/v1/posts/{TS}/{TS}.json"),
             format!("pub/social/v2/posts/{TS}"),
@@ -547,8 +551,8 @@ mod tests {
                 translate_del(&route, &uri).unwrap_err(),
             ] {
                 assert!(
-                    matches!(err, EventProcessorError::InternalError(_)),
-                    "{path}: expected InternalError, got {err:?}"
+                    matches!(err, EventProcessorError::InvalidEventLine(_)),
+                    "{path}: expected InvalidEventLine, got {err:?}"
                 );
             }
         }
