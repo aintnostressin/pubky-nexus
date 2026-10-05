@@ -27,6 +27,11 @@ use pubky_social_specs::legacy_v0::{
     traits::{HasIdPath, HasPath, TimestampId},
     PubkyAppFile, PubkyAppFollow, PubkyAppPost, PubkyAppUser, PubkyId,
 };
+// The v1 traits share their names with the v0 ones; each model implements only its own epoch's.
+use pubky_social_specs::traits::{HasIdPath as _, HasPath as _, HashId as _, TimestampId as _};
+use pubky_social_specs::{
+    PubkySocialFile, PubkySocialFollow, PubkySocialPost, PubkySocialTag, PubkySocialUser, Root,
+};
 use pubky_testnet::Testnet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -373,6 +378,79 @@ impl WatcherTest {
             .await?;
         Ok(follow_path)
     }
+
+    /// Registers the key and writes a `social/v1` profile, the v1 counterpart of
+    /// [`Self::create_user`].
+    pub async fn create_v1_user(
+        &mut self,
+        user_kp: &Keypair,
+        user: &PubkySocialUser,
+    ) -> Result<String> {
+        let user_id = user_kp.public_key().to_z32();
+        self.register_user(user_kp).await?;
+
+        let user_path: ResourcePath = PubkySocialUser::create_path().parse()?;
+        self.put(user_kp, &user_path, user).await?;
+
+        Ok(user_id)
+    }
+
+    /// Writes the first version of a `social/v1` post, `posts/{id}/{id}.json`, the path both a v1
+    /// client and the migration write.
+    pub async fn create_v1_post(
+        &mut self,
+        user_kp: &Keypair,
+        post: &PubkySocialPost,
+    ) -> Result<(String, ResourcePath)> {
+        let post_id = post.create_id();
+        let post_path: ResourcePath =
+            PubkySocialPost::create_path_in(Root::Pub, &post_id, &post_id, None).parse()?;
+        self.put(user_kp, &post_path, post).await?;
+
+        Ok((post_id, post_path))
+    }
+
+    pub async fn create_v1_tag(
+        &mut self,
+        tagger_kp: &Keypair,
+        tag: &PubkySocialTag,
+    ) -> Result<(String, ResourcePath)> {
+        let tag_id = tag.create_id();
+        let tag_path: ResourcePath = PubkySocialTag::create_path(&tag_id).parse()?;
+        self.put(tagger_kp, &tag_path, tag).await?;
+
+        Ok((tag_id, tag_path))
+    }
+
+    pub async fn create_v1_follow(
+        &mut self,
+        follower_kp: &Keypair,
+        followee_id: &str,
+    ) -> Result<ResourcePath> {
+        let follow_path: ResourcePath = PubkySocialFollow::create_path(followee_id).parse()?;
+        self.put(follower_kp, &follow_path, PubkySocialFollow::new())
+            .await?;
+
+        Ok(follow_path)
+    }
+
+    /// Writes `social/v1` media. A v1 file is the raw bytes, not JSON, so it bypasses
+    /// [`Self::put`].
+    pub async fn create_v1_file(
+        &mut self,
+        user_kp: &Keypair,
+        bytes: Vec<u8>,
+        content_type: &str,
+    ) -> Result<(String, ResourcePath)> {
+        let created =
+            PubkySocialFile::create_file(bytes, content_type, Root::Pub).map_err(Error::msg)?;
+        let file_path: ResourcePath = created.path.parse()?;
+        self.create_file_from_body(user_kp, file_path.as_str(), created.file.0)
+            .await?;
+        self.ensure_event_processing_complete().await?;
+
+        Ok((created.id, file_path))
+    }
 }
 
 /// Retrieves an event from the homeserver and handles it asynchronously.
@@ -388,7 +466,7 @@ pub async fn retrieve_and_handle_event_line(
 ) -> Result<(), EventProcessorError> {
     match Event::parse_event(event_line)? {
         ParseResult::Parsed(event) => event_handler.handle(&event).await,
-        ParseResult::Skipped | ParseResult::UnrecognizedUri { .. } => Ok(()),
+        ParseResult::Skipped { .. } | ParseResult::UnrecognizedUri { .. } => Ok(()),
     }
 }
 
