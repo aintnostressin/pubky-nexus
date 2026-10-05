@@ -1,4 +1,4 @@
-use super::UserSearch;
+use super::{UserLink, UserSearch};
 use crate::db::graph::Query;
 use crate::db::kv::RedisResult;
 use crate::db::{exec_single_row, queries, GraphResult, RedisOps};
@@ -6,7 +6,7 @@ use crate::models::error::ModelResult;
 use crate::models::traits::Collection;
 use async_trait::async_trait;
 use chrono::Utc;
-use pubky_app_specs::{PubkyAppUser, PubkyAppUserLink, PubkyId};
+use pubky_social_specs::PubkyId;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json;
 use utoipa::ToSchema;
@@ -41,7 +41,7 @@ pub struct UserDetails {
     pub bio: Option<String>,
     pub id: PubkyId,
     #[serde(deserialize_with = "deserialize_user_links")]
-    pub links: Option<Vec<PubkyAppUserLink>>,
+    pub links: Option<Vec<UserLink>>,
     pub status: Option<String>,
     pub image: Option<String>,
     pub indexed_at: i64,
@@ -49,9 +49,7 @@ pub struct UserDetails {
     pub deleted: bool,
 }
 
-fn deserialize_user_links<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<PubkyAppUserLink>>, D::Error>
+fn deserialize_user_links<'de, D>(deserializer: D) -> Result<Option<Vec<UserLink>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -67,13 +65,13 @@ where
     match value {
         serde_json::Value::String(s) => {
             // If it's a string, parse the string as JSON
-            let urls: Option<Vec<PubkyAppUserLink>> =
+            let urls: Option<Vec<UserLink>> =
                 serde_json::from_str(&s).map_err(serde::de::Error::custom)?;
             Ok(urls)
         }
         serde_json::Value::Array(arr) => {
             // If it's already an array, deserialize it directly
-            let urls: Vec<PubkyAppUserLink> = serde_json::from_value(serde_json::Value::Array(arr))
+            let urls: Vec<UserLink> = serde_json::from_value(serde_json::Value::Array(arr))
                 .map_err(serde::de::Error::custom)?;
             Ok(Some(urls))
         }
@@ -116,19 +114,6 @@ impl UserDetails {
             links: None,
             status: None,
             image: None,
-            deleted: false,
-        }
-    }
-
-    pub fn from_homeserver(homeserver_user: PubkyAppUser, user_id: &PubkyId) -> Self {
-        UserDetails {
-            name: homeserver_user.name,
-            bio: homeserver_user.bio,
-            status: homeserver_user.status,
-            links: homeserver_user.links,
-            image: homeserver_user.image,
-            id: user_id.clone(),
-            indexed_at: Utc::now().timestamp_millis(),
             deleted: false,
         }
     }

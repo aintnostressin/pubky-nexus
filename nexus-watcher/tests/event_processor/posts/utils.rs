@@ -10,9 +10,10 @@ use nexus_common::{
         POST_TOTAL_ENGAGEMENT_KEY_PARTS,
     },
 };
-use pubky_app_specs::{
-    post_uri_builder, PubkyAppPost, PubkyAppPostEmbed, PubkyAppPostKind, PubkyAppUser, PubkyId,
+use pubky_social_specs::legacy_v0::{
+    post_uri_builder, PubkyAppPost, PubkyAppPostEmbed, PubkyAppPostKind, PubkyAppUser,
 };
+use pubky_social_specs::PubkyId;
 
 pub async fn find_post_counts(user_id: &str, post_id: &str) -> PostCounts {
     // Read-through: counts are invalidated on write and recomputed from the

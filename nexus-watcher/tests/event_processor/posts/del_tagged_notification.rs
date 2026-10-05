@@ -3,12 +3,12 @@ use anyhow::Result;
 use chrono::Utc;
 use nexus_common::{
     models::notification::{Notification, NotificationBody, PostChangedSource},
+    models::post::PostKind,
     types::Pagination,
 };
 use pubky::Keypair;
-use pubky_app_specs::{
-    post_uri_builder, tag_uri_builder, traits::HashId, PubkyAppPost, PubkyAppPostKind, PubkyAppTag,
-    PubkyAppUser,
+use pubky_social_specs::legacy_v0::{
+    post_uri_builder, tag_uri_builder, traits::HashId, PubkyAppPost, PubkyAppTag, PubkyAppUser,
 };
 
 #[tokio_shared_rt::test(shared)]
@@ -86,7 +86,7 @@ async fn test_delete_tagged_post_notification() -> Result<()> {
     {
         assert_eq!(
             post_kind,
-            &PubkyAppPostKind::Short,
+            &PostKind::Short,
             "A deleted note should report post_kind = Short"
         );
         assert_eq!(

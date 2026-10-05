@@ -1,11 +1,9 @@
-use super::{PostRelationships, PostStream};
+use super::{PostKind, PostRelationships, PostStream};
 use crate::db::kv::RedisResult;
 use crate::db::{
     execute_graph_operation, fetch_row_from_graph, queries, GraphResult, OperationOutcome, RedisOps,
 };
 use crate::models::error::ModelResult;
-use chrono::Utc;
-use pubky_app_specs::{post_uri_builder, PubkyAppPost, PubkyAppPostKind, PubkyId};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -19,7 +17,7 @@ pub struct PostDetails {
     pub id: String,
     pub indexed_at: i64,
     pub author: String,
-    pub kind: PubkyAppPostKind,
+    pub kind: PostKind,
     pub uri: String,
     pub attachments: Option<Vec<String>>,
     /// `pubky://` URL of the lock server; `None` when the post is unlocked.
@@ -107,23 +105,6 @@ impl PostDetails {
         Ok(())
     }
 
-    pub fn from_homeserver(
-        homeserver_post: PubkyAppPost,
-        author_id: &PubkyId,
-        post_id: &str,
-    ) -> Self {
-        PostDetails {
-            uri: post_uri_builder(author_id.to_string(), post_id.into()),
-            content: homeserver_post.content,
-            id: post_id.to_string(),
-            indexed_at: Utc::now().timestamp_millis(),
-            author: author_id.to_string(),
-            kind: homeserver_post.kind,
-            attachments: homeserver_post.attachments,
-            lock: homeserver_post.lock,
-        }
-    }
-
     pub async fn reindex(author_id: &str, post_id: &str) -> ModelResult<()> {
         match Self::get_from_graph(author_id, post_id).await? {
             Some((details, reply)) => details.put_to_index(author_id, reply, false).await?,
@@ -190,7 +171,6 @@ impl PostDetails {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_app_specs::PubkyAppPostKind;
 
     #[tokio_shared_rt::test(shared)]
     async fn test_is_different_than() {
@@ -200,7 +180,7 @@ mod tests {
             id: "post1".into(),
             indexed_at: 123456789,
             author: "author1".into(),
-            kind: PubkyAppPostKind::Short,
+            kind: PostKind::Short,
             uri: "uri1".into(),
             attachments: Some(vec!["image1.jpg".into(), "image2.jpg".into()]),
             lock: None,
@@ -271,7 +251,7 @@ mod tests {
             id: "p".into(),
             indexed_at: 1,
             author: "a".into(),
-            kind: PubkyAppPostKind::Short,
+            kind: PostKind::Short,
             uri: "u".into(),
             attachments: None,
             lock: None,

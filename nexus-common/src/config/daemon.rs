@@ -71,7 +71,7 @@ impl ConfigLoader<DaemonConfig> for DaemonConfig {}
 mod tests {
     use std::{collections::HashMap, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 
-    use pubky_app_specs::PubkyId;
+    use pubky_social_specs::PubkyId;
 
     use crate::config::file::{reader::DEFAULT_CONFIG_TOML, ConfigLoader};
     use crate::{
