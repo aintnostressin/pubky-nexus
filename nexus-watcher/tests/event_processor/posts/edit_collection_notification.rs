@@ -4,6 +4,7 @@ use anyhow::Result;
 use chrono::Utc;
 use nexus_common::{
     models::notification::{Notification, NotificationBody, PostChangedSource},
+    models::post::PostKind,
     types::Pagination,
 };
 use pubky::Keypair;
@@ -78,7 +79,7 @@ async fn test_edit_tagged_collection_notification() -> Result<()> {
     {
         assert_eq!(
             post_kind,
-            &PubkyAppPostKind::Collection,
+            &PostKind::Collection,
             "Editing a collection should tag the notification with post_kind = Collection"
         );
         assert_eq!(
@@ -123,7 +124,7 @@ async fn test_edit_tagged_collection_notification() -> Result<()> {
     assert!(
         matches!(
             &notifications[0].body,
-            NotificationBody::PostEdited { post_kind, .. } if post_kind == &PubkyAppPostKind::Short
+            NotificationBody::PostEdited { post_kind, .. } if post_kind == &PostKind::Short
         ),
         "Editing a collection into a Short should report post_kind = Short (new-kind rule)"
     );

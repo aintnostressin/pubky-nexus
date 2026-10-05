@@ -1,11 +1,11 @@
-use super::{PostRelationships, PostStream};
+use super::{PostKind, PostRelationships, PostStream};
 use crate::db::kv::RedisResult;
 use crate::db::{
     execute_graph_operation, fetch_row_from_graph, queries, GraphResult, OperationOutcome, RedisOps,
 };
 use crate::models::error::ModelResult;
 use chrono::Utc;
-use pubky_social_specs::legacy_v0::{post_uri_builder, PubkyAppPost, PubkyAppPostKind, PubkyId};
+use pubky_social_specs::legacy_v0::{post_uri_builder, PubkyAppPost, PubkyId};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -19,7 +19,7 @@ pub struct PostDetails {
     pub id: String,
     pub indexed_at: i64,
     pub author: String,
-    pub kind: PubkyAppPostKind,
+    pub kind: PostKind,
     pub uri: String,
     pub attachments: Option<Vec<String>>,
     /// `pubky://` URL of the lock server; `None` when the post is unlocked.
@@ -118,7 +118,7 @@ impl PostDetails {
             id: post_id.to_string(),
             indexed_at: Utc::now().timestamp_millis(),
             author: author_id.to_string(),
-            kind: homeserver_post.kind,
+            kind: homeserver_post.kind.into(),
             attachments: homeserver_post.attachments,
             lock: homeserver_post.lock,
         }
@@ -190,7 +190,6 @@ impl PostDetails {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_social_specs::legacy_v0::PubkyAppPostKind;
 
     #[tokio_shared_rt::test(shared)]
     async fn test_is_different_than() {
@@ -200,7 +199,7 @@ mod tests {
             id: "post1".into(),
             indexed_at: 123456789,
             author: "author1".into(),
-            kind: PubkyAppPostKind::Short,
+            kind: PostKind::Short,
             uri: "uri1".into(),
             attachments: Some(vec!["image1.jpg".into(), "image2.jpg".into()]),
             lock: None,
@@ -271,7 +270,7 @@ mod tests {
             id: "p".into(),
             indexed_at: 1,
             author: "a".into(),
-            kind: PubkyAppPostKind::Short,
+            kind: PostKind::Short,
             uri: "u".into(),
             attachments: None,
             lock: None,

@@ -5,8 +5,8 @@ use nexus_common::db::{exec_single_row, execute_graph_operation, OperationOutcom
 use nexus_common::db::{queries, RedisOps};
 use nexus_common::models::notification::{Notification, PostChangedSource, PostChangedType};
 use nexus_common::models::post::{
-    collection_item_keys, sync_collected_edges, PostCounts, PostDetails, PostRelationships,
-    PostStream, POST_TOTAL_ENGAGEMENT_KEY_PARTS,
+    collection_item_keys, sync_collected_edges, PostCounts, PostDetails, PostKind,
+    PostRelationships, PostStream, POST_TOTAL_ENGAGEMENT_KEY_PARTS,
 };
 use nexus_common::models::user::{UserCounts, UserIngestor};
 use pubky_social_specs::legacy_v0::{
@@ -69,7 +69,7 @@ pub async fn sync_put(
         // If the post existed, let's confirm this is an edit. Is the content different?
         match PostDetails::get_from_index(&author_id, &post_id).await? {
             Some(existing_details) => {
-                let was_collection = existing_details.kind == PubkyAppPostKind::Collection;
+                let was_collection = existing_details.kind == PostKind::Collection;
                 // Persist the new PostDetails (incl. kind) BEFORE moving the
                 // `collections` counter. If the counter moved first and a later
                 // step failed, a retry would re-read the old kind, see the same
@@ -125,7 +125,7 @@ pub async fn sync_put(
         &post_id,
         &post_details.content,
         &mut post_relationships,
-        post.kind.clone(),
+        post.kind.clone().into(),
     )
     .await?;
 
@@ -380,7 +380,7 @@ async fn sync_edit(
     post_details: PostDetails,
     ingestor: &UserIngestor,
     notify: bool,
-    was_kind: PubkyAppPostKind,
+    was_kind: PostKind,
 ) -> Result<(), EventProcessorError> {
     // Refresh the cached details (always, even for a lock-only toggle).
     post_details.put_to_index(&author_id, None, true).await?;
@@ -444,7 +444,7 @@ pub async fn put_mentioned_relationships(
     post_id: &str,
     content: &str,
     relationships: &mut PostRelationships,
-    post_kind: PubkyAppPostKind,
+    post_kind: PostKind,
 ) -> Result<(), EventProcessorError> {
     // TODO Deprecate, drop support for pk: support in an upcoming release
     // Backwards compatibility: identify user references with "pk:" prefix
@@ -478,7 +478,7 @@ async fn put_mentioned_relationships_for_prefix(
     content: &str,
     relationships: &mut PostRelationships,
     prefix: &str,
-    post_kind: PubkyAppPostKind,
+    post_kind: PostKind,
 ) -> Result<(), EventProcessorError> {
     for pubky_id in find_mentioned_ids(content, prefix) {
         // Create the MENTIONED relationship in the graph
@@ -532,7 +532,7 @@ fn curated_items(
     post_id: &str,
     post_details: &PostDetails,
 ) -> Vec<(PubkyId, String)> {
-    if post_details.kind != PubkyAppPostKind::Collection {
+    if post_details.kind != PostKind::Collection {
         return Vec::new();
     }
     // PUTs are spec-validated, but recovery reads the graph, which may hold an
@@ -627,9 +627,9 @@ pub async fn sync_del(author_id: PubkyId, post_id: String) -> Result<(), EventPr
     let deleted_kind = if post_in_index {
         post_kind(&author_id, &post_id).await?
     } else {
-        PubkyAppPostKind::Unknown
+        PostKind::Unknown
     };
-    let is_collection = deleted_kind == PubkyAppPostKind::Collection;
+    let is_collection = deleted_kind == PostKind::Collection;
 
     // 2. Atomically commit the cleanup decision: remove the gate as the very
     //    first mutation. Subsequent retries will observe `post_in_index = false`
