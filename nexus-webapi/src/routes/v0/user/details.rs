@@ -3,8 +3,7 @@ use crate::routes::v0::endpoints::USER_DETAILS_ROUTE;
 use crate::routes::Path;
 use crate::{Error, Result};
 use axum::Json;
-use nexus_common::models::user::UserDetails;
-use pubky_social_specs::legacy_v0::PubkyAppUserLink;
+use nexus_common::models::user::{UserDetails, UserLink};
 use tracing::debug;
 use utoipa::OpenApi;
 
@@ -35,6 +34,6 @@ pub async fn user_details_handler(Path(user_id): Path<PubkyId>) -> Result<Json<U
 #[derive(OpenApi)]
 #[openapi(
     paths(user_details_handler),
-    components(schemas(UserDetails, PubkyAppUserLink, PubkyId))
+    components(schemas(UserDetails, UserLink, PubkyId))
 )]
 pub struct UserDetailsApiDoc;
