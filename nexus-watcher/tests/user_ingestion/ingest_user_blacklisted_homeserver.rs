@@ -12,8 +12,8 @@ use pubky_social_specs::legacy_v0::{
     post_uri_builder,
     traits::{HashId, TimestampId},
     user_uri_builder, PubkyAppPost, PubkyAppPostEmbed, PubkyAppPostKind, PubkyAppTag, PubkyAppUser,
-    PubkyId,
 };
+use pubky_social_specs::PubkyId;
 
 /// A [`UserIngestor`] whose blacklist contains the user's HS refuses to ingest
 /// that user, returning [`ModelError::HsBlacklisted`] and leaving no graph node behind.

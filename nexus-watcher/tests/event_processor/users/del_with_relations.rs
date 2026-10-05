@@ -10,8 +10,8 @@ use pubky::Keypair;
 use pubky_social_specs::legacy_v0::{
     traits::{HasIdPath, HashId},
     PubkyAppBlob, PubkyAppFile, PubkyAppPost, PubkyAppPostKind, PubkyAppUser, PubkyAppUserLink,
-    PubkyId,
 };
+use pubky_social_specs::PubkyId;
 
 #[tokio_shared_rt::test(shared)]
 async fn test_delete_user_with_relationships() -> Result<()> {

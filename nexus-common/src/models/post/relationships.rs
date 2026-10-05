@@ -1,7 +1,8 @@
 use crate::db::kv::RedisResult;
 use crate::db::{fetch_row_from_graph, queries, GraphResult, RedisOps};
 use crate::models::error::ModelResult;
-use pubky_social_specs::legacy_v0::{post_uri_builder, ParsedUri, PubkyId};
+use pubky_social_specs::legacy_v0::{post_uri_builder, ParsedUri};
+use pubky_social_specs::PubkyId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use utoipa::ToSchema;
 

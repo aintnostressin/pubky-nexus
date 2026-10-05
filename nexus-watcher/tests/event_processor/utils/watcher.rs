@@ -25,12 +25,13 @@ use pubky_social_specs::legacy_v0::file_uri_builder;
 use pubky_social_specs::legacy_v0::traits::HashId;
 use pubky_social_specs::legacy_v0::{
     traits::{HasIdPath, HasPath, TimestampId},
-    PubkyAppFile, PubkyAppFollow, PubkyAppPost, PubkyAppUser, PubkyId,
+    PubkyAppFile, PubkyAppFollow, PubkyAppPost, PubkyAppUser,
 };
 // The v1 traits share their names with the v0 ones; each model implements only its own epoch's.
 use pubky_social_specs::traits::{HasIdPath as _, HasPath as _, HashId as _, TimestampId as _};
 use pubky_social_specs::{
-    PubkySocialFile, PubkySocialFollow, PubkySocialPost, PubkySocialTag, PubkySocialUser, Root,
+    PubkyId, PubkySocialFile, PubkySocialFollow, PubkySocialPost, PubkySocialTag, PubkySocialUser,
+    Root,
 };
 use pubky_testnet::Testnet;
 use std::path::PathBuf;

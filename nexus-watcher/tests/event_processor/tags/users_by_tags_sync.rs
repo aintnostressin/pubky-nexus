@@ -7,7 +7,8 @@ use nexus_common::models::tag::user::TagUser;
 use nexus_common::models::user::{UserDetails, UsersByTagSearch};
 use nexus_watcher::events::handlers::UserInput;
 use pubky::Keypair;
-use pubky_social_specs::legacy_v0::{PubkyAppTag, PubkyAppUser, PubkyId};
+use pubky_social_specs::legacy_v0::{PubkyAppTag, PubkyAppUser};
+use pubky_social_specs::PubkyId;
 
 /// The backfill enumerates pairs from a graph snapshot but derives every
 /// score from the live taggers set, so a delete landing after the snapshot

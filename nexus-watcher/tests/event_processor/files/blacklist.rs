@@ -11,8 +11,9 @@ use nexus_watcher::EventProcessorError;
 use pubky::Keypair;
 use pubky_social_specs::legacy_v0::traits::{HasIdPath, HashId, TimestampId};
 use pubky_social_specs::legacy_v0::{
-    blob_uri_builder, file_uri_builder, PubkyAppBlob, PubkyAppFile, PubkyAppUser, PubkyId,
+    blob_uri_builder, file_uri_builder, PubkyAppBlob, PubkyAppFile, PubkyAppUser,
 };
+use pubky_social_specs::PubkyId;
 
 /// Creates a user on the test homeserver, uploads a blob and returns the
 /// `PubkyAppFile` pointing at it, along with the ids needed for `sync_put`.

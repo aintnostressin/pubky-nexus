@@ -1,5 +1,7 @@
-use pubky_social_specs::legacy_v0::{try_parse_pubky_path, ExtendedParsedUri, PubkyId};
-use pubky_social_specs::{epoch_segment, ParsedUri, Resource, SOCIAL_EPOCH, SOCIAL_NAMESPACE};
+use pubky_social_specs::legacy_v0::{try_parse_pubky_path, ExtendedParsedUri};
+use pubky_social_specs::{
+    epoch_segment, ParsedUri, PubkyId, Resource, SOCIAL_EPOCH, SOCIAL_NAMESPACE,
+};
 
 /// An event URI classified by its namespace segment, so each epoch's paths are judged by that
 /// epoch's own parser.

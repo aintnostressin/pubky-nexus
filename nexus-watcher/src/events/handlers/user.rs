@@ -8,7 +8,7 @@ use nexus_common::models::{
     traits::Collection,
     user::{UserCounts, UserDetails, UserSearch, UsersByTagSearch},
 };
-use pubky_social_specs::legacy_v0::PubkyId;
+use pubky_social_specs::PubkyId;
 use tracing::debug;
 
 use super::UserInput;

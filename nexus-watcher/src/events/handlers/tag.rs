@@ -17,8 +17,9 @@ use nexus_common::universal_tag::normalize::{
     classify_uri, normalize_uri, resource_id, UriCategory,
 };
 use pubky_social_specs::legacy_v0::{
-    post_uri_builder, user_uri_builder, ExtendedParsedUri, ParsedUri, PubkyId, Resource,
+    post_uri_builder, user_uri_builder, ExtendedParsedUri, ParsedUri, Resource,
 };
+use pubky_social_specs::PubkyId;
 use tracing::debug;
 
 use super::utils::{fail_on_blacklisted_hs, post_kind, post_relationships_is_reply};

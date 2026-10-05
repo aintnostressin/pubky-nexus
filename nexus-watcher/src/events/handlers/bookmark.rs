@@ -2,7 +2,8 @@ use chrono::Utc;
 use nexus_common::db::OperationOutcome;
 use nexus_common::models::post::Bookmark;
 use nexus_common::models::user::UserCounts;
-use pubky_social_specs::legacy_v0::{ParsedUri, PubkyId, Resource};
+use pubky_social_specs::legacy_v0::{ParsedUri, Resource};
+use pubky_social_specs::PubkyId;
 use tracing::debug;
 
 use super::utils::post_is_collection;

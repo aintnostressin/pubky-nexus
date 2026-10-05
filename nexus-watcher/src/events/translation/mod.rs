@@ -9,7 +9,7 @@ pub use route::{route, EventRoute};
 
 use crate::errors::EventProcessorError;
 use crate::events::handlers::{BookmarkInput, FileInput, PostInput, TagInput, UserInput};
-use pubky_social_specs::legacy_v0::PubkyId;
+use pubky_social_specs::PubkyId;
 
 /// Why an event is deliberately left unhandled.
 #[derive(Debug, Clone, PartialEq, Eq)]

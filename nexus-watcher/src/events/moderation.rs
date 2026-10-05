@@ -5,7 +5,8 @@ use crate::errors::EventProcessorError;
 use crate::events::handlers::{self, TagInput};
 use nexus_common::models::user::UserIngestor;
 use nexus_common::WatcherConfig;
-use pubky_social_specs::legacy_v0::{ParsedUri, PubkyId, Resource};
+use pubky_social_specs::legacy_v0::{ParsedUri, Resource};
+use pubky_social_specs::PubkyId;
 use tracing::info;
 
 pub struct Moderation {

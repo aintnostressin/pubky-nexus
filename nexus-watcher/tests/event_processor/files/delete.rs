@@ -8,8 +8,9 @@ use pubky::Keypair;
 use pubky_social_specs::legacy_v0::{
     blob_uri_builder,
     traits::{HasIdPath, HashId},
-    PubkyAppBlob, PubkyAppFile, PubkyAppUser, PubkyId,
+    PubkyAppBlob, PubkyAppFile, PubkyAppUser,
 };
+use pubky_social_specs::PubkyId;
 
 #[tokio_shared_rt::test(shared)]
 async fn test_delete_pubkyapp_file() -> Result<()> {
