@@ -15,7 +15,7 @@ mod resource_del_retry;
 mod resource_internal_known;
 mod resource_put;
 mod resource_stream;
-mod resource_utils;
+pub mod resource_utils;
 mod retry_post_tag;
 mod retry_user_tag;
 mod uri;

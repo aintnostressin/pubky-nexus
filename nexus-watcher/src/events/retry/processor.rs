@@ -99,13 +99,22 @@ impl RetryProcessor {
         // Event format is "METHOD URI" (e.g., "PUT pubky://...")
         let event_line = format!("{} {}", retry_event.event_type, retry_event.event_uri);
 
-        // Parse the event from the line - if corrupted, remove and continue.
+        // Parse the event from the line - if skipped or corrupted, remove and continue.
         // The fetched RetryEvent deserialized fine (only the reconstructed event
         // line failed to parse), so its nonce is trustworthy and the cleanup can
         // be conditional too: a newer entry for the same URI must survive.
         let event = match Event::parse_event(&event_line) {
             Ok(ParseResult::Parsed(event)) => event,
-            Ok(ParseResult::Skipped) | Err(_) => {
+            Ok(ParseResult::Skipped { reason }) => {
+                debug!(
+                    ?reason,
+                    "Skipped retry entry for key {index_key}, removing: '{event_line}'"
+                );
+                self.remove_if_current(index_key, retry_event.nonce, &retry_event.event_uri)
+                    .await?;
+                return Ok(());
+            }
+            Err(_) => {
                 warn!("Corrupted retry entry for key {index_key}, removing: '{event_line}'");
                 self.remove_if_current(index_key, retry_event.nonce, &retry_event.event_uri)
                     .await?;
