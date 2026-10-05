@@ -6,6 +6,7 @@ use nexus_common::db::graph::Query;
 use nexus_common::models::event::EventLine;
 use nexus_common::types::DynError;
 use nexus_watcher::events::event::{Event, EventType, ParseResult};
+use nexus_watcher::events::EventRoute;
 use pubky_social_specs::legacy_v0::Resource;
 use std::collections::BTreeMap;
 use tracing::info;
@@ -72,11 +73,11 @@ fn fold_page(lines: &[String]) -> PageUris {
         let Ok(ParseResult::Parsed(event)) = Event::parse_event(line) else {
             continue;
         };
-        if event.event_type != EventType::Put {
+        let (EventType::Put, EventRoute::Legacy(parsed)) = (&event.event_type, &event.route) else {
             continue;
-        }
-        let user_id = event.parsed_uri.user_id().to_string();
-        match event.parsed_uri.resource() {
+        };
+        let user_id = parsed.user_id().to_string();
+        match parsed.resource() {
             Resource::Tag(tag_id) => {
                 page.edges.insert((user_id, tag_id.clone()), event.uri);
             }
