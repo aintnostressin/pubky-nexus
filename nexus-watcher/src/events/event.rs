@@ -1,11 +1,10 @@
-use super::translation::{self, EventRoute, SkipReason};
+use super::translation::{self, EventRoute, SkipReason, UNKNOWN_LABEL};
 use crate::errors::EventProcessorError;
-use crate::service::indexer::METER_NAME;
+use crate::METER_NAME;
 use nexus_common::models::event::EventLine;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky::Event as StreamEvent;
-use pubky_social_specs::legacy_v0::{ExtendedParsedUri, Resource};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::LazyLock;
@@ -13,7 +12,7 @@ use tracing::{debug, warn};
 
 /// Counter for events skipped before any fetch because their `social` epoch is not indexed.
 /// Labelled by `epoch` and `resource` kind only, never by user or object id.
-static SKIPPED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+static EPOCH_SKIPPED: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter(METER_NAME)
         .u64_counter("watcher.events.skipped")
         .with_description(
@@ -141,57 +140,24 @@ impl Event {
         uri: String,
         event_line: String,
     ) -> Result<ParseResult, EventProcessorError> {
-        let route = translation::route(&uri);
-
-        let skip = match &route {
-            EventRoute::Legacy(ExtendedParsedUri::PubkyApp { resource, .. }) => match resource {
-                Resource::Unknown => {
-                    return Err(EventProcessorError::InvalidEventLine(format!(
-                        "Unknown resource in URI: {uri}"
-                    )))
-                }
-                Resource::LastRead => Some(SkipReason::LastRead),
-                Resource::Feed(_) => Some(SkipReason::Feed),
-                Resource::Blob(_) => Some(SkipReason::Blob),
-                _ => None,
-            },
-            EventRoute::Legacy(ExtendedParsedUri::UniversalTag { .. }) => None,
-            // The social epochs are skipped before any fetch, so no GET is spent on them and the
-            // retry queue never holds one
-            EventRoute::Social { epoch, .. } => {
-                debug!(%uri, "Skipping social v{epoch} event until that epoch is indexed");
-                count_skipped(format!("v{epoch}"), &route);
-                Some(SkipReason::EpochNotIndexed { epoch: *epoch })
-            }
-            EventRoute::UnsupportedEpoch { version } => {
-                warn!(
-                    %uri,
-                    %version,
-                    "Skipping event of an unsupported social epoch; upgrade Nexus to index it"
-                );
-                count_skipped(epoch_label(version), &route);
-                Some(SkipReason::UnsupportedEpoch {
-                    version: version.clone(),
-                })
-            }
+        let route = match translation::route(&uri) {
             EventRoute::Malformed { reason } => {
-                return Ok(ParseResult::unrecognized_uri(
-                    event_type,
-                    uri,
-                    reason.clone(),
-                ))
+                return Ok(ParseResult::unrecognized_uri(event_type, uri, reason))
             }
+            route => route,
         };
 
-        Ok(match skip {
-            Some(reason) => ParseResult::Skipped { reason },
-            None => ParseResult::Parsed(Event {
-                uri,
-                event_type,
-                route,
-                event_line,
-            }),
-        })
+        if let Some(reason) = translation::skip_reason(&route, &uri)? {
+            record_skip(&uri, &route);
+            return Ok(ParseResult::Skipped { reason });
+        }
+
+        Ok(ParseResult::Parsed(Event {
+            uri,
+            event_type,
+            route,
+            event_line,
+        }))
     }
 
     pub fn to_event_line(&self) -> EventLine {
@@ -199,8 +165,24 @@ impl Event {
     }
 }
 
-fn count_skipped(epoch: String, route: &EventRoute) {
-    SKIPPED.add(
+/// Logs and counts the skip of a `social` epoch event; the skipped v0 resources stay silent.
+fn record_skip(uri: &str, route: &EventRoute) {
+    let epoch = match route {
+        EventRoute::Social { epoch, .. } => {
+            debug!(%uri, "Skipping social v{epoch} event until that epoch is indexed");
+            format!("v{epoch}")
+        }
+        EventRoute::UnsupportedEpoch { version } => {
+            warn!(
+                %uri,
+                %version,
+                "Skipping event of an unsupported social epoch; upgrade Nexus to index it"
+            );
+            epoch_label(version)
+        }
+        EventRoute::Legacy(_) | EventRoute::Malformed { .. } => return,
+    };
+    EPOCH_SKIPPED.add(
         1,
         &[
             KeyValue::new("epoch", epoch),
@@ -214,21 +196,14 @@ fn count_skipped(epoch: String, route: &EventRoute) {
 fn epoch_label(version: &str) -> String {
     match version.strip_prefix('v').map(str::parse::<u8>) {
         Some(Ok(epoch)) if version == format!("v{epoch}") => version.to_string(),
-        _ => "unknown".to_string(),
+        _ => UNKNOWN_LABEL.to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const HOST: &str = "operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo";
-    const TS: &str = "0032SSN7Q4EVG";
-    const HASH: &str = "8Z8CWH8NVYQY39ZEBFGKQWWEKG";
-
-    fn uri(path: &str) -> String {
-        format!("pubky://{HOST}/{path}")
-    }
+    use crate::events::translation::test_support::{uri, HASH, TS};
 
     /// The reason of a skipped line, or a panic naming what came back.
     fn skipped(line: &str) -> SkipReason {

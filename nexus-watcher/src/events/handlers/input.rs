@@ -1,14 +1,11 @@
-//! What the handlers take: the fields Nexus reads from a homeserver object, copied out of the
-//! object by the translation layer, and the stored models built from them.
+//! What the handlers take: the fields Nexus reads from a homeserver object, which the translation
+//! layer copies out of each epoch's objects, and the stored models built from them.
 
 use chrono::Utc;
 use nexus_common::models::file::{FileDetails, FileUrls};
 use nexus_common::models::post::{PostDetails, PostKind, PostRelationships};
 use nexus_common::models::user::{UserDetails, UserLink};
-use pubky_social_specs::legacy_v0::{
-    post_uri_builder, ParsedUri, PubkyAppBookmark, PubkyAppFile, PubkyAppPost, PubkyAppTag,
-    PubkyAppUser, Resource,
-};
+use pubky_social_specs::legacy_v0::{post_uri_builder, ParsedUri, Resource};
 use pubky_social_specs::PubkyId;
 
 /// A post as the post handler reads it.
@@ -56,32 +53,11 @@ impl PostInput {
     }
 }
 
-impl From<PubkyAppPost> for PostInput {
-    fn from(post: PubkyAppPost) -> Self {
-        Self {
-            content: post.content,
-            kind: post.kind.into(),
-            parent: post.parent,
-            embed: post.embed.map(|embed| embed.uri),
-            attachments: post.attachments,
-            lock: post.lock,
-        }
-    }
-}
-
 /// A bookmark as the bookmark handler reads it.
 #[derive(Debug, Clone)]
 pub struct BookmarkInput {
     /// URI of the bookmarked post.
     pub target: String,
-}
-
-impl From<PubkyAppBookmark> for BookmarkInput {
-    fn from(bookmark: PubkyAppBookmark) -> Self {
-        Self {
-            target: bookmark.uri,
-        }
-    }
 }
 
 /// A profile as the user handler reads it.
@@ -109,35 +85,12 @@ impl UserInput {
     }
 }
 
-impl From<PubkyAppUser> for UserInput {
-    fn from(user: PubkyAppUser) -> Self {
-        Self {
-            name: user.name,
-            bio: user.bio,
-            image: user.image,
-            links: user
-                .links
-                .map(|links| links.into_iter().map(Into::into).collect()),
-            status: user.status,
-        }
-    }
-}
-
 /// A tag as the tag handlers and moderation read it.
 #[derive(Debug, Clone)]
 pub struct TagInput {
     /// URI of the tagged object.
     pub target: String,
     pub label: String,
-}
-
-impl From<PubkyAppTag> for TagInput {
-    fn from(tag: PubkyAppTag) -> Self {
-        Self {
-            target: tag.uri,
-            label: tag.label,
-        }
-    }
 }
 
 /// A file as the file handler reads it.
@@ -152,31 +105,20 @@ pub struct FileInput {
 }
 
 impl FileInput {
-    pub fn into_details(&self, uri: String, user_id: String, file_id: String) -> FileDetails {
+    pub fn into_details(self, uri: String, user_id: String, file_id: String) -> FileDetails {
+        let urls = FileUrls::new(&user_id, &file_id, &self.content_type);
         FileDetails {
-            urls: FileUrls::new(&user_id, &file_id, &self.content_type),
-            name: self.name.clone(),
-            src: self.src.clone(),
-            content_type: self.content_type.clone(),
+            urls,
+            name: self.name,
+            src: self.src,
+            content_type: self.content_type,
             uri,
             id: file_id,
             created_at: self.created_at,
             indexed_at: Utc::now().timestamp_millis(),
-            owner_id: user_id.to_string(),
+            owner_id: user_id,
             size: self.size as i64,
             metadata: None,
-        }
-    }
-}
-
-impl From<PubkyAppFile> for FileInput {
-    fn from(file: PubkyAppFile) -> Self {
-        Self {
-            name: file.name,
-            src: file.src,
-            content_type: file.content_type,
-            size: file.size,
-            created_at: file.created_at,
         }
     }
 }
@@ -184,9 +126,7 @@ impl From<PubkyAppFile> for FileInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_social_specs::legacy_v0::{
-        blob_uri_builder, file_uri_builder, PubkyAppPostEmbed, PubkyAppPostKind, PubkyAppUserLink,
-    };
+    use pubky_social_specs::legacy_v0::file_uri_builder;
 
     const AUTHOR: &str = "4snwyct86m383rsduhw5xgcxpw7c63j3pq8x4ycqikxgik8y64ro";
     const POST_ID: &str = "003286NSMY490";
@@ -206,38 +146,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn post_from_legacy_copies_every_field() {
-        let attachment = file_uri_builder(AUTHOR.into(), "003286NSMY493".into());
-        let post = PostInput::from(PubkyAppPost {
-            content: "Hello".into(),
-            kind: PubkyAppPostKind::Long,
-            parent: Some(uri_of_post("003286NSMY491")),
-            embed: Some(PubkyAppPostEmbed {
-                kind: PubkyAppPostKind::Short,
-                uri: uri_of_post("003286NSMY492"),
-            }),
-            attachments: Some(vec![attachment.clone()]),
-            lock: Some("pubky://lockserver/pub/lock".into()),
-        });
-
-        assert_eq!(post.content, "Hello");
-        assert_eq!(post.kind, PostKind::Long);
-        assert_eq!(post.parent, Some(uri_of_post("003286NSMY491")));
-        assert_eq!(post.embed, Some(uri_of_post("003286NSMY492")));
-        assert_eq!(post.attachments, Some(vec![attachment]));
-        assert_eq!(post.lock.as_deref(), Some("pubky://lockserver/pub/lock"));
-    }
-
     /// The edit check compares `PostDetails.attachments`, so a missing list must stay missing.
     #[test]
     fn post_without_attachments_keeps_none() {
-        let post = PostInput::from(PubkyAppPost {
-            content: "x".into(),
+        let post = PostInput {
             attachments: None,
-            ..Default::default()
-        });
-        assert_eq!(post.attachments, None);
+            ..post_without_relations()
+        };
 
         let author = PubkyId::try_from(AUTHOR).unwrap();
         let details = post.into_details(&author, POST_ID);
@@ -270,69 +185,5 @@ mod tests {
             rel.reposted.is_none(),
             "a non-post embed must not become a repost"
         );
-    }
-
-    #[test]
-    fn bookmark_from_legacy_copies_the_target() {
-        let bookmark = BookmarkInput::from(PubkyAppBookmark {
-            uri: uri_of_post(POST_ID),
-            created_at: 1,
-        });
-        assert_eq!(bookmark.target, uri_of_post(POST_ID));
-    }
-
-    #[test]
-    fn user_from_legacy_copies_every_field() {
-        let user = UserInput::from(PubkyAppUser {
-            name: "Alice".into(),
-            bio: Some("Hi".into()),
-            image: Some(file_uri_builder(AUTHOR.into(), POST_ID.into())),
-            links: Some(vec![PubkyAppUserLink {
-                title: "Website".into(),
-                url: "https://example.com".into(),
-            }]),
-            status: Some("Away".into()),
-        });
-
-        assert_eq!(user.name, "Alice");
-        assert_eq!(user.bio.as_deref(), Some("Hi"));
-        assert_eq!(
-            user.image,
-            Some(file_uri_builder(AUTHOR.into(), POST_ID.into()))
-        );
-        let links = user.links.expect("links are copied");
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].title, "Website");
-        assert_eq!(links[0].url, "https://example.com");
-        assert_eq!(user.status.as_deref(), Some("Away"));
-    }
-
-    #[test]
-    fn tag_from_legacy_copies_target_and_label() {
-        let tag = TagInput::from(PubkyAppTag {
-            uri: uri_of_post(POST_ID),
-            label: "rust".into(),
-            created_at: 1,
-        });
-        assert_eq!(tag.target, uri_of_post(POST_ID));
-        assert_eq!(tag.label, "rust");
-    }
-
-    #[test]
-    fn file_from_legacy_copies_every_field() {
-        let src = blob_uri_builder(AUTHOR.into(), "8Z8CWH8NVYQY39ZEBFGKQWWEKG".into());
-        let file = FileInput::from(PubkyAppFile {
-            name: "a.png".into(),
-            created_at: 1,
-            src: src.clone(),
-            content_type: "image/png".into(),
-            size: 3,
-        });
-
-        assert_eq!(file.name, "a.png");
-        assert_eq!(file.src, src);
-        assert_eq!(file.content_type, "image/png");
-        assert_eq!(file.size, 3);
-        assert_eq!(file.created_at, 1);
     }
 }

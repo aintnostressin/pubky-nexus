@@ -3,6 +3,10 @@ use pubky_social_specs::{
     epoch_segment, ParsedUri, PubkyId, Resource, SOCIAL_EPOCH, SOCIAL_NAMESPACE,
 };
 
+/// The label of a resource or epoch that classifies as none, spelled as the spec's unknown resource
+/// so a route of none labels like a v1 path of no known resource.
+pub const UNKNOWN_LABEL: &str = "unknown";
+
 /// An event URI classified by its namespace segment, so each epoch's paths are judged by that
 /// epoch's own parser.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,13 +31,13 @@ impl EventRoute {
         }
     }
 
-    /// The resource kind, `unknown` for a route that classifies none.
+    /// The resource kind, [`UNKNOWN_LABEL`] for a route that classifies none.
     pub fn resource_name(&self) -> String {
         match self {
             EventRoute::Legacy(parsed) => parsed.resource().to_string(),
             EventRoute::Social { parsed, .. } => parsed.resource.to_string(),
             EventRoute::UnsupportedEpoch { .. } | EventRoute::Malformed { .. } => {
-                Resource::Unknown.to_string()
+                UNKNOWN_LABEL.to_string()
             }
         }
     }
@@ -90,24 +94,8 @@ fn route_social(uri: &str, segments: &[String]) -> EventRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::translation::test_support::{host, other, uri, HASH, HOST, OTHER, TS};
     use pubky_social_specs::legacy_v0::Resource as V0Resource;
-
-    const HOST: &str = "operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo";
-    const OTHER: &str = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
-    const TS: &str = "0032SSN7Q4EVG";
-    const HASH: &str = "8Z8CWH8NVYQY39ZEBFGKQWWEKG";
-
-    fn uri(path: &str) -> String {
-        format!("pubky://{HOST}/{path}")
-    }
-
-    fn host() -> PubkyId {
-        PubkyId::try_from(HOST).unwrap()
-    }
-
-    fn other() -> PubkyId {
-        PubkyId::try_from(OTHER).unwrap()
-    }
 
     /// The v1 resource of a supported-epoch route, or a panic naming what came back.
     fn social(path: &str) -> Resource {
@@ -223,6 +211,12 @@ mod tests {
     #[test]
     fn epoch_less_social_path_is_malformed() {
         assert_malformed(&uri("pub/social/tags/ABC"));
+    }
+
+    /// A v1 path of no known resource labels as the routes that classify none do.
+    #[test]
+    fn unknown_label_is_the_spec_spelling() {
+        assert_eq!(Resource::Unknown.to_string(), UNKNOWN_LABEL);
     }
 
     #[test]

@@ -99,33 +99,12 @@ impl RetryProcessor {
         // Event format is "METHOD URI" (e.g., "PUT pubky://...")
         let event_line = format!("{} {}", retry_event.event_type, retry_event.event_uri);
 
-        // Parse the event from the line - if skipped or corrupted, remove and continue.
-        // The fetched RetryEvent deserialized fine (only the reconstructed event
-        // line failed to parse), so its nonce is trustworthy and the cleanup can
-        // be conditional too: a newer entry for the same URI must survive.
-        let event = match Event::parse_event(&event_line) {
-            Ok(ParseResult::Parsed(event)) => event,
-            Ok(ParseResult::Skipped { reason }) => {
-                debug!(
-                    ?reason,
-                    "Skipped retry entry for key {index_key}, removing: '{event_line}'"
-                );
-                self.remove_if_current(index_key, retry_event.nonce, &retry_event.event_uri)
-                    .await?;
-                return Ok(());
-            }
-            Err(_) => {
-                warn!("Corrupted retry entry for key {index_key}, removing: '{event_line}'");
-                self.remove_if_current(index_key, retry_event.nonce, &retry_event.event_uri)
-                    .await?;
-                return Ok(());
-            }
-            Ok(ParseResult::UnrecognizedUri { reason, .. }) => {
-                warn!("Unrecognized URI in retry entry for key {index_key}, removing: {reason}");
-                self.remove_if_current(index_key, retry_event.nonce, &retry_event.event_uri)
-                    .await?;
-                return Ok(());
-            }
+        // The RetryEvent itself deserialized, so its nonce is trustworthy and dropping a line that
+        // parses to no event stays conditional: a newer entry for the same URI must survive.
+        let Some(event) = parse_or_log_drop(index_key, &event_line) else {
+            self.remove_if_current(index_key, retry_event.nonce, &retry_event.event_uri)
+                .await?;
+            return Ok(());
         };
 
         let ev_uri = &retry_event.event_uri;
@@ -268,6 +247,22 @@ impl RetryProcessor {
 
         Ok(())
     }
+}
+
+/// Parses a reconstructed retry line into the event to retry, or logs why the entry is dropped.
+fn parse_or_log_drop(index_key: &IndexKey, event_line: &str) -> Option<Event> {
+    match Event::parse_event(event_line) {
+        Ok(ParseResult::Parsed(event)) => return Some(event),
+        Ok(ParseResult::Skipped { reason }) => debug!(
+            ?reason,
+            "Skipped retry entry for key {index_key}, removing: '{event_line}'"
+        ),
+        Err(_) => warn!("Corrupted retry entry for key {index_key}, removing: '{event_line}'"),
+        Ok(ParseResult::UnrecognizedUri { reason, .. }) => {
+            warn!("Unrecognized URI in retry entry for key {index_key}, removing: {reason}")
+        }
+    }
+    None
 }
 
 /// Calculate exponential backoff

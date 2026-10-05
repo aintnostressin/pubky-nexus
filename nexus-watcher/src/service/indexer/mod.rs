@@ -13,9 +13,6 @@ use crate::events::{Event, ParseResult};
 use crate::service::PROCESSING_TIMEOUT_SECS;
 use tracing::{debug, error, trace, warn, Instrument};
 
-/// OpenTelemetry meter name shared by all watcher indexer metrics.
-pub(crate) const METER_NAME: &str = "nexus.watcher";
-
 /// Possible error types of an event processor run
 #[derive(Debug)]
 pub enum RunError {
@@ -143,7 +140,7 @@ pub trait TEventProcessor: Send + Sync + 'static {
 
     /// Parses a single event line and dispatches to [`Self::handle_event`].
     /// Universal tag events are routed to the v0 parser and dispatched by
-    /// `DefaultEventHandler` as a `TranslatedPut::PutTag` with an app → `tag::sync_put_resource`.
+    /// `DefaultEventHandler` as a `TranslatedPut::Tag` with an app → `tag::sync_put_resource`.
     async fn process_event_line(&self, line: &str) -> Result<(), EventProcessorError> {
         match Event::parse_event(line) {
             // Invalid event lines come from untrusted homeservers; treat as bad peer data, not Nexus errors.

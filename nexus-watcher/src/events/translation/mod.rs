@@ -1,11 +1,14 @@
 //! The explicit layer between an event and its handler: [`route`] classifies the URI by epoch,
-//! [`translate_put`] and [`translate_del`] turn a routed event into the handler call that indexes
-//! it. Pure functions: no I/O, no database, no homeserver.
+//! [`skip_reason`] picks the routed events parsing skips before any fetch, and [`translate_put`]
+//! and [`translate_del`] turn a routed event into the handler call that indexes it. Pure
+//! functions: no I/O, no database, no homeserver.
 
 mod legacy;
 mod route;
+#[cfg(test)]
+pub(super) mod test_support;
 
-pub use route::{route, EventRoute};
+pub use route::{route, EventRoute, UNKNOWN_LABEL};
 
 use crate::errors::EventProcessorError;
 use crate::events::handlers::{BookmarkInput, FileInput, PostInput, TagInput, UserInput};
@@ -32,32 +35,32 @@ pub enum SkipReason {
 /// Apart from [`TranslatedDel`] so a PUT cannot translate to a deletion.
 #[derive(Debug)]
 pub enum TranslatedPut {
-    PutUser {
+    User {
         user_id: PubkyId,
         user: UserInput,
     },
-    PutPost {
+    Post {
         author_id: PubkyId,
         post_id: String,
         post: PostInput,
     },
-    PutFollow {
+    Follow {
         user_id: PubkyId,
         followee_id: PubkyId,
     },
     /// `app` is set for a universal tag written under another app's namespace.
-    PutTag {
+    Tag {
         tagger_id: PubkyId,
         tag_id: String,
         tag: TagInput,
         app: Option<String>,
     },
-    PutBookmark {
+    Bookmark {
         user_id: PubkyId,
         bookmark_id: String,
         bookmark: BookmarkInput,
     },
-    PutFile {
+    File {
         user_id: PubkyId,
         file_id: String,
         file: FileInput,
@@ -72,31 +75,49 @@ pub enum TranslatedPut {
 /// Apart from [`TranslatedPut`] so a DEL cannot translate to a write.
 #[derive(Debug)]
 pub enum TranslatedDel {
-    DelUser {
+    User {
         user_id: PubkyId,
     },
-    DelPost {
+    Post {
         author_id: PubkyId,
         post_id: String,
     },
-    DelFollow {
+    Follow {
         user_id: PubkyId,
         followee_id: PubkyId,
     },
-    DelTag {
+    Tag {
         uri: String,
     },
-    DelBookmark {
+    Bookmark {
         user_id: PubkyId,
         bookmark_id: String,
     },
-    DelFile {
+    File {
         user_id: PubkyId,
         file_id: String,
     },
     Skip {
         reason: SkipReason,
     },
+}
+
+/// Whether parsing skips the event at `uri` before any fetch, and why. A `pubky.app` path naming no
+/// resource is an error rather than a skip.
+pub fn skip_reason(
+    route: &EventRoute,
+    uri: &str,
+) -> Result<Option<SkipReason>, EventProcessorError> {
+    match route {
+        EventRoute::Legacy(parsed) => legacy::skip_reason(parsed, uri),
+        // The social epochs are skipped before any fetch, so no GET is spent on them and the
+        // retry queue never holds one
+        EventRoute::Social { epoch, .. } => Ok(Some(SkipReason::EpochNotIndexed { epoch: *epoch })),
+        EventRoute::UnsupportedEpoch { version } => Ok(Some(SkipReason::UnsupportedEpoch {
+            version: version.clone(),
+        })),
+        EventRoute::Malformed { .. } => Ok(None),
+    }
 }
 
 /// Reads the fetched `bytes` of a PUT with its epoch's reader. `uri` is the event URI as received,
@@ -110,7 +131,7 @@ pub fn translate_put(
         EventRoute::Legacy(parsed) => legacy::translate_put(parsed, uri, bytes),
         EventRoute::Social { .. }
         | EventRoute::UnsupportedEpoch { .. }
-        | EventRoute::Malformed { .. } => Err(untranslatable(uri)),
+        | EventRoute::Malformed { .. } => Err(untranslatable_route_error(uri)),
     }
 }
 
@@ -121,17 +142,18 @@ pub fn translate_del(route: &EventRoute, uri: &str) -> Result<TranslatedDel, Eve
         EventRoute::Legacy(parsed) => legacy::translate_del(parsed, uri),
         EventRoute::Social { .. }
         | EventRoute::UnsupportedEpoch { .. }
-        | EventRoute::Malformed { .. } => Err(untranslatable(uri)),
+        | EventRoute::Malformed { .. } => Err(untranslatable_route_error(uri)),
     }
 }
 
 /// Parsing skips or rejects every route but `Legacy` before an event exists, so this is a bug.
-fn untranslatable(uri: &str) -> EventProcessorError {
+fn untranslatable_route_error(uri: &str) -> EventProcessorError {
     EventProcessorError::internal_error(format!("No translation for the route of {uri}"))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::{host, other, uri, HASH, OTHER, TS};
     use super::*;
     use base32::{encode, Alphabet};
     use chrono::Utc;
@@ -141,29 +163,17 @@ mod tests {
         PubkyAppFeedLayout, PubkyAppFeedReach, PubkyAppFeedSort,
     };
 
-    const HOST: &str = "operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo";
-    const OTHER: &str = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
-    const TS: &str = "0032SSN7Q4EVG";
-    const HASH: &str = "8Z8CWH8NVYQY39ZEBFGKQWWEKG";
-
-    fn uri(path: &str) -> String {
-        format!("pubky://{HOST}/{path}")
-    }
-
-    fn host() -> PubkyId {
-        PubkyId::try_from(HOST).unwrap()
-    }
-
-    fn other() -> PubkyId {
-        PubkyId::try_from(OTHER).unwrap()
-    }
-
     /// A timestamp id for now: the frozen reader bounds these by the clock.
     fn now_id() -> String {
         encode(
             Alphabet::Crockford,
             &Utc::now().timestamp_micros().to_be_bytes(),
         )
+    }
+
+    fn skip(path: &str) -> Option<SkipReason> {
+        let uri = uri(path);
+        skip_reason(&route(&uri), &uri).unwrap_or_else(|e| panic!("{path} should be decided: {e}"))
     }
 
     fn put(path: &str, json: &str) -> TranslatedPut {
@@ -178,14 +188,76 @@ mod tests {
     }
 
     #[test]
+    fn skip_reason_names_the_routes_skipped_before_any_fetch() {
+        let cases = [
+            ("pub/pubky.app/last_read".to_string(), SkipReason::LastRead),
+            (format!("pub/pubky.app/feeds/{HASH}"), SkipReason::Feed),
+            (format!("pub/pubky.app/blobs/{HASH}"), SkipReason::Blob),
+            (
+                format!("pub/social/v1/posts/{TS}/{TS}.json"),
+                SkipReason::EpochNotIndexed { epoch: 1 },
+            ),
+            (
+                "pub/social/v1/widgets/ABC".to_string(),
+                SkipReason::EpochNotIndexed { epoch: 1 },
+            ),
+            (
+                format!("pub/social/v2/posts/{TS}"),
+                SkipReason::UnsupportedEpoch {
+                    version: "v2".into(),
+                },
+            ),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(skip(&path), Some(expected), "{path}");
+        }
+    }
+
+    /// The other v0 resources are fetched first, and parsing rejects a malformed route instead.
+    #[test]
+    fn skip_reason_lets_the_other_routes_through() {
+        for path in [
+            "pub/pubky.app/profile.json".to_string(),
+            format!("pub/pubky.app/posts/{TS}"),
+            format!("pub/pubky.app/follows/{OTHER}"),
+            format!("pub/pubky.app/mutes/{OTHER}"),
+            format!("pub/pubky.app/bookmarks/{HASH}"),
+            format!("pub/pubky.app/tags/{HASH}"),
+            format!("pub/pubky.app/files/{TS}"),
+            "pub/mapky/tags/ABC123".to_string(),
+            "pub/social/tags/ABC".to_string(),
+        ] {
+            assert_eq!(skip(&path), None, "{path}");
+        }
+    }
+
+    /// Parsing and the DEL translation reject it with the same error.
+    #[test]
+    fn unknown_v0_resource_is_an_invalid_event_line() {
+        let uri = uri("pub/pubky.app/widgets/ABC");
+        let route = route(&uri);
+        for err in [
+            skip_reason(&route, &uri).unwrap_err(),
+            translate_del(&route, &uri).unwrap_err(),
+        ] {
+            match err {
+                EventProcessorError::InvalidEventLine(message) => {
+                    assert_eq!(message, format!("Unknown resource in URI: {uri}"))
+                }
+                other => panic!("expected InvalidEventLine, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn put_user() {
         let json = r#"{"name":"Alice","bio":"Hi","image":null,"links":null,"status":null}"#;
         match put("pub/pubky.app/profile.json", json) {
-            TranslatedPut::PutUser { user_id, user } => {
+            TranslatedPut::User { user_id, user } => {
                 assert_eq!(user_id, host());
                 assert_eq!(user.name, "Alice");
             }
-            other => panic!("expected PutUser, got {other:?}"),
+            other => panic!("expected User, got {other:?}"),
         }
     }
 
@@ -195,7 +267,7 @@ mod tests {
         let json =
             r#"{"content":"Hello","kind":"short","parent":null,"embed":null,"attachments":null}"#;
         match put(&format!("pub/pubky.app/posts/{post_id}"), json) {
-            TranslatedPut::PutPost {
+            TranslatedPut::Post {
                 author_id,
                 post_id: id,
                 post,
@@ -204,7 +276,7 @@ mod tests {
                 assert_eq!(id, post_id);
                 assert_eq!(post.content, "Hello");
             }
-            other => panic!("expected PutPost, got {other:?}"),
+            other => panic!("expected Post, got {other:?}"),
         }
     }
 
@@ -214,14 +286,14 @@ mod tests {
             &format!("pub/pubky.app/follows/{OTHER}"),
             r#"{"created_at":1}"#,
         ) {
-            TranslatedPut::PutFollow {
+            TranslatedPut::Follow {
                 user_id,
                 followee_id,
             } => {
                 assert_eq!(user_id, host());
                 assert_eq!(followee_id, other());
             }
-            other => panic!("expected PutFollow, got {other:?}"),
+            other => panic!("expected Follow, got {other:?}"),
         }
     }
 
@@ -231,7 +303,7 @@ mod tests {
         let json = format!(r#"{{"uri":"{target}","label":"rust","created_at":1}}"#);
         let id = tag_id(&target, "rust");
         match put(&format!("pub/pubky.app/tags/{id}"), &json) {
-            TranslatedPut::PutTag {
+            TranslatedPut::Tag {
                 tagger_id,
                 tag_id,
                 tag,
@@ -242,7 +314,7 @@ mod tests {
                 assert_eq!(tag.label, "rust");
                 assert_eq!(app, None);
             }
-            other => panic!("expected PutTag, got {other:?}"),
+            other => panic!("expected Tag, got {other:?}"),
         }
     }
 
@@ -251,7 +323,7 @@ mod tests {
         let json = r#"{"uri":"https://example.com/","label":"maps","created_at":1}"#;
         let id = tag_id("https://example.com/", "maps");
         match put(&format!("pub/mapky/tags/{id}"), json) {
-            TranslatedPut::PutTag {
+            TranslatedPut::Tag {
                 tagger_id,
                 tag_id,
                 app,
@@ -261,7 +333,7 @@ mod tests {
                 assert_eq!(tag_id, id);
                 assert_eq!(app.as_deref(), Some("mapky"));
             }
-            other => panic!("expected PutTag, got {other:?}"),
+            other => panic!("expected Tag, got {other:?}"),
         }
     }
 
@@ -275,7 +347,7 @@ mod tests {
         let id = bookmark.create_id();
         let json = format!(r#"{{"uri":"{target}","created_at":1}}"#);
         match put(&format!("pub/pubky.app/bookmarks/{id}"), &json) {
-            TranslatedPut::PutBookmark {
+            TranslatedPut::Bookmark {
                 user_id,
                 bookmark_id,
                 bookmark,
@@ -284,7 +356,7 @@ mod tests {
                 assert_eq!(bookmark_id, id);
                 assert_eq!(bookmark.target, target);
             }
-            other => panic!("expected PutBookmark, got {other:?}"),
+            other => panic!("expected Bookmark, got {other:?}"),
         }
     }
 
@@ -297,7 +369,7 @@ mod tests {
         );
         let path = format!("pub/pubky.app/files/{file_id}");
         match put(&path, &json) {
-            TranslatedPut::PutFile {
+            TranslatedPut::File {
                 user_id,
                 file_id: id,
                 file,
@@ -308,7 +380,7 @@ mod tests {
                 assert_eq!(file.src, src);
                 assert_eq!(event_uri, uri(&path));
             }
-            other => panic!("expected PutFile, got {other:?}"),
+            other => panic!("expected File, got {other:?}"),
         }
     }
 
@@ -329,20 +401,15 @@ mod tests {
         let blob = b"abc";
         let blob_id = PubkyAppBlob(blob.to_vec()).create_id();
         let blob_uri = uri(&format!("pub/pubky.app/blobs/{blob_id}"));
-        let skipped = translate_put(&route(&blob_uri), &blob_uri, blob).unwrap();
-        assert!(matches!(
-            skipped,
-            TranslatedPut::Skip {
-                reason: SkipReason::Blob
-            }
-        ));
+        match translate_put(&route(&blob_uri), &blob_uri, blob).unwrap() {
+            TranslatedPut::Skip { reason } => assert_eq!(reason, SkipReason::Blob),
+            other => panic!("expected Skip, got {other:?}"),
+        }
 
-        assert!(matches!(
-            put("pub/pubky.app/last_read", r#"{"timestamp":1}"#),
-            TranslatedPut::Skip {
-                reason: SkipReason::LastRead
-            }
-        ));
+        match put("pub/pubky.app/last_read", r#"{"timestamp":1}"#) {
+            TranslatedPut::Skip { reason } => assert_eq!(reason, SkipReason::LastRead),
+            other => panic!("expected Skip, got {other:?}"),
+        }
 
         let feed = PubkyAppFeed {
             feed: PubkyAppFeedConfig {
@@ -358,12 +425,10 @@ mod tests {
             created_at: 1,
         };
         let feed_path = format!("pub/pubky.app/feeds/{}", feed.create_id());
-        assert!(matches!(
-            put(&feed_path, &serde_json::to_string(&feed).unwrap()),
-            TranslatedPut::Skip {
-                reason: SkipReason::Feed
-            }
-        ));
+        match put(&feed_path, &serde_json::to_string(&feed).unwrap()) {
+            TranslatedPut::Skip { reason } => assert_eq!(reason, SkipReason::Feed),
+            other => panic!("expected Skip, got {other:?}"),
+        }
     }
 
     /// Validation failures are deterministic, so they must not be retried.
@@ -382,28 +447,44 @@ mod tests {
 
     #[test]
     fn del_maps_each_resource_to_its_handler_inputs() {
-        assert!(matches!(
-            del("pub/pubky.app/profile.json"),
-            TranslatedDel::DelUser { user_id } if user_id == host()
-        ));
-        assert!(matches!(
-            del(&format!("pub/pubky.app/posts/{TS}")),
-            TranslatedDel::DelPost { author_id, post_id } if author_id == host() && post_id == TS
-        ));
-        assert!(matches!(
-            del(&format!("pub/pubky.app/follows/{OTHER}")),
-            TranslatedDel::DelFollow { user_id, followee_id }
-                if user_id == host() && followee_id == other()
-        ));
-        assert!(matches!(
-            del(&format!("pub/pubky.app/bookmarks/{HASH}")),
-            TranslatedDel::DelBookmark { user_id, bookmark_id }
-                if user_id == host() && bookmark_id == HASH
-        ));
-        assert!(matches!(
-            del(&format!("pub/pubky.app/files/{TS}")),
-            TranslatedDel::DelFile { user_id, file_id } if user_id == host() && file_id == TS
-        ));
+        match del("pub/pubky.app/profile.json") {
+            TranslatedDel::User { user_id } => assert_eq!(user_id, host()),
+            other => panic!("expected User, got {other:?}"),
+        }
+        match del(&format!("pub/pubky.app/posts/{TS}")) {
+            TranslatedDel::Post { author_id, post_id } => {
+                assert_eq!(author_id, host());
+                assert_eq!(post_id, TS);
+            }
+            other => panic!("expected Post, got {other:?}"),
+        }
+        match del(&format!("pub/pubky.app/follows/{OTHER}")) {
+            TranslatedDel::Follow {
+                user_id,
+                followee_id,
+            } => {
+                assert_eq!(user_id, host());
+                assert_eq!(followee_id, other());
+            }
+            other => panic!("expected Follow, got {other:?}"),
+        }
+        match del(&format!("pub/pubky.app/bookmarks/{HASH}")) {
+            TranslatedDel::Bookmark {
+                user_id,
+                bookmark_id,
+            } => {
+                assert_eq!(user_id, host());
+                assert_eq!(bookmark_id, HASH);
+            }
+            other => panic!("expected Bookmark, got {other:?}"),
+        }
+        match del(&format!("pub/pubky.app/files/{TS}")) {
+            TranslatedDel::File { user_id, file_id } => {
+                assert_eq!(user_id, host());
+                assert_eq!(file_id, TS);
+            }
+            other => panic!("expected File, got {other:?}"),
+        }
     }
 
     #[test]
@@ -413,8 +494,8 @@ mod tests {
             "pub/mapky/tags/ABC123".into(),
         ] {
             match del(&path) {
-                TranslatedDel::DelTag { uri: event_uri } => assert_eq!(event_uri, uri(&path)),
-                other => panic!("expected DelTag, got {other:?}"),
+                TranslatedDel::Tag { uri: event_uri } => assert_eq!(event_uri, uri(&path)),
+                other => panic!("expected Tag, got {other:?}"),
             }
         }
     }

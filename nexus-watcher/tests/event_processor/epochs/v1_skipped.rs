@@ -1,11 +1,12 @@
 use super::utils::{assert_no_trace, create_v0_user, event_uri};
 use crate::event_processor::follows::utils::find_follow_relationship;
+use crate::event_processor::posts::utils::find_post_counts;
 use crate::event_processor::tags::utils::find_post_tag;
 use crate::event_processor::users::utils::find_user_details;
 use crate::event_processor::utils::watcher::WatcherTest;
 use anyhow::Result;
 use nexus_common::models::file::FileDetails;
-use nexus_common::models::post::{PostCounts, PostDetails};
+use nexus_common::models::post::PostDetails;
 use nexus_common::models::traits::Collection;
 use nexus_common::models::user::{UserCounts, UserDetails};
 use pubky::{Keypair, ResourcePath};
@@ -82,9 +83,7 @@ async fn test_homeserver_v1_tag_skipped() -> Result<()> {
     let (_, tag_path) = test.create_v1_tag(&tagger_kp, &tag).await?;
 
     assert!(find_post_tag(&author_id, &post_id, label).await?.is_none());
-    let post_counts = PostCounts::get_by_id(&author_id, &post_id)
-        .await?
-        .expect("v0 post counts");
+    let post_counts = find_post_counts(&author_id, &post_id).await;
     assert_eq!(post_counts.tags, 0);
     let tagger_counts = UserCounts::get_by_id(&tagger_id)
         .await?

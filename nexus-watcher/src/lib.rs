@@ -21,3 +21,6 @@ pub mod service;
 
 pub use builder::NexusWatcherBuilder;
 pub use errors::EventProcessorError;
+
+/// OpenTelemetry meter name shared by all watcher metrics.
+pub(crate) const METER_NAME: &str = "nexus.watcher";

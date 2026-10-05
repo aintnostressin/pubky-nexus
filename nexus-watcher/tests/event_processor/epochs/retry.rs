@@ -1,17 +1,14 @@
-use crate::utils::MockEventHandler;
+use crate::service::utils::{create_mock_handler, new_in_memory_store, TEST_USER_ID};
 use anyhow::Result;
 use chrono::Utc;
 use nexus_common::config::EventRetryConfig;
-use nexus_watcher::events::retry::{
-    InMemoryRetryStore, IndexKey, RetryEvent, RetryProcessor, RetryStore,
-};
+use nexus_watcher::events::retry::{IndexKey, RetryEvent, RetryProcessor};
 use nexus_watcher::events::EventType;
 use nexus_watcher::service::TEventProcessor;
 use pubky_social_specs::legacy_v0::post_uri_builder;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::watch;
 
-const USER_ID: &str = "uo7jgkykft4885n8cruizwy6khw71mnu5pq3ay9i8pw1ymcn85ko";
 const POST_ID: &str = "0032SSN7Q4EVG";
 
 fn retry_event(event_uri: String, now: i64) -> RetryEvent {
@@ -29,20 +26,15 @@ fn retry_event(event_uri: String, now: i64) -> RetryEvent {
 /// handler, never rescheduled, and no error. The v0 entry next to it shows the processor ran.
 #[tokio_shared_rt::test(shared)]
 async fn test_retry_v1_event_line_dropped() -> Result<()> {
-    let v1_uri = format!("pubky://{USER_ID}/pub/social/v1/posts/{POST_ID}/{POST_ID}.json");
-    let v0_uri = post_uri_builder(USER_ID.to_string(), POST_ID.to_string());
+    let v1_uri = format!("pubky://{TEST_USER_ID}/pub/social/v1/posts/{POST_ID}/{POST_ID}.json");
+    let v0_uri = post_uri_builder(TEST_USER_ID.to_string(), POST_ID.to_string());
 
-    let store: Arc<dyn RetryStore> = Arc::new(InMemoryRetryStore::new());
+    let store = new_in_memory_store();
     let now = Utc::now().timestamp_millis();
     store.put(&retry_event(v1_uri.clone(), now)).await?;
     store.put(&retry_event(v0_uri.clone(), now)).await?;
 
-    let handler = Arc::new(MockEventHandler {
-        result: Ok(()),
-        target_uri_substring: None,
-        handle_count: Arc::new(Mutex::new(0)),
-        handled_uris: Arc::new(Mutex::new(Vec::new())),
-    });
+    let handler = create_mock_handler(Ok(()), None);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = Arc::new(RetryProcessor {
         event_handler: handler.clone(),
