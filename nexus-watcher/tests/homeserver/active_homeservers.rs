@@ -1,6 +1,6 @@
 use crate::event_processor::utils::watcher::WatcherTest;
 use nexus_common::models::homeserver::Homeserver;
-use nexus_common::models::user::{set_user_homeserver, set_user_homeserver_stale};
+use nexus_common::models::user::{remove_user_homeserver, set_user_homeserver};
 use nexus_common::types::DynError;
 use pubky::Keypair;
 use pubky_app_specs::{PubkyAppUser, PubkyId};
@@ -113,31 +113,31 @@ async fn test_get_all_active_homeservers() -> Result<(), DynError> {
     Ok(())
 }
 
-/// A homeserver whose only user has a stale mapping must drop off the active list.
+/// A homeserver whose only user's mapping is removed must drop off the active list.
 #[tokio_shared_rt::test(shared)]
-async fn test_stale_users_excluded_from_active_homeservers() -> Result<(), DynError> {
+async fn test_unbound_users_excluded_from_active_homeservers() -> Result<(), DynError> {
     let mut test = WatcherTest::setup(None).await?;
 
     let hs = create_orphan_hs().await?;
     let kp = Keypair::random();
     let user_id = test
-        .create_user(&kp, &make_test_user("Watcher:ActiveHS:Stale"))
+        .create_user(&kp, &make_test_user("Watcher:ActiveHS:Unbound"))
         .await?;
     set_user_homeserver(&user_id, &hs).await?;
 
-    // With an active mapping the homeserver is listed.
+    // With a mapping the homeserver is listed.
     let hs_ids = Homeserver::get_all_active_from_graph().await?;
     assert!(
         hs_ids.contains(&hs.to_string()),
-        "HS with an active user should be listed"
+        "HS with a hosted user should be listed"
     );
 
-    // Marking the only user stale drops the homeserver off the active list.
-    set_user_homeserver_stale(&user_id, true).await?;
+    // Removing the only user's mapping drops the homeserver off the active list.
+    remove_user_homeserver(&user_id).await?;
     let hs_ids = Homeserver::get_all_active_from_graph().await?;
     assert!(
         !hs_ids.contains(&hs.to_string()),
-        "HS with only stale users should be excluded"
+        "HS with no hosted users should be excluded"
     );
 
     test.cleanup_user(&kp).await?;

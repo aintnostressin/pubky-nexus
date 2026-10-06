@@ -164,9 +164,9 @@ pub async fn set_user_homeserver(user_id: &str, homeserver_id: &str) -> GraphRes
     exec_single_row(queries::put::set_user_homeserver(user_id, homeserver_id)).await
 }
 
-/// Toggles the stale flag on a user's existing homeserver mapping.
-pub async fn set_user_homeserver_stale(user_id: &str, stale: bool) -> GraphResult<()> {
-    exec_single_row(queries::put::set_user_homeserver_stale(user_id, stale)).await
+/// Unbinds a user from their homeserver, deleting the `HOSTED_BY` relationship.
+pub async fn remove_user_homeserver(user_id: &str) -> GraphResult<()> {
+    exec_single_row(queries::del::remove_user_homeserver(user_id)).await
 }
 
 #[cfg(test)]

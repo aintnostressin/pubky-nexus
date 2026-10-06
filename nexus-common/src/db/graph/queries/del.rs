@@ -119,3 +119,14 @@ pub fn delete_file(owner_id: &str, file_id: &str) -> Query {
     .param("id", file_id.to_string())
     .param("owner_id", owner_id.to_string())
 }
+
+/// Deletes a user's `HOSTED_BY` relationship, unbinding them from their homeserver.
+/// The `Homeserver` node is kept.
+pub fn remove_user_homeserver(user_id: &str) -> Query {
+    Query::new(
+        "remove_user_homeserver",
+        "MATCH (u:User {id: $user_id})-[r:HOSTED_BY]->(:Homeserver)
+         DELETE r",
+    )
+    .param("user_id", user_id.to_string())
+}
