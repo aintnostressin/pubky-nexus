@@ -3,7 +3,7 @@ use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
 use crate::events::{read_stream_capped, Event, EventHandler, MAX_EVENTS_BODY};
 use nexus_common::db::kv::RedisError;
-use nexus_common::db::{fetch_row_from_graph, queries, GraphResult, PubkyConnector};
+use nexus_common::db::{fetch_key_from_graph, queries, GraphResult, PubkyConnector};
 use nexus_common::models::error::ModelError;
 use nexus_common::models::homeserver::Homeserver;
 use opentelemetry::metrics::Counter;
@@ -52,16 +52,12 @@ static STALLED_CURSOR_PRIMARY_HS: LazyLock<Counter<u64>> = LazyLock::new(|| {
 });
 
 /// A user's `HOSTED_BY` mapping, classified relative to a processor's HS.
-///
-/// The `stale` flag is only carried where it is meaningful: a stale mapping means
-/// the user's published HS has diverged from the stored one (see
-/// [`set_user_homeserver_stale`](nexus_common::db::queries::put::set_user_homeserver_stale)).
 #[derive(Clone)]
 pub enum HsMapping {
-    /// The user has no `HOSTED_BY` edge yet.
+    /// The user has no `HOSTED_BY` edge.
     Unbound,
     /// The user is mapped to this processor's HS.
-    Current { stale: bool },
+    Current,
     /// The user is mapped to a different HS.
     Other { hs_id: String },
 }
@@ -135,7 +131,7 @@ pub struct HsEventProcessor {
     ///
     /// Entries are deliberately never refreshed within a run: once a user's mapping
     /// is resolved, the same decision is reused for the rest of the batch even if the
-    /// resolver realigns the underlying edge mid-run. The cache is dropped when the run ends.
+    /// resolver moves or removes the underlying edge mid-run. The cache is dropped when the run ends.
     pub hs_mapping_cache: Mutex<HashMap<String, HsMapping>>,
 }
 
@@ -157,29 +153,17 @@ impl TEventProcessor for HsEventProcessor {
         Some(self.homeserver.id.as_ref())
     }
 
-    /// Skips events from users that are not actively bound to this homeserver.
+    /// Skips events from users that are bound to another homeserver.
     ///
     /// Before an event is processed we inspect the user's `HOSTED_BY` edge:
-    /// - No edge, or a non-stale edge to this processor's homeserver: process.
-    /// - A stale edge to this homeserver (the user's published homeserver has
-    ///   diverged): log a warning and skip until the resolver realigns it.
+    /// - No edge, or an edge to this processor's homeserver: process.
     /// - An edge to a different homeserver: log a warning and skip.
     async fn should_process_event(&self, event: &Event) -> Result<bool, EventProcessorError> {
         let user_id = event.parsed_uri.user_id();
 
         match self.user_hs_mapping(user_id).await? {
-            // No mapping yet (graceful fallback) or actively bound here: process.
-            HsMapping::Unbound | HsMapping::Current { stale: false } => Ok(true),
-
-            // Bound here but the mapping is stale: skip until the resolver realigns it.
-            HsMapping::Current { stale: true } => {
-                warn!(
-                    event.uri = %event.uri,
-                    user_id = %user_id,
-                    "User's homeserver mapping is stale; skipping event"
-                );
-                Ok(false)
-            }
+            // No mapping (graceful fallback) or bound here: process.
+            HsMapping::Unbound | HsMapping::Current => Ok(true),
 
             // Bound to a different homeserver: skip.
             HsMapping::Other { hs_id } => {
@@ -220,18 +204,10 @@ impl HsEventProcessor {
         }
 
         let query = queries::get::get_user_homeserver(user_id.as_ref());
-        let mapping = match fetch_row_from_graph(query).await? {
+        let mapping = match fetch_key_from_graph::<String>(query, "homeserver_id").await? {
             None => HsMapping::Unbound,
-            Some(row) => {
-                let hs_id: String = row.get("homeserver_id")?;
-                let stale: bool = row.get("stale")?;
-
-                if hs_id.as_str() == self.homeserver.id.as_ref() {
-                    HsMapping::Current { stale }
-                } else {
-                    HsMapping::Other { hs_id }
-                }
-            }
+            Some(hs_id) if hs_id.as_str() == self.homeserver.id.as_ref() => HsMapping::Current,
+            Some(hs_id) => HsMapping::Other { hs_id },
         };
 
         self.hs_mapping_cache
