@@ -7,7 +7,8 @@ use tracing::error;
 use crate::{file::CONFIG_FILE_NAME, types::DynError};
 
 use super::{
-    file::ConfigLoader, ApiConfig, JobConfig, StackConfig, TrustRankConfig, WatcherConfig,
+    file::ConfigLoader, ApiConfig, FeaturesConfig, JobConfig, StackConfig, TrustRankConfig,
+    WatcherConfig,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +24,9 @@ pub struct DaemonConfig {
     /// Trust-rank computation parameters (`[trust_rank]`).
     #[serde(default)]
     pub trust_rank: TrustRankConfig,
+    /// App feature switches (`[features]`).
+    #[serde(default)]
+    pub features: FeaturesConfig,
 }
 
 impl DaemonConfig {
@@ -156,6 +160,7 @@ mod tests {
             .get("trust-recompute")
             .expect("[jobs.trust-recompute] should be present");
         assert!(trust_job.cron.is_none());
+        assert!(c.features.hide_unranked_authors);
         assert!(c.trust_rank.seed.is_empty());
         assert_eq!(c.trust_rank.alpha, DEFAULT_TRUST_ALPHA);
         assert_eq!(c.trust_rank.max_iterations, DEFAULT_TRUST_MAX_ITERATIONS);
@@ -267,6 +272,25 @@ mod tests {
             c.jobs["hot-tags-cache-all-time"].cron.as_deref(),
             Some("0 47 3,15 * * *")
         );
+    }
+
+    /// The trust filter switch parses, a config that predates it keeps the filter
+    /// on, and a misspelled switch fails rather than leaving the filter on.
+    #[test]
+    fn test_hide_unranked_authors_parsing() {
+        let off = DEFAULT_CONFIG_TOML.replace(
+            "hide_unranked_authors = true",
+            "hide_unranked_authors = false",
+        );
+        let c = DaemonConfig::try_from_str(&off).expect("switch off should parse");
+        assert!(!c.features.hide_unranked_authors);
+
+        let absent = DEFAULT_CONFIG_TOML.replace("hide_unranked_authors = true", "");
+        let c = DaemonConfig::try_from_str(&absent).expect("missing switch should parse");
+        assert!(c.features.hide_unranked_authors);
+
+        let typo = DEFAULT_CONFIG_TOML.replace("hide_unranked_authors", "hide_unranked_author");
+        assert!(DaemonConfig::try_from_str(&typo).is_err());
     }
 
     /// `trust_rank.report_enabled` and `trust_rank.report_dir` parse, with `~` expanded.

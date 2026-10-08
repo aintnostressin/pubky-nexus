@@ -40,4 +40,5 @@ mod retry_all;
 mod retry_post;
 mod retry_reply;
 mod retry_repost;
+mod trust_filter;
 pub mod utils;

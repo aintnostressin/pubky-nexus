@@ -2,9 +2,10 @@ use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::db::kv::RedisResult;
+use crate::db::kv::{sorted_key, RedisResult};
 use crate::db::{get_neo4j_graph, queries, GraphError, RedisOps};
 use crate::models::error::ModelResult;
+use crate::models::post::trust_filter;
 
 /// Redis key parts for the trust ranking projection: `Sorted:Users:SocialGraph`.
 pub const USER_SOCIAL_GRAPH_KEY_PARTS: [&str; 2] = ["Users", "SocialGraph"];
@@ -122,6 +123,23 @@ impl SocialGraphStatus {
         .await?;
 
         Ok(())
+    }
+
+    /// The ranking's full Redis key, for scripts that read it.
+    pub(crate) fn ranking_key() -> String {
+        sorted_key(&USER_SOCIAL_GRAPH_KEY_PARTS)
+    }
+
+    /// Rebuilds the ranking, then brings the sorted sets every viewer shares in
+    /// line with it, so their streams hide the authors outside it.
+    pub async fn publish() -> ModelResult<()> {
+        // First finish a run that failed after replacing the ranking, so no rank
+        // change is skipped. Without an applied ranking there is none to finish.
+        if trust_filter::is_ranking_applied().await? {
+            trust_filter::reconcile().await?;
+        }
+        Self::reindex().await?;
+        trust_filter::reconcile().await
     }
 
     /// Turns the ordered ids into the sorted-set payload.
