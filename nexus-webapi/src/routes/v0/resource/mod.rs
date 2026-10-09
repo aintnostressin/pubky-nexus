@@ -12,7 +12,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use nexus_common::models::resource::tag::TagResource;
 use nexus_common::models::resource::ResourceDetails;
-use nexus_common::models::tag::traits::{TagCollection, TaggersCollection};
+use nexus_common::models::tag::traits::TaggersCollection;
 use nexus_common::models::tag::TagDetails;
 use nexus_common::universal_tag::normalize::{normalize_uri, resource_id};
 use serde::{Deserialize, Serialize};
@@ -86,12 +86,10 @@ pub async fn resource_tags_handler(
     reject_resource_depth(query.depth)?;
     let tags = TagResource::get_by_id(
         &res_id,
-        None,
         query.skip_tags_as_usize(),
         query.limit_tags_as_usize(),
         query.limit_taggers_as_usize(),
         query.viewer_id.as_deref(),
-        None,
     )
     .await?
     .ok_or_else(|| Error::resource_not_found(res_id.to_string()))?;
@@ -138,12 +136,10 @@ pub async fn resource_by_uri_handler(
     reject_resource_depth(query.tags_query.depth)?;
     let tags = TagResource::get_by_id(
         &res_id,
-        None,
         query.tags_query.skip_tags_as_usize(),
         query.tags_query.limit_tags_as_usize(),
         query.tags_query.limit_taggers_as_usize(),
         query.tags_query.viewer_id.as_deref(),
-        None,
     )
     .await?
     .ok_or_else(|| Error::resource_not_found(res_id.clone()))?;

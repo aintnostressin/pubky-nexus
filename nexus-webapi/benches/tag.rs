@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main};
 use criterion::{BenchmarkId, Criterion};
+use nexus_common::models::resource::tag::TagResource;
 use nexus_common::models::tag::global::Taggers;
 use nexus_common::models::tag::post::TagPost;
 use nexus_common::models::tag::stream::HotTags;
@@ -185,6 +186,31 @@ fn bench_get_wot_post_tags(c: &mut Criterion) {
                 )
                 .await
                 .unwrap();
+                std::hint::black_box(tag_details_list);
+            });
+        },
+    );
+}
+
+fn bench_get_resource_tags(c: &mut Criterion) {
+    println!("******************************************************************************");
+    println!("Test the performance of getting a resource tags (graph-only path)");
+    println!("******************************************************************************");
+
+    run_setup();
+
+    // https://example.com/article, from docker/test-graph/mocks/resources.cypher
+    let resource_id = "450a72e3da164bfc3ac5f4056f9e5c7c";
+    let rt = Runtime::new().unwrap();
+
+    c.bench_with_input(
+        BenchmarkId::new("bench_get_resource_tags", resource_id),
+        &resource_id,
+        |b, &id| {
+            b.to_async(&rt).iter(|| async {
+                let tag_details_list = TagResource::get_by_id(id, None, None, None, None)
+                    .await
+                    .unwrap();
                 std::hint::black_box(tag_details_list);
             });
         },
@@ -439,6 +465,7 @@ criterion_group! {
                 bench_get_wot_user_tag_taggers,
                 bench_get_post_tags,
                 bench_get_wot_post_tags,
+                bench_get_resource_tags,
                 bench_get_post_tag_taggers,
                 bench_get_global_hot_tags,
                 bench_get_global_tag_taggers,

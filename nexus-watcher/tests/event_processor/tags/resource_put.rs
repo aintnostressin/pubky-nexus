@@ -2,9 +2,9 @@ use super::resource_utils::{check_resource_in_sorted_set, compute_resource_id, f
 use crate::event_processor::utils::watcher::WatcherTest;
 use anyhow::Result;
 use chrono::Utc;
+use nexus_common::db::RedisOps;
 use nexus_common::models::resource::tag::TagResource;
 use nexus_common::models::tag::search::TagSearch;
-use nexus_common::models::tag::traits::TagCollection;
 use nexus_common::types::Pagination;
 use pubky::Keypair;
 use pubky::ResourcePath;
@@ -62,20 +62,28 @@ async fn test_homeserver_put_resource_tag_external_uri() -> Result<()> {
     assert_eq!(tag_result.uri, "https://example.com/article?q=test");
 
     // =============================================
-    // LAYER 2: Verify Redis TagResource Cache
+    // LAYER 2: Verify Redis TagResource tagger sets
     // =============================================
 
-    // TagResource sorted set should have label with score >= 1
-    let cache_tags =
-        TagResource::get_from_index(&resource_id, None, None, None, None, None, false).await?;
+    // The tagger is in the label's tagger set and in its app-scoped one
+    for key_parts in [
+        vec![resource_id.as_str(), label],
+        vec![resource_id.as_str(), "mapky", label],
+    ] {
+        let (_, is_member) = TagResource::check_set_member(&key_parts, &tagger_user_id).await?;
+        assert!(
+            is_member,
+            "Tagger should be in the {key_parts:?} tagger set"
+        );
+    }
 
-    assert!(cache_tags.is_some(), "TagResource cache should exist");
-    let tag_details = cache_tags.unwrap();
-    assert!(
-        !tag_details.is_empty(),
-        "Should have at least one tag label"
-    );
+    // The tag list is read from the graph
+    let tag_details = TagResource::get_by_id(&resource_id, None, None, None, None)
+        .await?
+        .expect("Resource should have a tag list");
+    assert_eq!(tag_details.len(), 1, "Should have one tag label");
     assert_eq!(tag_details[0].label, label);
+    assert_eq!(tag_details[0].taggers, [tagger_user_id.as_str()]);
 
     // =============================================
     // LAYER 3: Verify Redis ResourceStream Sorted Sets

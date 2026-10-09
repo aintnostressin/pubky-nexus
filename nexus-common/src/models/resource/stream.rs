@@ -4,7 +4,6 @@ use crate::db::{queries, RedisOps};
 use crate::models::error::{ModelError, ModelResult};
 use crate::models::resource::tag::TagResource;
 use crate::models::resource::ResourceDetails;
-use crate::models::tag::traits::TagCollection;
 use crate::types::Pagination;
 use futures::stream::{self, StreamExt};
 use futures::TryStreamExt;
@@ -310,11 +309,9 @@ impl ResourceStream {
                     let tags = TagResource::get_by_id(
                         &resource_id,
                         None,
-                        None,
                         Some(5),
                         Some(3),
                         viewer_id.as_deref(),
-                        None,
                     )
                     .await?
                     .unwrap_or_default();

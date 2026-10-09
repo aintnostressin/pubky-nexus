@@ -1,11 +1,16 @@
 use crate::utils::{get_request, invalid_get_request};
 use anyhow::Result;
 use axum::http::StatusCode;
+use serde_json::Value;
 
 // Resource IDs from docker/test-graph/mocks/resources.cypher
 // Computed as hex(BLAKE3(normalized_uri)[0..16])
 const RESOURCE_1_ID: &str = "450a72e3da164bfc3ac5f4056f9e5c7c"; // https://example.com/article
 const RESOURCE_2_ID: &str = "fb4155a2295ff3a8a8fe02e28229c021"; // pubky://somepk/.../events/E001
+
+// Resource 1 taggers: both tagged "bitcoin", only Amsterdam tagged "interesting"
+const AMSTERDAM: &str = "emq37ky6fbnaun7q1ris6rx3mqmw3a33so1txfesg9jj3ak9ryoy";
+const BOGOTA: &str = "ep441mndnsjeesenwz78r9paepm6e4kqm4ggiyy9uzpoe43eu9ny";
 
 // =============================================
 // GET /v0/resource/:resource_id/tags
@@ -47,6 +52,36 @@ async fn test_resource_tags() -> Result<()> {
     let bitcoin_tag = tags.iter().find(|t| t["label"] == "bitcoin");
     assert!(bitcoin_tag.is_some(), "Should have bitcoin tag");
     assert_eq!(bitcoin_tag.unwrap()["taggers_count"], 2);
+
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_resource_tags_pagination_and_viewer() -> Result<()> {
+    let path = format!("/v0/resource/{RESOURCE_1_ID}/tags");
+
+    // Labels are ranked by tagger count and paginated
+    let body = get_request(&format!("{path}?limit_tags=1")).await?;
+    assert_eq!(labels(&body), ["bitcoin"]);
+    let body = get_request(&format!("{path}?skip_tags=1")).await?;
+    assert_eq!(labels(&body), ["interesting"]);
+
+    // The tagger preview is capped, the count is not, and the viewer is
+    // flagged against all of a label's taggers, not only the previewed one
+    for viewer in [AMSTERDAM, BOGOTA] {
+        let body = get_request(&format!("{path}?limit_taggers=1&viewer_id={viewer}")).await?;
+        let bitcoin = &body["tags"][0];
+        assert_eq!(bitcoin["label"], "bitcoin");
+        assert_eq!(bitcoin["taggers"].as_array().map(Vec::len), Some(1));
+        assert_eq!(bitcoin["taggers_count"], 2);
+        assert_eq!(bitcoin["relationship"], true, "{viewer} tagged bitcoin");
+    }
+
+    // Only the labels the viewer applied are flagged
+    let body = get_request(&format!("{path}?viewer_id={BOGOTA}")).await?;
+    assert_eq!(labels(&body), ["bitcoin", "interesting"]);
+    assert_eq!(body["tags"][0]["relationship"], true);
+    assert_eq!(body["tags"][1]["relationship"], false);
 
     Ok(())
 }
@@ -140,4 +175,13 @@ async fn test_resource_taggers_structure() -> Result<()> {
     );
 
     Ok(())
+}
+
+fn labels(body: &Value) -> Vec<&str> {
+    body["tags"]
+        .as_array()
+        .expect("tags should be an array")
+        .iter()
+        .filter_map(|tag| tag["label"].as_str())
+        .collect()
 }
