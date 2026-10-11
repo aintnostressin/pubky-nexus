@@ -1,11 +1,10 @@
 use crate::db::graph::{GraphResult, Query};
 use crate::db::kv::RedisResult;
-use crate::db::{exec_single_row, queries, RedisOps};
+use crate::db::{exec_single_row, fetch_all_rows_from_graph, queries, RedisOps};
 use crate::media::{get_valid_variants_for_content_type, FileVariant};
 use crate::models::error::ModelResult;
 use crate::models::traits::Collection;
 use async_trait::async_trait;
-use pubky_social_specs::legacy_v0::{ParsedUri, Resource};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use utoipa::ToSchema;
@@ -103,6 +102,66 @@ impl From<StoredFileDetails> for FileDetails {
 
 impl RedisOps for FileDetails {}
 
+/// The key of the file stored under a URI. Indexed under the URI, so a read finds the file an
+/// attachment or an avatar points at without parsing the URI.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct FileUri {
+    owner_id: String,
+    id: String,
+}
+
+impl RedisOps for FileUri {}
+
+impl FileUri {
+    /// The keys of the files stored under `uris`, in order. A URI missing from the index is
+    /// looked up in the graph, and indexed when found.
+    async fn get_keys(uris: &[&str]) -> ModelResult<Vec<Option<FileUri>>> {
+        if uris.is_empty() {
+            return Ok(Vec::new());
+        }
+        let uri_parts: Vec<[&str; 1]> = uris.iter().map(|uri| [*uri]).collect();
+        let uri_keys: Vec<&[&str]> = uri_parts.iter().map(|parts| parts.as_slice()).collect();
+        let mut keys = Self::try_from_index_multiple_json(&uri_keys).await?;
+
+        let missing: Vec<&str> = uris
+            .iter()
+            .zip(&keys)
+            .filter(|(_, key)| key.is_none())
+            .map(|(uri, _)| *uri)
+            .collect();
+        if missing.is_empty() {
+            return Ok(keys);
+        }
+        let mut found = Self::get_from_graph(&missing).await?;
+        for (uri, key) in uris.iter().zip(keys.iter_mut()) {
+            if key.is_none() {
+                *key = found.get(*uri).cloned();
+            }
+        }
+        let (found_uris, found_keys): (Vec<String>, Vec<Option<FileUri>>) =
+            found.drain().map(|(uri, key)| (uri, Some(key))).unzip();
+        let found_parts: Vec<[&str; 1]> = found_uris.iter().map(|uri| [uri.as_str()]).collect();
+        let found_parts: Vec<&[&str]> = found_parts.iter().map(|parts| parts.as_slice()).collect();
+        Self::put_multiple_json_indexes(&found_parts, found_keys).await?;
+        Ok(keys)
+    }
+
+    /// The keys of the files the graph stores under `uris`, by URI.
+    async fn get_from_graph(uris: &[&str]) -> ModelResult<HashMap<String, FileUri>> {
+        let rows = fetch_all_rows_from_graph(queries::get::get_file_keys_by_uris(uris)).await?;
+        let mut keys = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let uri: String = row.get("uri")?;
+            let key = FileUri {
+                owner_id: row.get("owner_id")?,
+                id: row.get("id")?,
+            };
+            keys.insert(uri, key);
+        }
+        Ok(keys)
+    }
+}
+
 #[async_trait]
 impl Collection<&[&str]> for FileDetails {
     fn collection_details_graph_query(id_list: &[&[&str]]) -> Query {
@@ -126,16 +185,38 @@ impl FileDetails {
         Self::remove_from_index_multiple_json(&[&[&self.owner_id, &self.id]])
             .await
             .inspect_err(|e| tracing::error!("Index file deletion, {}: {:?}", self.id, e))?;
+        FileUri::remove_from_index_multiple_json(&[&[&self.uri]])
+            .await
+            .inspect_err(|e| tracing::error!("Index file URI deletion, {}: {:?}", self.id, e))?;
         Ok(())
     }
 
-    pub fn file_key_from_uri(uri: &str) -> Option<(String, String)> {
-        let parsed_uri = ParsedUri::try_from(uri).ok()?;
-        if let Resource::File(file_id) = parsed_uri.resource {
-            Some((parsed_uri.user_id.to_string(), file_id))
-        } else {
-            None
+    /// Indexes the file under its stored `uri`, for [`Self::get_by_uris`].
+    pub async fn put_to_uri_index(&self) -> RedisResult<()> {
+        let key = FileUri {
+            owner_id: self.owner_id.clone(),
+            id: self.id.clone(),
+        };
+        key.put_index_json(&[&self.uri], None, None).await
+    }
+
+    /// The files stored under `uris`, in order; `None` where no indexed file has that URI.
+    pub async fn get_by_uris(uris: &[&str]) -> ModelResult<Vec<Option<FileDetails>>> {
+        let keys = FileUri::get_keys(uris).await?;
+        let id_parts: Vec<[&str; 2]> = keys
+            .iter()
+            .flatten()
+            .map(|key| [key.owner_id.as_str(), key.id.as_str()])
+            .collect();
+        if id_parts.is_empty() {
+            return Ok(vec![None; uris.len()]);
         }
+        let id_keys: Vec<&[&str]> = id_parts.iter().map(|parts| parts.as_slice()).collect();
+        let mut files = Self::get_by_ids(&id_keys).await?.into_iter();
+        Ok(keys
+            .iter()
+            .map(|key| key.as_ref().and_then(|_| files.next().flatten()))
+            .collect())
     }
 }
 

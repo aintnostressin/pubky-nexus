@@ -40,6 +40,8 @@ pub async fn sync_put(
     // SAVE TO GRAPH
     file_details.put_to_graph().await?;
 
+    // Readers find the file from an attachment or avatar URI through this index
+    file_details.put_to_uri_index().await?;
     FileDetails::put_to_index(
         &[&[
             file_details.owner_id.clone().as_str(),

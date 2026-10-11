@@ -4,7 +4,6 @@ use crate::{Error, Result};
 use axum::Json;
 use nexus_common::models::file::FileDetails;
 use nexus_common::models::file::FileUrls;
-use nexus_common::models::traits::Collection;
 use tracing::debug;
 use utoipa::OpenApi;
 
@@ -27,14 +26,14 @@ use utoipa::OpenApi;
 pub async fn file_details_handler(Path(file_uri): Path<String>) -> Result<Json<FileDetails>> {
     debug!("GET {FILE_ROUTE} file_uri:{}", file_uri);
 
-    let (owner_id, file_id) = FileDetails::file_key_from_uri(&file_uri)
-        .ok_or(Error::invalid_input("Malformed file URI"))?;
-    let files = FileDetails::get_by_ids(&[&[&owner_id, &file_id]]).await?;
+    if url::Url::parse(&file_uri).is_err() {
+        return Err(Error::invalid_input("Malformed file URI"));
+    }
+    let files = FileDetails::get_by_uris(&[&file_uri]).await?;
 
-    let file = &files[0];
-    match file {
+    match files.into_iter().next().flatten() {
         None => Err(Error::FileNotFound {}),
-        Some(value) => Ok(Json(value.clone())),
+        Some(value) => Ok(Json(value)),
     }
 }
 
