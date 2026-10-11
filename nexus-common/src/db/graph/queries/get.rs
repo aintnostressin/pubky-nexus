@@ -189,6 +189,18 @@ pub fn get_post_tags(author_id: &str, post_id: &str) -> Query {
     .param("post_id", post_id)
 }
 
+/// The item keys a collection's graph write stored, in curator order; an empty list for a post of
+/// another kind, and no row for a post that is not indexed.
+pub fn collection_item_keys(author_id: &str, post_id: &str) -> Query {
+    Query::new(
+        "collection_item_keys",
+        "MATCH (:User {id: $author_id})-[:AUTHORED]->(c:Post {id: $post_id})
+        RETURN CASE WHEN c.kind = 'collection' THEN coalesce(c.item_keys, []) ELSE [] END AS item_keys",
+    )
+    .param("author_id", author_id)
+    .param("post_id", post_id)
+}
+
 pub fn post_relationships(author_id: &str, post_id: &str) -> Query {
     Query::new(
         "post_relationships",

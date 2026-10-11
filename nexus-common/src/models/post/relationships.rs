@@ -12,6 +12,8 @@ pub struct PostLinks {
     pub replied: Option<(PubkyId, String)>,
     /// The post this one reposts.
     pub reposted: Option<(PubkyId, String)>,
+    /// For a collection, the posts it curates, in curator order; `None` for any other kind.
+    pub collected: Option<Vec<(PubkyId, String)>>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Default, Debug)]
