@@ -40,17 +40,20 @@ pub enum SkipReason {
 }
 
 /// A PUT's handler call, carrying the inputs that handler takes, whichever epoch wrote the object.
-/// Apart from [`TranslatedDel`] so a PUT cannot translate to a deletion.
+/// Apart from [`TranslatedDel`] so a PUT cannot translate to a deletion. Each `uri` is the address
+/// Nexus stores for the object: for v0, the event URI as received.
 #[derive(Debug)]
 pub enum TranslatedPut {
     User {
         user_id: PubkyId,
         user: UserInput,
+        uri: String,
     },
     Post {
         author_id: PubkyId,
         post_id: String,
         post: PostInput,
+        uri: String,
     },
     Follow {
         user_id: PubkyId,
@@ -62,6 +65,7 @@ pub enum TranslatedPut {
         tag_id: String,
         tag: TagInput,
         app: Option<String>,
+        uri: String,
     },
     Bookmark {
         user_id: PubkyId,
@@ -304,9 +308,14 @@ mod tests {
     fn put_user() {
         let json = r#"{"name":"Alice","bio":"Hi","image":null,"links":null,"status":null}"#;
         match put("pub/pubky.app/profile.json", json) {
-            TranslatedPut::User { user_id, user } => {
+            TranslatedPut::User {
+                user_id,
+                user,
+                uri: stored,
+            } => {
                 assert_eq!(user_id, host());
                 assert_eq!(user.name, "Alice");
+                assert_eq!(stored, uri("pub/pubky.app/profile.json"));
             }
             other => panic!("expected User, got {other:?}"),
         }
@@ -322,10 +331,12 @@ mod tests {
                 author_id,
                 post_id: id,
                 post,
+                uri: stored,
             } => {
                 assert_eq!(author_id, host());
                 assert_eq!(id, post_id);
                 assert_eq!(post.content, "Hello");
+                assert_eq!(stored, uri(&format!("pub/pubky.app/posts/{post_id}")));
             }
             other => panic!("expected Post, got {other:?}"),
         }
@@ -359,7 +370,9 @@ mod tests {
                 tag_id,
                 tag,
                 app,
+                uri: stored,
             } => {
+                assert_eq!(stored, uri(&format!("pub/pubky.app/tags/{id}")));
                 assert_eq!(tagger_id, host());
                 assert_eq!(tag_id, id);
                 assert_eq!(tag.label, "rust");
