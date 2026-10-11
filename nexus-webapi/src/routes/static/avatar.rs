@@ -10,7 +10,7 @@ use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue};
 use axum::response::Response;
 use nexus_common::media::FileVariant;
-use nexus_common::models::{file::FileDetails, traits::Collection, user::UserDetails};
+use nexus_common::models::{file::FileDetails, user::UserDetails};
 use tower_http::services::fs::ServeFileSystemResponseBody;
 use tracing::{debug, warn};
 use utoipa::OpenApi;
@@ -50,16 +50,12 @@ pub async fn user_avatar_handler(
         return Err(Error::FileNotFound {});
     };
 
-    let (owner_id, file_id) =
-        FileDetails::file_key_from_uri(&image_uri).ok_or(Error::InternalServerError {
-            source: format!("Invalid file URI: {image_uri}").into(),
-        })?;
-
-    let file_list = FileDetails::get_by_ids(&[&[&owner_id, &file_id]]).await?;
+    let file_list = FileDetails::get_by_uris(&[&image_uri]).await?;
 
     let Some(file_details) = file_list.into_iter().flatten().next() else {
         return Err(Error::FileNotFound {});
     };
+    let file_id = &file_details.id;
 
     // No permit free: serve the untouched `main` image instead of queueing for one.
     // Queueing could still win a permit before the timeout, but that is not worth up to

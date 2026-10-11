@@ -13,7 +13,6 @@ use super::error::ModelResult;
 use crate::models::{
     file::FileDetails,
     post::{PostStream, StreamSource},
-    traits::Collection,
     user::{Influencers, UserStream},
 };
 use serde::{Deserialize, Serialize};
@@ -354,22 +353,8 @@ impl Bootstrap {
     /// # Parameters
     /// - `attachment_uris: &HashSet<String>` A set of file URIs collected from posts and replies
     async fn fetch_file_details(&mut self, attachment_uris: &HashSet<String>) -> ModelResult<()> {
-        let file_keys: Vec<(String, String)> = attachment_uris
-            .iter()
-            .filter_map(|uri| FileDetails::file_key_from_uri(uri))
-            .collect();
-
-        if file_keys.is_empty() {
-            return Ok(());
-        }
-
-        let key_arrays: Vec<[&str; 2]> = file_keys
-            .iter()
-            .map(|(owner, fid)| [owner.as_str(), fid.as_str()])
-            .collect();
-        let key_slices: Vec<&[&str]> = key_arrays.iter().map(|a| a.as_slice()).collect();
-
-        let results = FileDetails::get_by_ids(&key_slices).await?;
+        let uris: Vec<&str> = attachment_uris.iter().map(String::as_str).collect();
+        let results = FileDetails::get_by_uris(&uris).await?;
         self.files = results.into_iter().flatten().collect();
 
         Ok(())

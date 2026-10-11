@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::Result;
-use nexus_common::models::{file::FileDetails, post::PostView, traits::Collection};
+use nexus_common::models::{file::FileDetails, post::PostView};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use utoipa::ToSchema;
@@ -38,7 +38,11 @@ impl PostViewDetailed {
 
         let attachments_metadata = if include_attachment_metadata {
             let attachment_uris = view.details.attachments.as_deref().unwrap_or(&[]);
-            fetch_attachment_metadata(attachment_uris).await?
+            fetch_attachment_metadata(attachment_uris)
+                .await?
+                .into_iter()
+                .map(|(_, details)| details)
+                .collect()
         } else {
             vec![]
         };
@@ -75,13 +79,11 @@ impl PostStreamDetailed {
             .cloned()
             .collect();
 
-        // Single batched fetch, then build a lookup by DB key (owner_id, file_id)
-        let metadata_by_key: HashMap<(String, String), FileDetails> =
-            fetch_attachment_metadata(&all_uris)
-                .await?
-                .into_iter()
-                .map(|fd| ((fd.owner_id.clone(), fd.id.clone()), fd))
-                .collect();
+        // Single batched fetch, then a lookup by attachment URI
+        let metadata_by_uri: HashMap<String, FileDetails> = fetch_attachment_metadata(&all_uris)
+            .await?
+            .into_iter()
+            .collect();
 
         // Distribute results back to each post
         let detailed = views
@@ -93,10 +95,7 @@ impl PostStreamDetailed {
                     .as_deref()
                     .unwrap_or(&[])
                     .iter()
-                    .filter_map(|uri| {
-                        let key = FileDetails::file_key_from_uri(uri)?;
-                        metadata_by_key.get(&key).cloned()
-                    })
+                    .filter_map(|uri| metadata_by_uri.get(uri).cloned())
                     .collect();
                 PostViewDetailed::new(view, attachments_metadata)
             })
@@ -106,43 +105,20 @@ impl PostStreamDetailed {
     }
 }
 
-/// Fetches file metadata for a list of attachment URIs in a single batched DB call.
-/// Malformed URIs and missing entries are logged and skipped gracefully.
-async fn fetch_attachment_metadata(attachments: &[String]) -> Result<Vec<FileDetails>> {
-    if attachments.is_empty() {
-        return Ok(vec![]);
-    }
+/// Fetches the metadata of the files stored under attachment URIs in one batched lookup, in
+/// order, each next to its URI. A URI no indexed file has is logged and skipped.
+async fn fetch_attachment_metadata(attachments: &[String]) -> Result<Vec<(String, FileDetails)>> {
+    let uris: Vec<&str> = attachments.iter().map(String::as_str).collect();
+    let results = FileDetails::get_by_uris(&uris).await?;
 
-    // Parse each URI into (owner_id, file_id) DB keys, filtering out malformed ones
-    let valid_keys: Vec<((String, String), &String)> = attachments
+    Ok(attachments
         .iter()
-        .filter_map(|uri| {
-            let key = FileDetails::file_key_from_uri(uri);
-            if key.is_none() {
-                warn!("Skipping invalid file URI: {}", uri);
-            }
-            Some((key?, uri))
-        })
-        .collect();
-
-    // Reshape owned keys into the borrowed slices that get_by_ids expects
-    let key_refs: Vec<[&str; 2]> = valid_keys
-        .iter()
-        .map(|((owner, id), _)| [owner.as_str(), id.as_str()])
-        .collect();
-    let slice_keys: Vec<&[&str]> = key_refs.iter().map(|arr| arr.as_slice()).collect();
-
-    let results = FileDetails::get_by_ids(&slice_keys).await?;
-
-    // Results arrive in the same order as the input keys; map them back to the original URIs
-    Ok(results
-        .into_iter()
-        .zip(valid_keys.iter())
-        .filter_map(|(details, (_, uri))| {
+        .zip(results)
+        .filter_map(|(uri, details)| {
             if details.is_none() {
                 warn!("Attachment metadata not found for URI: {}", uri);
             }
-            details
+            Some((uri.clone(), details?))
         })
         .collect())
 }

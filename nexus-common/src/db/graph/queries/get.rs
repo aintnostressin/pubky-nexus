@@ -1180,6 +1180,19 @@ pub fn get_collection_posts() -> Query {
     )
 }
 
+/// The keys of the files stored under `uris`; a URI no file has yields no row.
+pub fn get_file_keys_by_uris(uris: &[&str]) -> Query {
+    Query::new(
+        "get_file_keys_by_uris",
+        "
+        UNWIND $uris AS uri
+        MATCH (f:File {uri: uri})
+        RETURN uri, f.owner_id AS owner_id, f.id AS id
+        ",
+    )
+    .param("uris", uris)
+}
+
 pub fn get_files_by_ids(key_pair: &[&[&str]]) -> Query {
     Query::new(
         "get_files_by_ids",

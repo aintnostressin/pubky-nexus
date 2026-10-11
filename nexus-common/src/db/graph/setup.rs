@@ -36,6 +36,7 @@ async fn setup_graph_inner() -> GraphResult<()> {
         "CREATE INDEX taggedTimestampIndex IF NOT EXISTS FOR ()-[r:TAGGED]-() ON (r.indexed_at)",
         "CREATE INDEX resourceSchemeIndex IF NOT EXISTS FOR (r:Resource) ON (r.scheme)",
         "CREATE INDEX taggedAppIndex IF NOT EXISTS FOR ()-[r:TAGGED]-() ON (r.app)",
+        "CREATE INDEX fileUriIndex IF NOT EXISTS FOR (f:File) ON (f.uri)",
     ];
 
     let queries = constraints.iter().chain(indexes.iter());
