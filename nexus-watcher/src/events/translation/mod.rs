@@ -161,6 +161,16 @@ pub fn read_file_source(src: &Reference, bytes: &[u8]) -> Result<Vec<u8>, EventP
     }
 }
 
+/// The posts a stored collection envelope curates, keyed, in curator order; items naming anything
+/// else are dropped. Every stored envelope is a v0 one until a later epoch is indexed. Errors when
+/// `content` is not an envelope.
+pub fn collection_item_keys(content: &str) -> Result<Vec<(PubkyId, String)>, String> {
+    Ok(legacy::collection_items(content)?
+        .iter()
+        .filter_map(Reference::post_key)
+        .collect())
+}
+
 /// Resolves a URI an object points at with the router event paths take, so each reference is read
 /// by its own epoch's parser, whichever epoch wrote the object holding it. A URI no parser reads,
 /// a bare `pubky://<pk>` included, names nothing Nexus reads.
@@ -603,6 +613,48 @@ mod tests {
                 TranslatedDel::Skip { reason } => assert_eq!(reason, expected, "{path}"),
                 other => panic!("{path}: expected Skip, got {other:?}"),
             }
+        }
+    }
+
+    /// A collection's post items, keyed in curator order; other items and malformed URIs dropped.
+    #[test]
+    fn collection_item_keys_keep_post_items_in_curator_order() {
+        let items = [
+            uri(&format!("pub/pubky.app/posts/{TS}")),
+            uri("pub/pubky.app/profile.json"),
+            format!("pubky://not-a-pubky-id/pub/pubky.app/posts/{TS}"),
+            format!("pubky://{OTHER}/pub/pubky.app/posts/{TS}"),
+            uri(&format!("pub/social/v1/posts/{TS}")),
+        ];
+        let content = format!(
+            r#"{{"name":"n","items":[{}]}}"#,
+            items.map(|item| format!("\"{item}\"")).join(",")
+        );
+        assert_eq!(
+            collection_item_keys(&content).unwrap(),
+            vec![
+                (host(), TS.to_string()),
+                (other(), TS.to_string()),
+                (host(), TS.to_string()),
+            ]
+        );
+        assert!(collection_item_keys("just a short post").is_err());
+    }
+
+    /// A v0 collection's items are resolved when it is copied into the input; another kind has none.
+    #[test]
+    fn put_collection_resolves_its_items() {
+        let post_id = now_id();
+        let item = uri(&format!("pub/pubky.app/posts/{TS}"));
+        let content = format!(r#"{{\"name\":\"n\",\"items\":[\"{item}\"]}}"#);
+        let json = format!(
+            r#"{{"content":"{content}","kind":"collection","parent":null,"embed":null,"attachments":null}}"#
+        );
+        match put(&format!("pub/pubky.app/posts/{post_id}"), &json) {
+            TranslatedPut::Post { post, .. } => {
+                assert_eq!(post.collected_keys(), vec![(host(), TS.to_string())]);
+            }
+            other => panic!("expected Post, got {other:?}"),
         }
     }
 

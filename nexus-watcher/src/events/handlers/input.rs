@@ -90,6 +90,8 @@ pub struct PostInput {
     pub embed: Option<Reference>,
     pub attachments: Option<Vec<String>>,
     pub lock: Option<String>,
+    /// What a collection curates, in curator order; empty for any other kind.
+    pub items: Vec<Reference>,
 }
 
 impl PostInput {
@@ -139,11 +141,17 @@ impl PostInput {
         }
     }
 
+    /// The posts a collection curates, in curator order; items naming anything else are dropped.
+    pub fn collected_keys(&self) -> Vec<(PubkyId, String)> {
+        self.items.iter().filter_map(Reference::post_key).collect()
+    }
+
     /// The posts the graph write links this one to.
     pub fn links(&self) -> PostLinks {
         PostLinks {
             replied: self.replied().and_then(Reference::post_key),
             reposted: self.reposted().and_then(Reference::post_key),
+            collected: (self.kind == PostKind::Collection).then(|| self.collected_keys()),
         }
     }
 }
@@ -253,6 +261,7 @@ mod tests {
             embed: None,
             attachments: None,
             lock: None,
+            items: Vec::new(),
         }
     }
 
@@ -295,6 +304,29 @@ mod tests {
             "a non-post embed must not become a repost"
         );
         assert!(post.links().reposted.is_none());
+    }
+
+    /// A collection links the posts it curates, in curator order, and nothing else; another kind
+    /// links none, so a kind flip clears them.
+    #[test]
+    fn a_collection_links_its_post_items() {
+        let collection = PostInput {
+            kind: PostKind::Collection,
+            items: vec![
+                reference(post()),
+                reference(Target::User(author())),
+                reference(post()),
+            ],
+            ..post_without_relations()
+        };
+        let key = (author(), POST_ID.to_string());
+        assert_eq!(collection.links().collected, Some(vec![key.clone(), key]));
+
+        let short = PostInput {
+            kind: PostKind::Short,
+            ..collection
+        };
+        assert_eq!(short.links().collected, None);
     }
 
     #[test]

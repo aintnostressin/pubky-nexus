@@ -1,23 +1,28 @@
 use super::{PostCounts, PostDetails};
 use crate::db::{fetch_key_from_graph, queries};
 use crate::models::error::ModelResult;
-use pubky_social_specs::legacy_v0::{ParsedUri, PubkyAppCollectionContent, Resource};
 use pubky_social_specs::PubkyId;
 
-/// Post keys `(author_id, post_id)` referenced by a Collection envelope, in
-/// curator order. Malformed and non-post URIs are dropped. Errors when
-/// `content` is not an envelope.
-pub fn collection_item_keys(content: &str) -> Result<Vec<(PubkyId, String)>, serde_json::Error> {
-    let envelope: PubkyAppCollectionContent = serde_json::from_str(content)?;
-    Ok(envelope
-        .items
+/// A collection item as `item_keys` stores it: `author_id:post_id`.
+pub(crate) fn item_key((author_id, post_id): &(PubkyId, String)) -> String {
+    format!("{author_id}:{post_id}")
+}
+
+/// The posts a collection curates, in curator order, as its graph write stored them. Empty for a
+/// post that is not a collection or is not indexed.
+pub async fn get_collection_items(
+    author_id: &str,
+    post_id: &str,
+) -> ModelResult<Vec<(PubkyId, String)>> {
+    let query = queries::get::collection_item_keys(author_id, post_id);
+    let keys = fetch_key_from_graph::<Vec<String>>(query, "item_keys").await?;
+    Ok(keys
+        .unwrap_or_default()
         .iter()
-        .filter_map(|uri| match ParsedUri::try_from(uri.as_str()) {
-            Ok(parsed) => match parsed.resource {
-                Resource::Post(post_id) => Some((parsed.user_id, post_id)),
-                _ => None,
-            },
-            Err(_) => None,
+        .filter_map(|key| {
+            let (item_author_id, item_post_id) = key.split_once(':')?;
+            let item_author_id = PubkyId::try_from(item_author_id).ok()?;
+            Some((item_author_id, item_post_id.to_string()))
         })
         .collect())
 }
@@ -34,7 +39,7 @@ pub async fn sync_collected_edges(
 ) -> ModelResult<()> {
     let query = queries::put::sync_collection_items(author_id, post_id, items, derived_from);
     // No row: the post is not in the graph, or it moved on since `items` were
-    // parsed, so there is nothing to reconcile.
+    // resolved, so there is nothing to reconcile.
     let Some(touched) = fetch_key_from_graph::<Vec<Vec<String>>>(query, "touched").await? else {
         return Ok(());
     };
@@ -45,51 +50,4 @@ pub async fn sync_collected_edges(
     let keys: Vec<&[&str]> = keys.iter().map(Vec::as_slice).collect();
     PostCounts::invalidate_many(&keys).await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const BOGOTA: &str = "ep441mndnsjeesenwz78r9paepm6e4kqm4ggiyy9uzpoe43eu9ny";
-    const CAIRO: &str = "f5tcy5gtgzshipr6pag6cn9uski3s8tjare7wd3n7enmyokgjk1o";
-
-    fn envelope(items: &[&str]) -> String {
-        serde_json::json!({ "name": "n", "items": items }).to_string()
-    }
-
-    #[test]
-    fn keeps_post_items_in_curator_order() {
-        let content = envelope(&[
-            &format!("pubky://{CAIRO}/pub/pubky.app/posts/00000039YD9C0"),
-            &format!("pubky://{BOGOTA}/pub/pubky.app/posts/00000039YD9BM"),
-        ]);
-        let keys = collection_item_keys(&content).unwrap();
-        assert_eq!(keys.len(), 2);
-        assert_eq!(
-            (keys[0].0.to_string(), keys[0].1.as_str()),
-            (CAIRO.to_string(), "00000039YD9C0")
-        );
-        assert_eq!(
-            (keys[1].0.to_string(), keys[1].1.as_str()),
-            (BOGOTA.to_string(), "00000039YD9BM")
-        );
-    }
-
-    #[test]
-    fn drops_non_post_and_malformed_uris() {
-        let content = envelope(&[
-            &format!("pubky://{BOGOTA}/pub/pubky.app/profile.json"),
-            "pubky://not-a-pubky-id/pub/pubky.app/posts/00000039YD9BM",
-            &format!("pubky://{BOGOTA}/pub/pubky.app/posts/00000039YD9BM"),
-        ]);
-        let keys = collection_item_keys(&content).unwrap();
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].1, "00000039YD9BM");
-    }
-
-    #[test]
-    fn errors_on_non_envelope_content() {
-        assert!(collection_item_keys("just a short post").is_err());
-    }
 }

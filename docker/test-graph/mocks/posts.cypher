@@ -266,6 +266,14 @@ MATCH (u:User {id: $bogota}), (p:Post {id: "MALF1TGL5BKG7"}) MERGE (u)-[:AUTHORE
 MERGE (p:Post {id: "NEST1TGL5BKG8"}) SET p.content = "{\"name\":\"Meta\",\"items\":[\"pubky://ep441mndnsjeesenwz78r9paepm6e4kqm4ggiyy9uzpoe43eu9ny/pub/pubky.app/posts/COLW1TGL5BKG1\"]}", p.kind = "collection", p.indexed_at = 1980477299440;
 MATCH (u:User {id: $bogota}), (p:Post {id: "NEST1TGL5BKG8"}) MERGE (u)-[:AUTHORED]->(p) SET p.uri = "pubky://ep441mndnsjeesenwz78r9paepm6e4kqm4ggiyy9uzpoe43eu9ny/pub/pubky.app/posts/NEST1TGL5BKG8";
 
+// Item keys, as the watcher stores them from the envelopes above: every item naming a post, in
+// curator order, indexed or not (the missing item of COLW1TGL5BKG1 keeps its key, its profile.json
+// item has none). The malformed envelope stores none. Read by `?source=collection`.
+MATCH (c:Post {id: "COLW1TGL5BKG1"}) SET c.item_keys = ["ep441mndnsjeesenwz78r9paepm6e4kqm4ggiyy9uzpoe43eu9ny:00000039YD9BM", "ep441mndnsjeesenwz78r9paepm6e4kqm4ggiyy9uzpoe43eu9ny:00000039YD9C0", "ep441mndnsjeesenwz78r9paepm6e4kqm4ggiyy9uzpoe43eu9ny:00000039YD9CE", "ep441mndnsjeesenwz78r9paepm6e4kqm4ggiyy9uzpoe43eu9ny:ZZZZZZZZZZZZZ"];
+MATCH (c:Post {id: "COLW1TGL5BKG2"}) SET c.item_keys = [];
+MATCH (c:Post {id: "COLW1TGL5BKG3"}) SET c.item_keys = ["ep441mndnsjeesenwz78r9paepm6e4kqm4ggiyy9uzpoe43eu9ny:00000039YD9BM"];
+MATCH (c:Post {id: "NEST1TGL5BKG8"}) SET c.item_keys = ["ep441mndnsjeesenwz78r9paepm6e4kqm4ggiyy9uzpoe43eu9ny:COLW1TGL5BKG1"];
+
 // COLLECTED edges, as the watcher materializes them from the envelopes above:
 // only items that exist as posts get one (the missing and non-post items of
 // COLW1TGL5BKG1 do not). Used by `?source=post_collections` and post counts.

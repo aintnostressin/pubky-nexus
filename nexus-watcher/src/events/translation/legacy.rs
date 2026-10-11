@@ -4,13 +4,16 @@
 
 use super::{resolve_reference, SkipReason, TranslatedDel, TranslatedPut};
 use crate::errors::EventProcessorError;
-use crate::events::handlers::{BookmarkInput, FileInput, PostInput, TagInput, Target, UserInput};
+use crate::events::handlers::{
+    BookmarkInput, FileInput, PostInput, Reference, TagInput, Target, UserInput,
+};
 use nexus_common::models::post::PostKind;
 use nexus_common::models::user::UserLink;
 use pubky_social_specs::legacy_v0::{
-    ExtendedParsedUri, PubkyAppBookmark, PubkyAppFile, PubkyAppObject, PubkyAppPost,
-    PubkyAppPostKind, PubkyAppTag, PubkyAppUser, PubkyAppUserLink, Resource,
+    ExtendedParsedUri, PubkyAppBookmark, PubkyAppCollectionContent, PubkyAppFile, PubkyAppObject,
+    PubkyAppPost, PubkyAppPostKind, PubkyAppTag, PubkyAppUser, PubkyAppUserLink, Resource,
 };
+use tracing::warn;
 
 pub(super) fn skip_reason(
     parsed: &ExtendedParsedUri,
@@ -244,8 +247,29 @@ fn user_link(link: PubkyAppUserLink) -> UserLink {
     }
 }
 
+/// What a v0 collection envelope curates, each item resolved, in curator order. Errors when
+/// `content` is not an envelope.
+pub(super) fn collection_items(content: &str) -> Result<Vec<Reference>, String> {
+    let envelope: PubkyAppCollectionContent =
+        serde_json::from_str(content).map_err(|e| e.to_string())?;
+    Ok(envelope
+        .items
+        .iter()
+        .map(String::as_str)
+        .map(resolve_reference)
+        .collect())
+}
+
 impl From<PubkyAppPost> for PostInput {
     fn from(post: PubkyAppPost) -> Self {
+        // The reader validated a collection's envelope; one that still fails to read curates
+        // nothing.
+        let items = match post.kind {
+            PubkyAppPostKind::Collection => collection_items(&post.content)
+                .inspect_err(|e| warn!("Collection envelope unreadable, no items: {e}"))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
         Self {
             content: post.content,
             kind: post_kind(post.kind),
@@ -253,6 +277,7 @@ impl From<PubkyAppPost> for PostInput {
             embed: post.embed.map(|embed| resolve_reference(&embed.uri)),
             attachments: post.attachments,
             lock: post.lock,
+            items,
         }
     }
 }

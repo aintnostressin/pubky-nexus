@@ -10,7 +10,8 @@ mod stream;
 mod view;
 
 pub use bookmark::Bookmark;
-pub use collection::{collection_item_keys, sync_collected_edges};
+pub(crate) use collection::item_key;
+pub use collection::{get_collection_items, sync_collected_edges};
 pub use counts::PostCounts;
 pub use details::PostDetails;
 pub use kind::PostKind;
