@@ -210,7 +210,11 @@ pub async fn handle_del_event(
             user_id,
             bookmark_id,
         } => handlers::bookmark::del(user_id, bookmark_id).await?,
-        TranslatedDel::Tag { uri } => handlers::tag::del(&uri).await?,
+        TranslatedDel::Tag {
+            tagger_id,
+            tag_id,
+            app,
+        } => handlers::tag::del(tagger_id, tag_id, app).await?,
         TranslatedDel::File { user_id, file_id } => {
             handlers::file::del(&user_id, file_id, files_path).await?
         }
