@@ -18,7 +18,7 @@ use tracing::{debug, error, info, trace, warn};
 
 /// Counter for events permanently rejected for exceeding a fetch size limit.
 static REJECTED: LazyLock<Counter<u64>> = LazyLock::new(|| {
-    global::meter(super::METER_NAME)
+    global::meter(crate::METER_NAME)
         .u64_counter("watcher.fetch.rejected")
         .with_description("Event fetches rejected for exceeding a size limit")
         .build()
@@ -31,7 +31,7 @@ static REJECTED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 /// The cursor is not advanced and the same position is fetched on the next poll.
 /// A sustained non-zero rate for one HS indicates it needs operator attention.
 static INVALID_CURSOR_PRIMARY_HS: LazyLock<Counter<u64>> = LazyLock::new(|| {
-    global::meter(super::METER_NAME)
+    global::meter(crate::METER_NAME)
         .u64_counter("watcher.primary_hs.cursor.invalid")
         .with_description("Cursor lines from the Primary HS that could not be applied")
         .build()
@@ -45,7 +45,7 @@ static INVALID_CURSOR_PRIMARY_HS: LazyLock<Counter<u64>> = LazyLock::new(|| {
 /// the batch is skipped instead. Any non-zero count means the HS stream cannot
 /// make progress and needs operator attention.
 static STALLED_CURSOR_PRIMARY_HS: LazyLock<Counter<u64>> = LazyLock::new(|| {
-    global::meter(super::METER_NAME)
+    global::meter(crate::METER_NAME)
         .u64_counter("watcher.primary_hs.cursor.stalled")
         .with_description("Primary HS batches whose cursor did not advance past the requested one")
         .build()

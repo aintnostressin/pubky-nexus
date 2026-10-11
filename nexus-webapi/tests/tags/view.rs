@@ -15,20 +15,28 @@ const INVALID_PUBKY_TAG_ID: &str = "0000000000000";
 
 #[tokio_shared_rt::test(shared)]
 async fn test_tag_view() -> Result<()> {
-    let path = format!("/v0/tags/{NON_CANONICAL_PUBKY_TAGGER_ID}/{PUBKY_TAG_ID}");
-    invalid_get_request(&path, StatusCode::BAD_REQUEST).await?;
-
-    let path = format!("/v0/tags/{UNKNOWN_PUBKY_TAGGER_ID}/{PUBKY_TAG_ID}");
-    invalid_get_request(&path, StatusCode::NOT_FOUND).await?;
-
-    let path = format!("/v0/tags/{PUBKY_TAGGER_ID}/{INVALID_PUBKY_TAG_ID}");
-    invalid_get_request(&path, StatusCode::NOT_FOUND).await?;
-
-    let path = format!("/v0/tags/{NON_CANONICAL_PUBKY_TAGGER_ID}/{INVALID_PUBKY_TAG_ID}");
-    invalid_get_request(&path, StatusCode::BAD_REQUEST).await?;
-
-    let path = format!("/v0/tags/{UNKNOWN_PUBKY_TAGGER_ID}/{INVALID_PUBKY_TAG_ID}");
-    invalid_get_request(&path, StatusCode::NOT_FOUND).await?;
+    let invalid_requests = [
+        (
+            NON_CANONICAL_PUBKY_TAGGER_ID,
+            PUBKY_TAG_ID,
+            StatusCode::BAD_REQUEST,
+        ),
+        (UNKNOWN_PUBKY_TAGGER_ID, PUBKY_TAG_ID, StatusCode::NOT_FOUND),
+        (PUBKY_TAGGER_ID, INVALID_PUBKY_TAG_ID, StatusCode::NOT_FOUND),
+        (
+            NON_CANONICAL_PUBKY_TAGGER_ID,
+            INVALID_PUBKY_TAG_ID,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            UNKNOWN_PUBKY_TAGGER_ID,
+            INVALID_PUBKY_TAG_ID,
+            StatusCode::NOT_FOUND,
+        ),
+    ];
+    for (tagger_id, tag_id, status) in invalid_requests {
+        invalid_get_request(&format!("/v0/tags/{tagger_id}/{tag_id}"), status).await?;
+    }
 
     let path = format!("/v0/tags/{PUBKY_TAGGER_ID}/{PUBKY_TAG_ID}");
     let body = get_request(&path).await?;

@@ -17,7 +17,7 @@ mod fetch;
 pub mod handlers;
 mod moderation;
 pub mod retry;
-pub mod translation;
+mod translation;
 
 pub(crate) use fetch::{
     fetch_capped, format_error_body, read_stream_capped, MAX_ERROR_BODY, MAX_EVENTS_BODY,
@@ -101,46 +101,29 @@ pub async fn handle_put_event(
     moderation: Arc<Moderation>,
     ingestor: Arc<UserIngestor>,
 ) -> Result<(), EventProcessorError> {
-    let pubky = PubkyConnector::get()?;
-    let response = pubky.public_storage().get(&event.uri).await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let (body, _exceeded) = read_stream_capped(response.bytes_stream(), MAX_ERROR_BODY)
-            .await
-            .unwrap_or_default();
-        let body = format_error_body(&body, MAX_ERROR_BODY);
-
-        let err_msg = format!(
-            "Fetch resource failed {}: HTTP {status} - {body}",
-            event.uri
-        );
-        return Err(EventProcessorError::client_error(err_msg));
-    }
-
-    let blob = fetch_capped(response, MAX_RESOURCE_SIZE as u64).await?;
+    let blob = fetch_resource(&event.uri).await?;
 
     match translation::translate_put(&event.route, &event.uri, blob.as_slice())? {
-        TranslatedPut::PutUser { user_id, user } => {
+        TranslatedPut::User { user_id, user } => {
             handlers::user::sync_put(user, event.uri.clone(), user_id).await?
         }
-        TranslatedPut::PutPost {
+        TranslatedPut::Post {
             author_id,
             post_id,
             post,
         } => {
             handlers::post::sync_put(post, event.uri.clone(), author_id, post_id, &ingestor).await?
         }
-        TranslatedPut::PutFollow {
+        TranslatedPut::Follow {
             user_id,
             followee_id,
         } => handlers::follow::sync_put(user_id, followee_id, &ingestor).await?,
-        TranslatedPut::PutBookmark {
+        TranslatedPut::Bookmark {
             user_id,
             bookmark_id,
             bookmark,
         } => handlers::bookmark::sync_put(user_id, bookmark, bookmark_id).await?,
-        TranslatedPut::PutTag {
+        TranslatedPut::Tag {
             tagger_id,
             tag_id,
             tag,
@@ -167,7 +150,7 @@ pub async fn handle_put_event(
                     .await?
             }
         }
-        TranslatedPut::PutFile {
+        TranslatedPut::File {
             user_id,
             file_id,
             file,
@@ -189,6 +172,25 @@ pub async fn handle_put_event(
     Ok(())
 }
 
+/// Fetches the body of the resource at `uri`, capped at [`MAX_RESOURCE_SIZE`].
+async fn fetch_resource(uri: &str) -> Result<Vec<u8>, EventProcessorError> {
+    let pubky = PubkyConnector::get()?;
+    let response = pubky.public_storage().get(uri).await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let (body, _exceeded) = read_stream_capped(response.bytes_stream(), MAX_ERROR_BODY)
+            .await
+            .unwrap_or_default();
+        let body = format_error_body(&body, MAX_ERROR_BODY);
+
+        let err_msg = format!("Fetch resource failed {uri}: HTTP {status} - {body}");
+        return Err(EventProcessorError::client_error(err_msg));
+    }
+
+    fetch_capped(response, MAX_RESOURCE_SIZE as u64).await
+}
+
 /// Handles a DEL event by dispatching to the appropriate handler.
 pub async fn handle_del_event(
     event: &Event,
@@ -196,20 +198,20 @@ pub async fn handle_del_event(
     ingestor: Arc<UserIngestor>,
 ) -> Result<(), EventProcessorError> {
     match translation::translate_del(&event.route, &event.uri)? {
-        TranslatedDel::DelUser { user_id } => handlers::user::del(user_id).await?,
-        TranslatedDel::DelPost { author_id, post_id } => {
+        TranslatedDel::User { user_id } => handlers::user::del(user_id).await?,
+        TranslatedDel::Post { author_id, post_id } => {
             handlers::post::del(author_id, post_id, &ingestor).await?
         }
-        TranslatedDel::DelFollow {
+        TranslatedDel::Follow {
             user_id,
             followee_id,
         } => handlers::follow::del(user_id, followee_id).await?,
-        TranslatedDel::DelBookmark {
+        TranslatedDel::Bookmark {
             user_id,
             bookmark_id,
         } => handlers::bookmark::del(user_id, bookmark_id).await?,
-        TranslatedDel::DelTag { uri } => handlers::tag::del(&uri).await?,
-        TranslatedDel::DelFile { user_id, file_id } => {
+        TranslatedDel::Tag { uri } => handlers::tag::del(&uri).await?,
+        TranslatedDel::File { user_id, file_id } => {
             handlers::file::del(&user_id, file_id, files_path).await?
         }
         TranslatedDel::Skip { reason } => debug!(?reason, "DEL event not handled"),
