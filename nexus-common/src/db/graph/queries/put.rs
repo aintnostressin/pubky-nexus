@@ -1,6 +1,6 @@
 use crate::db::graph::error::{GraphError, GraphResult};
 use crate::db::graph::Query;
-use crate::models::post::PostLinks;
+use crate::models::post::{item_key, PostLinks};
 use crate::models::{file::FileDetails, post::PostDetails, user::UserDetails};
 use pubky_social_specs::PubkyId;
 
@@ -74,7 +74,8 @@ pub fn create_post(post: &PostDetails, links: &PostLinks) -> GraphResult<Query> 
             new_post.kind = $kind,
             new_post.attachments = $attachments,
             new_post.lock = $lock,
-            new_post.deleted = $deleted
+            new_post.deleted = $deleted,
+            new_post.item_keys = $item_keys
         RETURN existing_post IS NOT NULL AS flag",
     );
 
@@ -91,7 +92,15 @@ pub fn create_post(post: &PostDetails, links: &PostLinks) -> GraphResult<Query> 
         .param("attachments", post.attachments.clone().unwrap_or_default())
         // Pass Option directly so None clears the property; "" would read back as Some("").
         .param("lock", post.lock.clone())
-        .param("deleted", post.deleted);
+        .param("deleted", post.deleted)
+        // A collection's items in curator order; null clears them.
+        .param(
+            "item_keys",
+            links
+                .collected
+                .as_ref()
+                .map(|items| items.iter().map(item_key).collect::<Vec<_>>()),
+        );
 
     // Handle "replied" relationship
     cypher_query = add_relationship_params(
@@ -124,6 +133,25 @@ fn add_relationship_params(
             .param(post_param, parent_post_id.as_str()),
         None => cypher_query,
     }
+}
+
+/// Stores the items of a collection whose content is still `content`, in curator order.
+pub fn set_collection_items(
+    author_id: &str,
+    post_id: &str,
+    content: &str,
+    items: &[(PubkyId, String)],
+) -> Query {
+    Query::new(
+        "set_collection_items",
+        "MATCH (:User {id: $author_id})-[:AUTHORED]->(c:Post {id: $post_id})
+         WHERE c.kind = 'collection' AND c.content = $content
+         SET c.item_keys = $item_keys",
+    )
+    .param("author_id", author_id)
+    .param("post_id", post_id)
+    .param("content", content)
+    .param("item_keys", items.iter().map(item_key).collect::<Vec<_>>())
 }
 
 /// Creates a `MENTIONED` relationship between a post and a user

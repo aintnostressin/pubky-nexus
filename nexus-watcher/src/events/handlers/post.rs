@@ -5,11 +5,10 @@ use nexus_common::db::{exec_single_row, execute_graph_operation, OperationOutcom
 use nexus_common::db::{queries, RedisOps};
 use nexus_common::models::notification::{Notification, PostChangedSource, PostChangedType};
 use nexus_common::models::post::{
-    collection_item_keys, sync_collected_edges, PostCounts, PostDetails, PostKind,
+    get_collection_items, sync_collected_edges, PostCounts, PostDetails, PostKind,
     PostRelationships, PostStream, POST_TOTAL_ENGAGEMENT_KEY_PARTS,
 };
 use nexus_common::models::user::{UserCounts, UserIngestor};
-use pubky_social_specs::legacy_v0::{ParsedUri, PubkyAppCollectionContent};
 use pubky_social_specs::PubkyId;
 use tracing::{debug, Instrument};
 
@@ -93,7 +92,7 @@ async fn sync_put_details(
                 // Collection -> Short flip would then read Short on both sides, skip
                 // this, and leave the old edges in the graph for good.
                 if was_collection || is_collection {
-                    let items = curated_items(&author_id, &post_id, &post_details);
+                    let items = post.collected_keys();
                     sync_collected_edges(&author_id, &post_id, &items, Some(&post_details)).await?;
                 }
                 if existing_details.is_different_than(&post_details) || kind_changed {
@@ -156,7 +155,7 @@ async fn sync_put_details(
 
     ingest_collection_item_authors(&post, ingestor).await;
     if is_collection {
-        let items = curated_items(&author_id, &post_id, &post_details);
+        let items = post.collected_keys();
         sync_collected_edges(&author_id, &post_id, &items, Some(&post_details)).await?;
     }
 
@@ -349,8 +348,9 @@ async fn recover_post_index_state(
     // didn't finish. Skips notifications (0 > N on retry).
     merge_mention_edges(author_id, post_id, &post_details.content).await?;
 
-    // Same for COLLECTED edges; a non-collection also clears edges left by a kind flip.
-    let items = curated_items(author_id, post_id, &post_details);
+    // Same for COLLECTED edges, from the item keys the graph write stored; a non-collection has
+    // none, which also clears edges left by a kind flip.
+    let items = get_collection_items(author_id, post_id).await?;
     sync_collected_edges(author_id, post_id, &items, Some(&post_details)).await?;
 
     // Reindex all Redis state from graph truth.
@@ -521,22 +521,6 @@ async fn merge_mention_edges(
     Ok(())
 }
 
-/// The post keys a Collection curates; none for any other kind.
-fn curated_items(
-    author_id: &PubkyId,
-    post_id: &str,
-    post_details: &PostDetails,
-) -> Vec<(PubkyId, String)> {
-    if post_details.kind != PostKind::Collection {
-        return Vec::new();
-    }
-    // PUTs are spec-validated, but recovery reads the graph, which may hold an
-    // envelope written under an older spec.
-    collection_item_keys(&post_details.content)
-        .inspect_err(|e| tracing::warn!("Collection {author_id}:{post_id} envelope malformed: {e}"))
-        .unwrap_or_default()
-}
-
 /// The key of a stored reply or repost link, which names a post.
 fn stored_parent_key(uri: &str) -> Result<(PubkyId, String), EventProcessorError> {
     resolve_reference(uri)
@@ -550,28 +534,17 @@ fn keyed_post(reference: &Reference) -> Option<(&str, PubkyId, String)> {
     Some((&reference.uri, author_id, post_id))
 }
 
-/// Best-effort ingestion of the user of every URI in a Collection's
-/// `items` envelope. No-op for non-Collection posts; failures (malformed URI,
-/// blacklisted HS) are logged and skipped so the Collection is still indexed.
+/// Best-effort ingestion of the user of every item a Collection curates; other kinds curate
+/// nothing. Failures (an item naming no user, a blacklisted HS) are logged and skipped so the
+/// Collection is still indexed.
 async fn ingest_collection_item_authors(post: &PostInput, ingestor: &UserIngestor) {
-    if post.kind != PostKind::Collection {
-        return;
-    }
-    let Ok(envelope) = serde_json::from_str::<PubkyAppCollectionContent>(&post.content) else {
-        tracing::warn!("Collection user ingestion: unparseable content envelope, skipping");
-        return;
-    };
-
-    for item_uri in &envelope.items {
-        match ParsedUri::try_from(item_uri.as_str()) {
-            Ok(parsed) => {
-                if let Err(e) = ingestor.maybe_ingest_user(&parsed.user_id).await {
-                    tracing::warn!("Failed to ingest collection item author {item_uri}: {e}");
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Collection user ingestion: skipping malformed item {item_uri}: {e}")
-            }
+    for item in &post.items {
+        let Some(owner_id) = item.target.owner_id() else {
+            tracing::warn!("Collection user ingestion: skipping item {}", item.uri);
+            continue;
+        };
+        if let Err(e) = ingestor.maybe_ingest_user(owner_id).await {
+            tracing::warn!("Failed to ingest collection item author {}: {e}", item.uri);
         }
     }
 }
@@ -614,6 +587,7 @@ pub async fn del(
                 kind: PostKind::Short,
                 attachments: None,
                 lock: None,
+                items: Vec::new(),
             };
             let tombstone_details = PostDetails {
                 deleted: true,

@@ -2,7 +2,7 @@ use nexus_common::{db::PubkyConnector, models::user::UserIngestor};
 pub mod event;
 
 pub use event::{Event, EventType, ParseResult};
-pub use translation::{EventRoute, SkipReason};
+pub use translation::{collection_item_keys, EventRoute, SkipReason};
 
 use crate::errors::EventProcessorError;
 use nexus_common::WatcherConfig;

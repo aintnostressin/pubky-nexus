@@ -5,9 +5,10 @@ use tracing::{info, warn};
 use crate::migrations::manager::Migration;
 use nexus_common::{
     db::{fetch_all_rows_from_graph, queries},
-    models::post::{collection_item_keys, sync_collected_edges, PostDetails, PostKind},
+    models::post::{sync_collected_edges, PostDetails, PostKind},
     types::DynError,
 };
+use nexus_watcher::events::collection_item_keys;
 
 const PROGRESS_LOG_EVERY: u64 = 500;
 
