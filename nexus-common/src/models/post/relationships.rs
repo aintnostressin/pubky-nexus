@@ -1,47 +1,28 @@
 use crate::db::kv::RedisResult;
 use crate::db::{fetch_row_from_graph, queries, GraphResult, RedisOps};
 use crate::models::error::ModelResult;
-use pubky_app_specs::{ParsedUri, PubkyAppPost, PubkyId, Resource};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use pubky_social_specs::PubkyId;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-mod parsed_uri_option {
-    use super::*;
-
-    pub fn serialize<S>(value: &Option<ParsedUri>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        value
-            .as_ref()
-            .and_then(|v| v.try_to_uri_str().ok())
-            .serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<ParsedUri>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let opt: Option<String> = Option::deserialize(deserializer)?;
-        opt.map(|s| ParsedUri::try_from(s.as_str()).map_err(serde::de::Error::custom))
-            .transpose()
-    }
+/// The posts a post's graph write links it to, each as `(author_id, post_id)`.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct PostLinks {
+    /// The post this one replies to.
+    pub replied: Option<(PubkyId, String)>,
+    /// The post this one reposts.
+    pub reposted: Option<(PubkyId, String)>,
+    /// For a collection, the posts it curates, in curator order; `None` for any other kind.
+    pub collected: Option<Vec<(PubkyId, String)>>,
 }
 
-// TODO(specs-migration): `ParsedUri` only parses and renders `pubky.app`, so a parent stored
-// under `social/v1` is dropped when read from the graph. The specs migration needs an internal
-// function that reads the owner and post id from an address in either epoch.
 #[derive(Serialize, Deserialize, ToSchema, Default, Debug)]
 pub struct PostRelationships {
     /// If set, URI of the post this is a reply to
-    #[schema(value_type = Option<String>)]
-    #[serde(with = "parsed_uri_option")]
-    pub replied: Option<ParsedUri>,
+    pub replied: Option<String>,
 
     /// If set, URI of the post this post is reposting
-    #[schema(value_type = Option<String>)]
-    #[serde(with = "parsed_uri_option")]
-    pub reposted: Option<ParsedUri>,
+    pub reposted: Option<String>,
 
     /// List of user IDs mentioned in this post
     pub mentioned: Vec<PubkyId>,
@@ -87,13 +68,8 @@ impl PostRelationships {
             return Ok(None);
         };
 
-        let parent = |column: &str| {
-            row.get::<Option<String>>(column)
-                .unwrap_or(None)
-                .and_then(|uri| ParsedUri::try_from(uri).ok())
-        };
-        let replied = parent("replied_uri");
-        let reposted = parent("reposted_uri");
+        let replied = row.get::<Option<String>>("replied_uri").unwrap_or(None);
+        let reposted = row.get::<Option<String>>("reposted_uri").unwrap_or(None);
         let mentioned: Vec<PubkyId> = row.get("mentioned_user_ids").unwrap_or(Vec::new());
 
         Ok(Some(Self {
@@ -101,23 +77,6 @@ impl PostRelationships {
             reposted,
             mentioned,
         }))
-    }
-
-    /// Constructs a `Self` instance by extracting relationships from a `PubkyAppPost` object
-    pub fn from_homeserver(post: &PubkyAppPost) -> Self {
-        let mut relationship = Self::default();
-
-        if let Some(parent_uri) = &post.parent {
-            relationship.replied = ParsedUri::try_from(parent_uri.as_str()).ok()
-        }
-
-        // Only a post can be reposted; other embed targets stay plain embeds.
-        if let Some(embed) = &post.embed {
-            relationship.reposted = ParsedUri::try_from(embed.uri.as_str())
-                .ok()
-                .filter(|uri| matches!(uri.resource, Resource::Post(_)));
-        }
-        relationship
     }
 
     pub async fn put_to_index(&self, author_id: &str, post_id: &str) -> RedisResult<()> {
@@ -138,50 +97,5 @@ impl PostRelationships {
             ),
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pubky_app_specs::{
-        file_uri_builder, post_uri_builder, PubkyAppPostEmbed, PubkyAppPostKind,
-    };
-
-    const AUTHOR: &str = "4snwyct86m383rsduhw5xgcxpw7c63j3pq8x4ycqikxgik8y64ro";
-
-    fn post_embedding(uri: String) -> PubkyAppPost {
-        PubkyAppPost {
-            content: "x".into(),
-            kind: PubkyAppPostKind::Short,
-            parent: None,
-            embed: Some(PubkyAppPostEmbed {
-                kind: PubkyAppPostKind::Short,
-                uri,
-            }),
-            attachments: None,
-            lock: None,
-        }
-    }
-
-    #[test]
-    fn post_embed_becomes_a_repost() {
-        let uri = post_uri_builder(AUTHOR.into(), "003286NSMY490".into());
-        let rel = PostRelationships::from_homeserver(&post_embedding(uri));
-        assert!(
-            matches!(rel.reposted.as_ref(), Some(u) if matches!(u.resource, Resource::Post(_))),
-            "a post embed should become a reposted relationship"
-        );
-    }
-
-    #[test]
-    fn non_post_embed_is_not_a_repost() {
-        // A non-post embed (file URI) must not become a repost.
-        let uri = file_uri_builder(AUTHOR.into(), "003286NSMY490".into());
-        let rel = PostRelationships::from_homeserver(&post_embedding(uri));
-        assert!(
-            rel.reposted.is_none(),
-            "a non-post embed must not become a repost"
-        );
     }
 }

@@ -5,7 +5,7 @@ use nexus_common::db::OperationOutcome;
 use nexus_common::models::follow::{Followers, Following, Friends, UserFollows};
 use nexus_common::models::notification::Notification;
 use nexus_common::models::user::{UserCounts, UserIngestor};
-use pubky_app_specs::PubkyId;
+use pubky_social_specs::PubkyId;
 use tracing::debug;
 
 use super::utils::fail_on_blacklisted_hs;
@@ -45,11 +45,7 @@ pub async fn sync_put(
             // Drop the follow (non-retryable) if the followee's HS is blacklisted.
             fail_on_blacklisted_hs(ingestor.maybe_ingest_user(&followee_id).await)?;
 
-            let followee_uri = followee_id
-                .to_uri()
-                .try_to_uri_str()
-                .map_err(EventProcessorError::generic)?;
-            let dependency = vec![followee_uri];
+            let dependency = vec![followee_id.to_string()];
             return Err(EventProcessorError::MissingDependency { dependency });
         }
         // The relationship did not exist, create all related indexes

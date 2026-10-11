@@ -13,7 +13,7 @@ use nexus_common::WatcherConfig;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use opentelemetry::{global, KeyValue};
 use pubky::PublicKey;
-use pubky_app_specs::PubkyId;
+use pubky_social_specs::PubkyId;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,10 +39,10 @@ pub struct PubkyConnectorResolver;
 impl PkdnsHomeserverResolver for PubkyConnectorResolver {
     async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<Option<PubkyId>> {
         let pubky = PubkyConnector::get()?;
-        match pubky.get_homeserver_of(user_pk).await {
-            Some(hs_pk) => Ok(Some(PubkyId::from(hs_pk))),
-            None => Ok(None),
-        }
+        // `Ok(None)` means no HS is published. A failed lookup stays an `Err`
+        // (`PkarrFailed`), so the resolver loop reports it as `LookupFailed`
+        // instead of treating the user as having no HS.
+        Ok(pubky.get_homeserver_of(user_pk).await?.map(PubkyId::from))
     }
 }
 

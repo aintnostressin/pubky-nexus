@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use super::{collection_item_keys, Bookmark, PostCounts, PostDetails, PostView};
+use super::{
+    get_collection_items, item_key, Bookmark, PostCounts, PostDetails, PostKind, PostView,
+};
 use crate::db::kv::{RedisResult, ScoreAction, SortOrder};
 use crate::db::{get_neo4j_graph, queries, GraphError, GraphResult, RedisOps};
 use crate::models::error::ModelError;
@@ -12,7 +14,6 @@ use crate::models::{
 use crate::types::{DomainTrust, Pagination, StreamReach, StreamSorting, WotDepth};
 use futures::stream::{self, StreamExt};
 use futures::TryStreamExt;
-use pubky_app_specs::PubkyAppPostKind;
 use serde::{Deserialize, Serialize};
 use tokio::task::spawn;
 use tokio::time::{timeout, Duration};
@@ -161,10 +162,10 @@ impl StreamSource {
 #[derive(Debug, Clone, PartialEq)]
 pub enum KindFilter {
     /// Only posts of exactly this kind.
-    Kind(PubkyAppPostKind),
+    Kind(PostKind),
     /// Posts of any kind except the listed ones. Posts with a missing (NULL)
     /// or unrecognized ("unknown") kind are never excluded.
-    Exclude(Vec<PubkyAppPostKind>),
+    Exclude(Vec<PostKind>),
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Debug, Default, Clone)]
@@ -433,30 +434,15 @@ impl PostStream {
         skip: Option<usize>,
         limit: Option<usize>,
     ) -> ModelResult<PostKeyStream> {
-        let Some(details) = PostDetails::get_by_id(author_id, post_id).await? else {
-            return Ok(PostKeyStream::default());
-        };
-        if !matches!(details.kind, PubkyAppPostKind::Collection) {
-            return Ok(PostKeyStream::default());
-        }
-        let items = match collection_item_keys(&details.content) {
-            Ok(items) => items,
-            Err(e) => {
-                warn!("Collection {author_id}:{post_id} envelope malformed: {e}");
-                return Ok(PostKeyStream::default());
-            }
-        };
+        // The post keys the watcher resolved from the items when it indexed the collection; items
+        // naming no post were dropped then. A post not yet indexed keeps its key, and shows once it
+        // is.
+        let items = get_collection_items(author_id, post_id).await?;
 
         let skip = skip.unwrap_or(0);
         let limit = limit.unwrap_or(usize::MAX);
 
-        // Dead refs were already dropped, so slicing cannot shorten a page.
-        let post_keys: Vec<String> = items
-            .into_iter()
-            .map(|(item_author_id, item_post_id)| format!("{item_author_id}:{item_post_id}"))
-            .skip(skip)
-            .take(limit)
-            .collect();
+        let post_keys: Vec<String> = items.iter().skip(skip).take(limit).map(item_key).collect();
 
         Ok(PostKeyStream::new(post_keys, None))
     }
@@ -1027,13 +1013,13 @@ mod tests {
     #[test]
     fn test_can_use_index_returns_false_for_any_kind_filter() {
         let kinds_to_test = [
-            PubkyAppPostKind::Short,
-            PubkyAppPostKind::Long,
-            PubkyAppPostKind::Image,
-            PubkyAppPostKind::Video,
-            PubkyAppPostKind::Link,
-            PubkyAppPostKind::File,
-            PubkyAppPostKind::Collection,
+            PostKind::Short,
+            PostKind::Long,
+            PostKind::Image,
+            PostKind::Video,
+            PostKind::Link,
+            PostKind::File,
+            PostKind::Collection,
         ];
 
         // Combinations that would normally return `true` when kind is None.

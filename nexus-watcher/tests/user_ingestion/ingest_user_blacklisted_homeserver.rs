@@ -8,12 +8,12 @@ use nexus_common::utils::test_utils::random_pubky_id;
 use nexus_watcher::events::handlers;
 use nexus_watcher::EventProcessorError;
 use pubky::Keypair;
-use pubky_app_specs::{
+use pubky_social_specs::legacy_v0::{
     post_uri_builder, tag_uri_builder,
     traits::{HashId, TimestampId},
     user_uri_builder, PubkyAppPost, PubkyAppPostEmbed, PubkyAppPostKind, PubkyAppTag, PubkyAppUser,
-    PubkyId,
 };
+use pubky_social_specs::PubkyId;
 
 /// A [`UserIngestor`] whose blacklist contains the user's HS refuses to ingest
 /// that user, returning [`ModelError::HsBlacklisted`] and leaving no graph node behind.
@@ -148,7 +148,7 @@ async fn test_reply_to_post_on_blacklisted_homeserver_is_dropped() -> Result<()>
     let ingestor = UserIngestor::new([PubkyId::from(parent_hs_pk.clone())]);
     let author_id = random_pubky_id();
     let uri = post_uri_builder(author_id.to_string(), reply_id.clone());
-    let err = handlers::post::sync_put(reply, uri, author_id, reply_id, &ingestor)
+    let err = handlers::post::sync_put(reply.into(), uri, author_id, reply_id, &ingestor)
         .await
         .expect_err("reply to a post on a blacklisted HS must fail");
 
@@ -206,7 +206,7 @@ async fn test_repost_of_post_on_blacklisted_homeserver_is_dropped() -> Result<()
     let ingestor = UserIngestor::new([PubkyId::from(original_hs_pk.clone())]);
     let author_id = random_pubky_id();
     let uri = post_uri_builder(author_id.to_string(), repost_id.clone());
-    let err = handlers::post::sync_put(repost, uri, author_id, repost_id, &ingestor)
+    let err = handlers::post::sync_put(repost.into(), uri, author_id, repost_id, &ingestor)
         .await
         .expect_err("repost of a post on a blacklisted HS must fail");
 
@@ -258,7 +258,7 @@ async fn test_tag_post_on_blacklisted_homeserver_is_dropped() -> Result<()> {
     let ingestor = UserIngestor::new([PubkyId::from(post_hs_pk.clone())]);
     let tagger_id = random_pubky_id();
     let tag_uri = tag_uri_builder(tagger_id.to_string(), tag_id.clone());
-    let err = handlers::tag::sync_put(tag, tag_uri, tagger_id, tag_id, &ingestor)
+    let err = handlers::tag::sync_put(tag.into(), tag_uri, tagger_id, tag_id, &ingestor)
         .await
         .expect_err("tag on a post hosted by a blacklisted HS must fail");
 
@@ -299,7 +299,7 @@ async fn test_tag_user_on_blacklisted_homeserver_is_dropped() -> Result<()> {
     let ingestor = UserIngestor::new([PubkyId::from(tagged_hs_pk.clone())]);
     let tagger_id = random_pubky_id();
     let tag_uri = tag_uri_builder(tagger_id.to_string(), tag_id.clone());
-    let err = handlers::tag::sync_put(tag, tag_uri, tagger_id, tag_id, &ingestor)
+    let err = handlers::tag::sync_put(tag.into(), tag_uri, tagger_id, tag_id, &ingestor)
         .await
         .expect_err("tag on a user hosted by a blacklisted HS must fail");
 

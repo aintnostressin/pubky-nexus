@@ -2,30 +2,24 @@ use chrono::Utc;
 use nexus_common::db::OperationOutcome;
 use nexus_common::models::post::Bookmark;
 use nexus_common::models::user::UserCounts;
-use pubky_app_specs::{ParsedUri, PubkyAppBookmark, PubkyId, Resource};
+use pubky_social_specs::PubkyId;
 use tracing::debug;
 
 use super::utils::post_is_collection;
+use super::BookmarkInput;
 use crate::events::EventProcessorError;
 
 #[tracing::instrument(name = "bookmark.put", skip_all, fields(user_id = %user_id, bookmark_id = %id))]
 pub async fn sync_put(
     user_id: PubkyId,
-    bookmark: PubkyAppBookmark,
+    bookmark: BookmarkInput,
     id: String,
 ) -> Result<(), EventProcessorError> {
     debug!("Indexing bookmark");
-    // Parse the URI to extract author_id and post_id using the updated parse_post_uri
-    let parsed_uri =
-        ParsedUri::try_from(bookmark.uri.as_str()).map_err(EventProcessorError::generic)?;
-    let author_id = parsed_uri.user_id;
-    let post_id = match parsed_uri.resource {
-        Resource::Post(id) => id,
-        _ => {
-            return Err(EventProcessorError::generic(
-                "Bookmarked uri is not a Post resource",
-            ))
-        }
+    let Some((author_id, post_id)) = bookmark.target.post_key() else {
+        return Err(EventProcessorError::generic(
+            "Bookmarked uri is not a Post resource",
+        ));
     };
 
     // Decide collection-follow BEFORE any write: if this lookup failed after the

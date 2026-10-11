@@ -5,11 +5,12 @@ use nexus_common::models::event::EventLine;
 use nexus_common::models::{file::FileDetails, traits::Collection};
 use nexus_watcher::events::handlers;
 use pubky::Keypair;
-use pubky_app_specs::{
+use pubky_social_specs::legacy_v0::{
     blob_uri_builder,
     traits::{HasIdPath, HashId},
-    PubkyAppBlob, PubkyAppFile, PubkyAppUser, PubkyId,
+    PubkyAppBlob, PubkyAppFile, PubkyAppUser,
 };
+use pubky_social_specs::PubkyId;
 
 #[tokio_shared_rt::test(shared)]
 async fn test_delete_pubkyapp_file() -> Result<()> {

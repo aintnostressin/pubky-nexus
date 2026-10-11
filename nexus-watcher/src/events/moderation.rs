@@ -2,10 +2,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::errors::EventProcessorError;
-use crate::events::handlers;
+use crate::events::handlers::{self, TagInput, Target};
 use nexus_common::models::user::UserIngestor;
 use nexus_common::WatcherConfig;
-use pubky_app_specs::{ParsedUri, PubkyAppTag, PubkyId, Resource};
+use pubky_social_specs::PubkyId;
 use tracing::info;
 
 pub struct Moderation {
@@ -27,56 +27,55 @@ impl Moderation {
     ///
     /// Returns `true` if the tag was applied by the moderator and matches
     /// a moderated tag label.
-    pub fn should_delete(&self, tag: &PubkyAppTag, tagger_id: &PubkyId) -> bool {
+    pub fn should_delete(&self, tag: &TagInput, tagger_id: &PubkyId) -> bool {
         tagger_id == &self.id && self.tags.contains(&tag.label)
     }
 
     /// Apply moderation to the tagged resource.
     ///
-    /// Parses the embedded URI in the moderator tag and removes the corresponding
-    /// resource (tag, user, or file). Posts are hard-deleted when edge-free or
-    /// tombstoned when engagement edges remain.
+    /// Removes the resource the moderator tag names (a tag, a post, a user profile or a file).
+    /// Posts are hard-deleted when edge-free or tombstoned when engagement edges remain.
     #[tracing::instrument(name = "moderation.apply", skip_all)]
     pub async fn apply_moderation(
         &self,
-        moderator_tag: PubkyAppTag,
+        moderator_tag: TagInput,
         files_path: &Path,
         ingestor: &UserIngestor,
     ) -> Result<(), EventProcessorError> {
-        let lahel = moderator_tag.label;
-        let moderated_uri = &moderator_tag.uri;
+        let label = moderator_tag.label;
+        let moderated = moderator_tag.target;
 
-        // ParsedUri does not handle app-specific tag storage paths (Universal Tags), so they must be intercepted first.
-        if handlers::tag::is_tag_storage_uri(&moderator_tag.uri) {
-            info!("Moderation tag '{lahel}' detected. Deleting moderated tag {moderated_uri}",);
-            return handlers::tag::del(moderated_uri).await;
-        }
-
-        // Parse the embeded URI to extract author_id and post_id using parse_tagged_post_uri
-        let parsed_uri = ParsedUri::try_from(moderator_tag.uri.as_str())
-            .map_err(EventProcessorError::generic)?;
-        let user_id = parsed_uri.user_id;
-
-        match parsed_uri.resource {
-            Resource::Post(post_id) => {
-                info!("Moderation tag '{lahel}' detected. Deleting post {user_id}:{post_id}");
+        match moderated.target {
+            Target::Tag {
+                tagger_id,
+                tag_id,
+                app,
+            } => {
+                info!(
+                    "Moderation tag '{label}' detected. Deleting moderated tag {}",
+                    moderated.uri
+                );
+                handlers::tag::del(tagger_id, tag_id, app).await
+            }
+            Target::Post { author_id, post_id } => {
+                info!("Moderation tag '{label}' detected. Deleting post {author_id}:{post_id}");
                 // Same gate as user-issued DEL events: hard-delete when edge-free, tombstone
                 // when any engagement edge remains (tags, bookmarks, replies, reposts, mentions).
-                handlers::post::del(user_id, post_id, ingestor).await
+                handlers::post::del(author_id, post_id, ingestor).await
             }
-            Resource::Tag(tag_id) => {
-                info!("Moderation tag '{lahel}' detected. Deleting tag {user_id}:{tag_id}");
-                handlers::tag::del(&moderator_tag.uri).await
-            }
-            Resource::User => {
-                info!("Moderation tag '{lahel}' detected. Deleting user profile {user_id}");
+            Target::User(user_id) => {
+                info!("Moderation tag '{label}' detected. Deleting user profile {user_id}");
                 handlers::user::del(user_id).await
             }
-            Resource::File(file_id) => {
-                info!("Moderation tag '{lahel}' detected. Deleting file {user_id}:{file_id}");
-                handlers::file::del(&user_id, file_id, files_path).await
+            Target::File { owner_id, file_id } => {
+                info!("Moderation tag '{label}' detected. Deleting file {owner_id}:{file_id}");
+                handlers::file::del(&owner_id, file_id, files_path).await
             }
-            _ => Ok(()),
+            Target::Blob { .. } | Target::Unkeyed { .. } => Ok(()),
+            Target::External => Err(EventProcessorError::generic(format!(
+                "Moderated URI names nothing Nexus indexes: {}",
+                moderated.uri
+            ))),
         }
     }
 }

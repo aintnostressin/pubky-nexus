@@ -8,10 +8,12 @@ use super::utils::{
 };
 use crate::event_processor::utils::watcher::{generate_post_id, HomeserverHashIdPath, WatcherTest};
 use anyhow::Result;
-use nexus_common::models::post::PostDetails;
+use nexus_common::db::kv::SortOrder;
+use nexus_common::models::post::{PostDetails, PostKind, PostStream, StreamSource};
+use nexus_common::types::{Pagination, StreamSorting};
 use pubky::{Keypair, ResourcePath};
-use pubky_app_specs::{
-    post_uri_builder, traits::HasIdPath, PubkyAppBookmark, PubkyAppPost, PubkyAppPostKind,
+use pubky_social_specs::legacy_v0::{
+    post_uri_builder, traits::HasIdPath, PubkyAppBookmark, PubkyAppPost,
 };
 
 /// One user with two short posts to curate.
@@ -185,7 +187,7 @@ async fn test_collection_soft_delete_uncounts_items() -> Result<()> {
     let placeholder = PostDetails::get_by_id(&f.user_id, &col_id)
         .await?
         .expect("soft-deleted placeholder still present");
-    assert_eq!(placeholder.kind, PubkyAppPostKind::Short);
+    assert_eq!(placeholder.kind, PostKind::Short);
     assert!(placeholder.deleted);
     assert_eq!(placeholder.content, "");
     assert_eq!(collections_count(&f, &f.item_a).await, 0);
@@ -285,6 +287,68 @@ async fn test_item_indexed_after_collection_links_on_next_edit() -> Result<()> {
 
     f.test.cleanup_user(&f.kp).await?;
     Ok(())
+}
+
+/// The stream lists what the collection curates, not what is linked: an item that arrives after
+/// the collection shows as soon as it is indexed, without the collection being edited.
+#[tokio_shared_rt::test(shared)]
+async fn test_item_indexed_after_collection_shows_in_its_stream() -> Result<()> {
+    let mut f = fixture("Watcher:Collected:LateStream").await?;
+    let late_id = generate_post_id();
+    let late_path: ResourcePath = PubkyAppPost::create_path(&late_id).parse()?;
+    let items = [uri(&f, &late_id), uri(&f, &f.item_a)];
+    let (col_id, _) = f
+        .test
+        .create_post(&f.kp, &collection_post_with_items("Curated", &items))
+        .await?;
+    let item_key = |post_id: &str| format!("{}:{post_id}", f.user_id);
+
+    // The item keys are stored in curator order, the missing post's included
+    assert_eq!(
+        collection_stream(&f, &col_id).await?,
+        vec![item_key(&late_id), item_key(&f.item_a)]
+    );
+
+    f.test.put(&f.kp, &late_path, &short_post("late")).await?;
+    let views = PostStream::get_posts(
+        StreamSource::Collection {
+            author_id: f.user_id.clone(),
+            post_id: col_id.clone(),
+        },
+        Pagination::default(),
+        SortOrder::Descending,
+        StreamSorting::Timeline,
+        None,
+        None,
+        None,
+    )
+    .await?
+    .expect("collection stream");
+    let ids: Vec<&str> = views
+        .0
+        .iter()
+        .map(|view| view.details.id.as_str())
+        .collect();
+    assert_eq!(ids, vec![late_id.as_str(), f.item_a.as_str()]);
+
+    f.test.cleanup_user(&f.kp).await?;
+    Ok(())
+}
+
+async fn collection_stream(f: &Fixture, col_id: &str) -> Result<Vec<String>> {
+    let keys = PostStream::get_post_keys(
+        StreamSource::Collection {
+            author_id: f.user_id.clone(),
+            post_id: col_id.to_string(),
+        },
+        Pagination::default(),
+        SortOrder::Descending,
+        StreamSorting::Timeline,
+        None,
+        None,
+    )
+    .await?;
+    Ok(keys.map(|stream| stream.post_keys).unwrap_or_default())
 }
 
 /// The spec validates URI shape only, so a collection may list itself.

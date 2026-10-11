@@ -9,10 +9,11 @@ use nexus_common::DEFAULT_MAX_FILE_SIZE;
 use nexus_watcher::events::handlers::file::sync_put;
 use nexus_watcher::EventProcessorError;
 use pubky::Keypair;
-use pubky_app_specs::traits::{HasIdPath, HashId, TimestampId};
-use pubky_app_specs::{
-    blob_uri_builder, file_uri_builder, PubkyAppBlob, PubkyAppFile, PubkyAppUser, PubkyId,
+use pubky_social_specs::legacy_v0::traits::{HasIdPath, HashId, TimestampId};
+use pubky_social_specs::legacy_v0::{
+    blob_uri_builder, file_uri_builder, PubkyAppBlob, PubkyAppFile, PubkyAppUser,
 };
+use pubky_social_specs::PubkyId;
 
 /// Creates a user on the test homeserver, uploads a blob and returns the
 /// `PubkyAppFile` pointing at it, along with the ids needed for `sync_put`.
@@ -64,7 +65,7 @@ async fn test_file_ingest_aborts_on_blacklisted_source_homeserver() -> Result<()
     let ingestor = UserIngestor::new([test.homeserver_id.clone()]);
 
     let err = sync_put(
-        file,
+        file.into(),
         file_uri,
         user_pubky_id,
         file_id.clone(),
@@ -124,7 +125,7 @@ async fn test_file_ingest_aborts_when_source_is_blacklisted_hs_pk_directly() -> 
     let ingestor = UserIngestor::new([test.homeserver_id.clone()]);
 
     let err = sync_put(
-        file,
+        file.into(),
         file_uri,
         owner_id.clone(),
         file_id.clone(),
@@ -173,7 +174,7 @@ async fn test_file_ingest_proceeds_when_source_homeserver_not_blacklisted() -> R
     let ingestor = UserIngestor::new([random_pubky_id()]);
 
     sync_put(
-        file.clone(),
+        file.clone().into(),
         file_uri,
         user_pubky_id,
         file_id.clone(),

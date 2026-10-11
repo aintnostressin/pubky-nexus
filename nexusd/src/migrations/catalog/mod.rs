@@ -3,6 +3,7 @@
 use super::manager::{Migration, MigrationManager};
 
 use collected_edges_backfill_1789344000::CollectedEdgesBackfill1789344000;
+use collection_item_keys_backfill_1791676800::CollectionItemKeysBackfill1791676800;
 use post_content_index_author_setup_1780531200::PostContentIndexAuthorSetup1780531200;
 use post_content_index_setup_1780444800::PostContentIndexSetup1780444800;
 use post_deleted_flag_1790899200::PostDeletedFlag1790899200;
@@ -33,6 +34,7 @@ pub fn import_migrations(migration_manager: &mut MigrationManager) {
         Box::new(PostDeletedFlag1790899200),
         Box::new(UriBackfill1791196997),
         Box::new(ResourceStreamKeysRetire1790208000),
+        Box::new(CollectionItemKeysBackfill1791676800),
     ];
     for migration in migrations {
         migration_manager.register(migration);
@@ -42,6 +44,7 @@ pub fn import_migrations(migration_manager: &mut MigrationManager) {
 // `db migration new` appends `pub mod …;` here.
 // pub mod tag_counts_reset_1739459180;
 pub mod collected_edges_backfill_1789344000;
+pub mod collection_item_keys_backfill_1791676800;
 pub mod post_content_index_author_setup_1780531200;
 pub mod post_content_index_setup_1780444800;
 pub mod post_deleted_flag_1790899200;

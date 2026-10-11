@@ -3,16 +3,16 @@ use crate::events::retry::RetryScheduler;
 use crate::events::{DefaultEventHandler, EventHandler};
 use crate::service::indexer::{
     KeyBasedEventProcessor, KeyBasedEventSource, PubkyKeyBasedEventSource, TEventProcessor,
-    METER_NAME,
 };
 use crate::service::runner::key_based_hs_backoff::HomeserverBackoff;
 use crate::service::stats::{ProcessedStats, ProcessorRunStatus, RunAllProcessorsStats};
+use crate::METER_NAME;
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
 use opentelemetry::global;
 use opentelemetry::metrics::{Gauge, Meter};
-use pubky_app_specs::PubkyId;
+use pubky_social_specs::PubkyId;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{watch::Receiver, Mutex};
 use tracing::{debug, info, warn};

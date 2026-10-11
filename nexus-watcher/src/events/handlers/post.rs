@@ -5,25 +5,25 @@ use nexus_common::db::{exec_single_row, execute_graph_operation, OperationOutcom
 use nexus_common::db::{queries, RedisOps};
 use nexus_common::models::notification::{Notification, PostChangedSource, PostChangedType};
 use nexus_common::models::post::{
-    collection_item_keys, sync_collected_edges, PostCounts, PostDetails, PostRelationships,
-    PostStream, POST_TOTAL_ENGAGEMENT_KEY_PARTS,
+    get_collection_items, sync_collected_edges, PostCounts, PostDetails, PostKind,
+    PostRelationships, PostStream, POST_TOTAL_ENGAGEMENT_KEY_PARTS,
 };
 use nexus_common::models::user::{UserCounts, UserIngestor};
-use pubky_app_specs::{
-    ParsedUri, PubkyAppCollectionContent, PubkyAppPost, PubkyAppPostKind, PubkyId, Resource,
-};
+use pubky_social_specs::PubkyId;
 use tracing::{debug, Instrument};
 
 use super::utils::{fail_on_blacklisted_hs, post_kind, post_relationships_is_reply};
+use super::{PostInput, Reference};
+use crate::events::translation::resolve_reference;
 
 pub async fn sync_put(
-    post: PubkyAppPost,
+    post: PostInput,
     uri: String,
     author_id: PubkyId,
     post_id: String,
     ingestor: &UserIngestor,
 ) -> Result<(), EventProcessorError> {
-    let post_details = PostDetails::from_homeserver(post.clone(), uri, &author_id, &post_id);
+    let post_details = post.clone().into_details(uri, &author_id, &post_id);
     sync_put_details(post, post_details, author_id, post_id, ingestor).await
 }
 
@@ -31,48 +31,43 @@ pub async fn sync_put(
 /// tombstone through the same edit path.
 #[tracing::instrument(name = "post.put", skip_all, fields(user_id = %author_id, post_id = %post_id))]
 async fn sync_put_details(
-    post: PubkyAppPost,
+    post: PostInput,
     post_details: PostDetails,
     author_id: PubkyId,
     post_id: String,
     ingestor: &UserIngestor,
 ) -> Result<(), EventProcessorError> {
     debug!("Indexing post");
+    // No REPLIED edge can point at a resource of another kind; such a post fails as it did when
+    // the graph write was the one to find out.
+    if post.replies_to_a_non_post() {
+        return Err(EventProcessorError::generic(
+            "Replied URI is not a Post resource",
+        ));
+    }
     // We avoid indexing replies into global feed sorted sets
     let is_reply = post.parent.is_some();
-    let is_collection = post.kind == PubkyAppPostKind::Collection;
+    let is_collection = post.kind == PostKind::Collection;
     // PRE-INDEX operation, identify the post relationship
-    let mut post_relationships = PostRelationships::from_homeserver(&post);
+    let mut post_relationships = post.relationships();
 
-    let existed = match post_details.put_to_graph(&post_relationships).await? {
+    let existed = match post_details.put_to_graph(&post.links()).await? {
         OperationOutcome::CreatedOrDeleted => false,
         OperationOutcome::Updated => true,
         OperationOutcome::MissingDependency => {
             let mut dependency_event_keys = Vec::new();
-            if let Some(replied_to_uri) = &post_relationships.replied {
-                let replied_uri_str = replied_to_uri
-                    .try_to_uri_str()
-                    .map_err(EventProcessorError::generic)?;
-                dependency_event_keys.push(replied_uri_str);
+            for (parent_uri, parent_author_id, _) in [post.replied(), post.reposted()]
+                .into_iter()
+                .flatten()
+                .filter_map(keyed_post)
+            {
+                dependency_event_keys.push(parent_uri.to_string());
 
-                // Drop the reply (non-retryable) if the replied-to post's author is on a blacklisted HS.
-                fail_on_blacklisted_hs(ingestor.maybe_ingest_author_of_post(replied_to_uri).await)?;
-            }
-            if let Some(reposted_uri) = &post_relationships.reposted {
-                let reposted_uri_str = reposted_uri
-                    .try_to_uri_str()
-                    .map_err(EventProcessorError::generic)?;
-                dependency_event_keys.push(reposted_uri_str);
-
-                // Drop the repost (non-retryable) if the reposted post's author is on a blacklisted HS.
-                fail_on_blacklisted_hs(ingestor.maybe_ingest_author_of_post(reposted_uri).await)?;
+                // Drop the reply or repost (non-retryable) if the parent's author is on a blacklisted HS.
+                fail_on_blacklisted_hs(ingestor.maybe_ingest_user(&parent_author_id).await)?;
             }
             if dependency_event_keys.is_empty() {
-                let author_uri = author_id
-                    .to_uri()
-                    .try_to_uri_str()
-                    .map_err(EventProcessorError::generic)?;
-                dependency_event_keys.push(author_uri);
+                dependency_event_keys.push(author_id.to_string());
             }
             return Err(EventProcessorError::missing_dependencies(
                 dependency_event_keys,
@@ -84,7 +79,7 @@ async fn sync_put_details(
         // If the post existed, let's confirm this is an edit. Is the content different?
         match PostDetails::get_from_index(&author_id, &post_id).await? {
             Some(existing_details) => {
-                let was_collection = existing_details.kind == PubkyAppPostKind::Collection;
+                let was_collection = existing_details.kind == PostKind::Collection;
                 // Persist the new PostDetails (incl. kind) BEFORE moving the
                 // `collections` counter. If the counter moved first and a later
                 // step failed, a retry would re-read the old kind, see the same
@@ -97,7 +92,7 @@ async fn sync_put_details(
                 // Collection -> Short flip would then read Short on both sides, skip
                 // this, and leave the old edges in the graph for good.
                 if was_collection || is_collection {
-                    let items = curated_items(&author_id, &post_id, &post_details);
+                    let items = post.collected_keys();
                     sync_collected_edges(&author_id, &post_id, &items, Some(&post_details)).await?;
                 }
                 if existing_details.is_different_than(&post_details) || kind_changed {
@@ -160,7 +155,7 @@ async fn sync_put_details(
 
     ingest_collection_item_authors(&post, ingestor).await;
     if is_collection {
-        let items = curated_items(&author_id, &post_id, &post_details);
+        let items = post.collected_keys();
         sync_collected_edges(&author_id, &post_id, &items, Some(&post_details)).await?;
     }
 
@@ -201,20 +196,9 @@ async fn sync_put_details(
     let mut reply_parent_post_key_wrapper: Option<(String, String)> = None;
 
     // PHASE 2: Process POST REPLIES indexes
-    if let Some(replied_uri) = &post_relationships.replied {
-        let parent_author_id = replied_uri.user_id.clone();
-        let parent_post_id = match replied_uri.resource.clone() {
-            Resource::Post(id) => id,
-            _ => {
-                return Err(EventProcessorError::generic(
-                    "Replied URI is not a Post resource",
-                ))
-            }
-        };
-        let replied_uri_str = replied_uri
-            .try_to_uri_str()
-            .map_err(EventProcessorError::generic)?;
-
+    if let Some((replied_uri_str, parent_author_id, parent_post_id)) =
+        post.replied().and_then(keyed_post)
+    {
         // Define the reply parent key to index the reply later
         reply_parent_post_key_wrapper =
             Some((parent_author_id.to_string(), parent_post_id.clone()));
@@ -246,7 +230,7 @@ async fn sync_put_details(
                 let parent_kind = post_kind(&parent_author_id, &parent_post_id).await?;
                 Notification::new_post_reply(
                     &author_id,
-                    &replied_uri_str,
+                    replied_uri_str,
                     &post_details.uri,
                     &parent_author_id,
                     parent_kind,
@@ -263,20 +247,9 @@ async fn sync_put_details(
     }
 
     // PHASE 3: Process POST REPOSTS indexes
-    if let Some(reposted_uri) = &post_relationships.reposted {
-        let parent_author_id = reposted_uri.user_id.clone();
-        let parent_post_id = match reposted_uri.resource.clone() {
-            Resource::Post(id) => id,
-            _ => {
-                return Err(EventProcessorError::generic(
-                    "Reposted uri is not a Post resource",
-                ))
-            }
-        };
-        let reposted_uri_str = reposted_uri
-            .try_to_uri_str()
-            .map_err(EventProcessorError::generic)?;
-
+    if let Some((reposted_uri_str, parent_author_id, parent_post_id)) =
+        post.reposted().and_then(keyed_post)
+    {
         let parent_post_key_parts: &[&str; 2] = &[&parent_author_id, &parent_post_id];
 
         let indexing_results = nexus_common::traced_join!(
@@ -298,7 +271,7 @@ async fn sync_put_details(
                 let embed_kind = post_kind(&parent_author_id, &parent_post_id).await?;
                 Notification::new_repost(
                     &author_id,
-                    &reposted_uri_str,
+                    reposted_uri_str,
                     &post_details.uri,
                     &parent_author_id,
                     embed_kind,
@@ -364,8 +337,9 @@ async fn recover_post_index_state(
             .into_iter()
             .flatten()
         {
-            if let Resource::Post(parent_post_id) = &parent.resource {
-                PostCounts::invalidate(&[&parent.user_id, parent_post_id]).await?;
+            if let Some((parent_author_id, parent_post_id)) = resolve_reference(&parent).post_key()
+            {
+                PostCounts::invalidate(&[&parent_author_id, &parent_post_id]).await?;
             }
         }
     }
@@ -374,8 +348,9 @@ async fn recover_post_index_state(
     // didn't finish. Skips notifications (0 > N on retry).
     merge_mention_edges(author_id, post_id, &post_details.content).await?;
 
-    // Same for COLLECTED edges; a non-collection also clears edges left by a kind flip.
-    let items = curated_items(author_id, post_id, &post_details);
+    // Same for COLLECTED edges, from the item keys the graph write stored; a non-collection has
+    // none, which also clears edges left by a kind flip.
+    let items = get_collection_items(author_id, post_id).await?;
     sync_collected_edges(author_id, post_id, &items, Some(&post_details)).await?;
 
     // Reindex all Redis state from graph truth.
@@ -393,13 +368,13 @@ async fn recover_post_index_state(
 }
 
 async fn sync_edit(
-    post: &PubkyAppPost,
+    post: &PostInput,
     author_id: PubkyId,
     post_id: String,
     post_details: PostDetails,
     ingestor: &UserIngestor,
     notify: bool,
-    was_kind: PubkyAppPostKind,
+    was_kind: PostKind,
 ) -> Result<(), EventProcessorError> {
     // Refresh the cached details (always, even for a lock-only toggle).
     post_details.put_to_index(&author_id, None, true).await?;
@@ -438,13 +413,11 @@ async fn sync_edit(
     .await?;
 
     // Handle "A reply to your post was edited/deleted"
-    if let Some(parent) = &post.parent {
-        let parsed_parent =
-            ParsedUri::try_from(parent.as_str()).map_err(EventProcessorError::generic)?;
+    if let Some((parent, parent_author_id, _)) = post.replied().and_then(keyed_post) {
         Notification::post_children_changed(
             &author_id,
             parent,
-            &parsed_parent.user_id,
+            &parent_author_id,
             &post_details.uri,
             PostChangedSource::Reply,
             &change_type,
@@ -463,7 +436,7 @@ pub async fn put_mentioned_relationships(
     post_uri: &str,
     content: &str,
     relationships: &mut PostRelationships,
-    post_kind: PubkyAppPostKind,
+    post_kind: PostKind,
 ) -> Result<(), EventProcessorError> {
     // TODO Deprecate, drop support for pk: support in an upcoming release
     // Backwards compatibility: identify user references with "pk:" prefix
@@ -500,7 +473,7 @@ async fn put_mentioned_relationships_for_prefix(
     content: &str,
     relationships: &mut PostRelationships,
     prefix: &str,
-    post_kind: PubkyAppPostKind,
+    post_kind: PostKind,
 ) -> Result<(), EventProcessorError> {
     for pubky_id in find_mentioned_ids(content, prefix) {
         // Create the MENTIONED relationship in the graph
@@ -548,44 +521,30 @@ async fn merge_mention_edges(
     Ok(())
 }
 
-/// The post keys a Collection curates; none for any other kind.
-fn curated_items(
-    author_id: &PubkyId,
-    post_id: &str,
-    post_details: &PostDetails,
-) -> Vec<(PubkyId, String)> {
-    if post_details.kind != PubkyAppPostKind::Collection {
-        return Vec::new();
-    }
-    // PUTs are spec-validated, but recovery reads the graph, which may hold an
-    // envelope written under an older spec.
-    collection_item_keys(&post_details.content)
-        .inspect_err(|e| tracing::warn!("Collection {author_id}:{post_id} envelope malformed: {e}"))
-        .unwrap_or_default()
+/// The key of a stored reply or repost link, which names a post.
+fn stored_parent_key(uri: &str) -> Result<(PubkyId, String), EventProcessorError> {
+    resolve_reference(uri)
+        .post_key()
+        .ok_or_else(|| EventProcessorError::generic(format!("Parent uri is not a Post: {uri}")))
 }
 
-/// Best-effort ingestion of the user of every URI in a Collection's
-/// `items` envelope. No-op for non-Collection posts; failures (malformed URI,
-/// blacklisted HS) are logged and skipped so the Collection is still indexed.
-async fn ingest_collection_item_authors(post: &PubkyAppPost, ingestor: &UserIngestor) {
-    if post.kind != PubkyAppPostKind::Collection {
-        return;
-    }
-    let Ok(envelope) = serde_json::from_str::<PubkyAppCollectionContent>(&post.content) else {
-        tracing::warn!("Collection user ingestion: unparseable content envelope, skipping");
-        return;
-    };
+/// A reference naming a post: the URI as written, then the post's key.
+fn keyed_post(reference: &Reference) -> Option<(&str, PubkyId, String)> {
+    let (author_id, post_id) = reference.post_key()?;
+    Some((&reference.uri, author_id, post_id))
+}
 
-    for item_uri in &envelope.items {
-        match ParsedUri::try_from(item_uri.as_str()) {
-            Ok(parsed) => {
-                if let Err(e) = ingestor.maybe_ingest_user(&parsed.user_id).await {
-                    tracing::warn!("Failed to ingest collection item author {item_uri}: {e}");
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Collection user ingestion: skipping malformed item {item_uri}: {e}")
-            }
+/// Best-effort ingestion of the user of every item a Collection curates; other kinds curate
+/// nothing. Failures (an item naming no user, a blacklisted HS) are logged and skipped so the
+/// Collection is still indexed.
+async fn ingest_collection_item_authors(post: &PostInput, ingestor: &UserIngestor) {
+    for item in &post.items {
+        let Some(owner_id) = item.target.owner_id() else {
+            tracing::warn!("Collection user ingestion: skipping item {}", item.uri);
+            continue;
+        };
+        if let Err(e) = ingestor.maybe_ingest_user(owner_id).await {
+            tracing::warn!("Failed to ingest collection item author {}: {e}", item.uri);
         }
     }
 }
@@ -618,20 +577,21 @@ pub async fn del(
             let existing_relationships = PostRelationships::get_by_id(&author_id, &post_id).await?;
             let parent = existing_relationships
                 .and_then(|rel| rel.replied)
-                .and_then(|replied_uri| replied_uri.try_to_uri_str().ok());
+                .map(|replied_uri| resolve_reference(&replied_uri));
 
             // A cleared Short flagged `deleted`, still a reply if it was one already.
-            let tombstone = PubkyAppPost {
+            let tombstone = PostInput {
                 content: String::new(),
                 parent,
                 embed: None,
-                kind: PubkyAppPostKind::Short,
+                kind: PostKind::Short,
                 attachments: None,
                 lock: None,
+                items: Vec::new(),
             };
             let tombstone_details = PostDetails {
                 deleted: true,
-                ..PostDetails::from_homeserver(tombstone.clone(), uri, &author_id, &post_id)
+                ..tombstone.clone().into_details(uri, &author_id, &post_id)
             };
 
             // The tombstone keeps the `parent` of a deleted reply, so re-PUT may
@@ -664,9 +624,9 @@ pub async fn sync_del(
     let deleted_kind = if post_in_index {
         post_kind(&author_id, &post_id).await?
     } else {
-        PubkyAppPostKind::Unknown
+        PostKind::Unknown
     };
-    let is_collection = deleted_kind == PubkyAppPostKind::Collection;
+    let is_collection = deleted_kind == PostKind::Collection;
 
     // 2. Atomically commit the cleanup decision: remove the gate as the very
     //    first mutation. Subsequent retries will observe `post_in_index = false`
@@ -726,19 +686,8 @@ pub async fn sync_del(
     if let Some(relationships) = post_relationships_opt {
         // PHASE 2: Process POST REPLIES indexes
         // Decrement counts for parent post if replied
-        if let Some(replied_uri) = relationships.replied {
-            let parent_user_id = replied_uri.user_id.clone();
-            let parent_post_id = match replied_uri.resource.clone() {
-                Resource::Post(id) => id,
-                _ => {
-                    return Err(EventProcessorError::generic(
-                        "Replied uri is not a Post resource",
-                    ))
-                }
-            };
-            let replied_uri_str = replied_uri
-                .try_to_uri_str()
-                .map_err(EventProcessorError::generic)?;
+        if let Some(replied_uri_str) = relationships.replied {
+            let (parent_user_id, parent_post_id) = stored_parent_key(&replied_uri_str)?;
 
             let parent_post_key_parts: [&str; 2] = [&parent_user_id, &parent_post_id];
             reply_parent_post_key_wrapper =
@@ -787,22 +736,12 @@ pub async fn sync_del(
         }
         // PHASE 3: Process POST REPOSTED indexes
         // Decrement counts for resposted post if existed
-        if let Some(reposted_uri) = relationships.reposted {
-            let parent_post_id = match reposted_uri.resource.clone() {
-                Resource::Post(id) => id,
-                _ => {
-                    return Err(EventProcessorError::generic(
-                        "Reposted uri is not a Post resource",
-                    ))
-                }
-            };
-            let reposted_uri_str = reposted_uri
-                .try_to_uri_str()
-                .map_err(EventProcessorError::generic)?;
+        if let Some(reposted_uri_str) = relationships.reposted {
+            let (reposted_author_id, parent_post_id) = stored_parent_key(&reposted_uri_str)?;
 
-            let parent_post_key_parts: &[&str] = &[&reposted_uri.user_id, &parent_post_id];
+            let parent_post_key_parts: &[&str] = &[&reposted_author_id, &parent_post_id];
             // Parent repost count changes; invalidated after the graph delete below.
-            parents_to_invalidate.push([reposted_uri.user_id.to_string(), parent_post_id.clone()]);
+            parents_to_invalidate.push([reposted_author_id.to_string(), parent_post_id.clone()]);
 
             let indexing_results = nexus_common::traced_join!(
                 tracing::info_span!("index.delete", phase = "repost_parent");
@@ -811,7 +750,7 @@ pub async fn sync_del(
                     // if absent, leaking a reply parent into POST_TOTAL_ENGAGEMENT
                     // with a negative score.
                     if post_in_index
-                        && !post_relationships_is_reply(&reposted_uri.user_id, &parent_post_id).await?
+                        && !post_relationships_is_reply(&reposted_author_id, &parent_post_id).await?
                     {
                         PostStream::decrement_score_index_sorted_set(
                             &POST_TOTAL_ENGAGEMENT_KEY_PARTS,
@@ -827,7 +766,7 @@ pub async fn sync_del(
                         Notification::post_children_changed(
                             &author_id,
                             &reposted_uri_str,
-                            &reposted_uri.user_id,
+                            &reposted_author_id,
                             &deleted_uri,
                             PostChangedSource::Repost,
                             &PostChangedType::Deleted,
