@@ -14,7 +14,7 @@ pub use collection::{collection_item_keys, sync_collected_edges};
 pub use counts::PostCounts;
 pub use details::PostDetails;
 pub use kind::PostKind;
-pub use relationships::PostRelationships;
+pub use relationships::{PostLinks, PostRelationships};
 pub use search::PostsByContentSearch;
 pub use stream::{
     KindFilter, PostKeyStream, PostStream, StreamSource, POST_PER_USER_KEY_PARTS,

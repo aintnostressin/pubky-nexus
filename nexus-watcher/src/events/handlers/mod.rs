@@ -7,4 +7,4 @@ pub mod tag;
 pub mod user;
 pub mod utils;
 
-pub use input::{BookmarkInput, FileInput, PostInput, TagInput, UserInput};
+pub use input::{BookmarkInput, FileInput, PostInput, Reference, TagInput, Target, UserInput};

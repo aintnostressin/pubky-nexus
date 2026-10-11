@@ -1,7 +1,8 @@
 //! The explicit layer between an event and its handler: [`route`] classifies the URI by epoch,
 //! [`skip_reason`] picks the routed events parsing skips before any fetch, [`is_canonical`] the
 //! alias paths it rejects, and [`translate_put`] and [`translate_del`] turn a routed event into the
-//! handler call that indexes it. Pure functions: no I/O, no database, no homeserver.
+//! handler call that indexes it. [`resolve_reference`] reads every URI an object points at, so no
+//! other code parses a spec's URI grammar. Pure functions: no I/O, no database, no homeserver.
 //!
 //! No translation failure can change on a retry, so each is an error the retry queue drops: a
 //! route or resource translation cannot handle is `InvalidEventLine`, a payload the reader rejects
@@ -9,13 +10,16 @@
 
 mod legacy;
 mod route;
+mod social;
 #[cfg(test)]
 pub(super) mod test_support;
 
 pub use route::{route, EventRoute, UNKNOWN_LABEL};
 
 use crate::errors::EventProcessorError;
-use crate::events::handlers::{BookmarkInput, FileInput, PostInput, TagInput, UserInput};
+use crate::events::handlers::{
+    BookmarkInput, FileInput, PostInput, Reference, TagInput, Target, UserInput,
+};
 use pubky_social_specs::PubkyId;
 
 /// Why an event is deliberately left unhandled.
@@ -137,6 +141,21 @@ pub fn is_canonical(route: &EventRoute, uri: &str) -> bool {
     }
 }
 
+/// Resolves a URI an object points at with the router event paths take, so each reference is read
+/// by its own epoch's parser, whichever epoch wrote the object holding it. A URI no parser reads,
+/// a bare `pubky://<pk>` included, names nothing Nexus reads.
+pub fn resolve_reference(uri: &str) -> Reference {
+    let target = match route(uri) {
+        EventRoute::Legacy(parsed) => legacy::target(&parsed),
+        EventRoute::Social { parsed, .. } => social::target(&parsed),
+        EventRoute::UnsupportedEpoch { .. } | EventRoute::Malformed { .. } => Target::External,
+    };
+    Reference {
+        uri: uri.to_string(),
+        target,
+    }
+}
+
 /// Reads the fetched `bytes` of a PUT with its epoch's reader. `uri` is the event URI as received,
 /// which the file handler stores.
 pub fn translate_put(
@@ -170,7 +189,7 @@ fn untranslatable_route_error(uri: &str) -> EventProcessorError {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{host, other, uri, HASH, OTHER, TS};
+    use super::test_support::{host, other, uri, HASH, HOST, OTHER, TS};
     use super::*;
     use base32::{encode, Alphabet};
     use chrono::Utc;
@@ -531,6 +550,118 @@ mod tests {
                 TranslatedDel::Skip { reason } => assert_eq!(reason, expected, "{path}"),
                 other => panic!("{path}: expected Skip, got {other:?}"),
             }
+        }
+    }
+
+    /// What a reference names; it keeps the URI exactly as written.
+    fn target(reference: &str) -> Target {
+        let resolved = resolve_reference(reference);
+        assert_eq!(resolved.uri, reference);
+        resolved.target
+    }
+
+    #[test]
+    fn references_in_either_epoch_resolve_to_what_they_name() {
+        let post = || Target::Post {
+            author_id: host(),
+            post_id: TS.into(),
+        };
+        let cases = [
+            (format!("pub/pubky.app/posts/{TS}"), post()),
+            ("pub/pubky.app/profile.json".into(), Target::User(host())),
+            (
+                format!("pub/pubky.app/files/{TS}"),
+                Target::File {
+                    owner_id: host(),
+                    file_id: TS.into(),
+                },
+            ),
+            (
+                format!("pub/pubky.app/blobs/{HASH}"),
+                Target::Blob {
+                    owner_id: host(),
+                    blob_id: HASH.into(),
+                },
+            ),
+            (
+                format!("pub/pubky.app/tags/{HASH}"),
+                Target::Tag {
+                    tagger_id: host(),
+                    tag_id: HASH.into(),
+                    app: None,
+                },
+            ),
+            (
+                "pub/mapky/tags/ABC123".into(),
+                Target::Tag {
+                    tagger_id: host(),
+                    tag_id: "ABC123".into(),
+                    app: Some("mapky".into()),
+                },
+            ),
+            (
+                format!("pub/pubky.app/follows/{OTHER}"),
+                Target::Unkeyed { owner_id: host() },
+            ),
+            (
+                "pub/pubky.app/widgets/ABC".into(),
+                Target::Unkeyed { owner_id: host() },
+            ),
+            // A v1 reference names the post, whether versionless or a version file
+            (format!("pub/social/v1/posts/{TS}"), post()),
+            (format!("pub/social/v1/posts/{TS}/{TS}.json"), post()),
+            ("pub/social/v1/profile.json".into(), Target::User(host())),
+            (
+                format!("pub/social/v1/files/{HASH}.png"),
+                Target::File {
+                    owner_id: host(),
+                    file_id: HASH.into(),
+                },
+            ),
+            (
+                format!("pub/social/v1/tags/{HASH}.json"),
+                Target::Tag {
+                    tagger_id: host(),
+                    tag_id: HASH.into(),
+                    app: None,
+                },
+            ),
+            (
+                format!("pub/social/v1/follows/{OTHER}.json"),
+                Target::Unkeyed { owner_id: host() },
+            ),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(target(&uri(&path)), expected, "{path}");
+        }
+    }
+
+    /// A trailing segment does not change what a v0 reference names, and the URI stays as written.
+    #[test]
+    fn a_sloppy_v0_reference_names_its_post() {
+        assert_eq!(
+            target(&uri(&format!("pub/pubky.app/posts/{TS}/"))),
+            Target::Post {
+                author_id: host(),
+                post_id: TS.into(),
+            }
+        );
+    }
+
+    #[test]
+    fn references_naming_nothing_nexus_reads_are_external() {
+        let references = [
+            "https://example.com/article".to_string(),
+            "nostr:note1abc123".to_string(),
+            "not a uri".to_string(),
+            // A bare key is v1's user reference; it waits for a v1 reader to need it.
+            format!("pubky://{HOST}"),
+            uri("pub/eventky.app/events/E001"),
+            uri(&format!("pub/social/v2/posts/{TS}")),
+            uri("pub/social/tags/ABC"),
+        ];
+        for reference in references {
+            assert_eq!(target(&reference), Target::External, "{reference}");
         }
     }
 
