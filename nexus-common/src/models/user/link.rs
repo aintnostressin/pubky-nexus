@@ -1,4 +1,3 @@
-use pubky_social_specs::legacy_v0::PubkyAppUserLink;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -12,59 +11,47 @@ pub struct UserLink {
     pub url: String,
 }
 
-impl From<PubkyAppUserLink> for UserLink {
-    fn from(link: PubkyAppUserLink) -> Self {
-        Self {
-            title: link.title,
-            url: link.url,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use utoipa::PartialSchema;
 
-    fn legacy() -> PubkyAppUserLink {
-        PubkyAppUserLink {
-            title: "Website".into(),
-            url: "https://example.com".into(),
-        }
-    }
-
-    #[test]
-    fn from_legacy_copies_the_fields() {
-        let link = UserLink::from(legacy());
-        assert_eq!(link.title, "Website");
-        assert_eq!(link.url, "https://example.com");
-    }
+    const JSON: &str = r#"{"title":"Website","url":"https://example.com"}"#;
 
     /// `create_user` stores the links as this JSON string in the graph.
     #[test]
-    fn serializes_like_legacy() {
-        let owned = Some(vec![UserLink::from(legacy())]);
-        let legacy = Some(vec![legacy()]);
+    fn serializes_as_title_and_url() {
+        let link = UserLink {
+            title: "Website".into(),
+            url: "https://example.com".into(),
+        };
+        assert_eq!(serde_json::to_string(&link).unwrap(), JSON);
+    }
+
+    #[test]
+    fn deserializes_title_and_url() {
+        let link: UserLink = serde_json::from_str(JSON).unwrap();
         assert_eq!(
-            serde_json::to_string(&owned).unwrap(),
-            serde_json::to_string(&legacy).unwrap()
+            (link.title.as_str(), link.url.as_str()),
+            ("Website", "https://example.com")
         );
     }
 
+    /// The v0 component name and schema, so the OpenAPI document does not change.
     #[test]
-    fn deserializes_like_legacy() {
-        let json = r#"{"title":"Website","url":"https://example.com"}"#;
-        let owned: UserLink = serde_json::from_str(json).unwrap();
-        let legacy: PubkyAppUserLink = serde_json::from_str(json).unwrap();
-        assert_eq!((owned.title, owned.url), (legacy.title, legacy.url));
-    }
-
-    #[test]
-    fn schema_matches_legacy() {
-        assert_eq!(UserLink::name(), PubkyAppUserLink::name());
+    fn schema_is_the_v0_one() {
+        assert_eq!(<UserLink as utoipa::ToSchema>::name(), "PubkyAppUserLink");
         assert_eq!(
             serde_json::to_value(UserLink::schema()).unwrap(),
-            serde_json::to_value(PubkyAppUserLink::schema()).unwrap()
+            serde_json::json!({
+                "type": "object",
+                "description": "Represents a user's single link with a title and URL.",
+                "required": ["title", "url"],
+                "properties": {
+                    "title": {"type": "string"},
+                    "url": {"type": "string"}
+                }
+            })
         );
     }
 }
