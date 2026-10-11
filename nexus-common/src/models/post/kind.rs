@@ -1,4 +1,3 @@
-use pubky_social_specs::legacy_v0::PubkyAppPostKind;
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use utoipa::ToSchema;
@@ -51,123 +50,85 @@ impl FromStr for PostKind {
     }
 }
 
-impl From<PubkyAppPostKind> for PostKind {
-    fn from(kind: PubkyAppPostKind) -> Self {
-        match kind {
-            PubkyAppPostKind::Short => PostKind::Short,
-            PubkyAppPostKind::Long => PostKind::Long,
-            PubkyAppPostKind::Image => PostKind::Image,
-            PubkyAppPostKind::Video => PostKind::Video,
-            PubkyAppPostKind::Link => PostKind::Link,
-            PubkyAppPostKind::File => PostKind::File,
-            PubkyAppPostKind::Collection => PostKind::Collection,
-            PubkyAppPostKind::Unknown => PostKind::Unknown,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use utoipa::PartialSchema;
 
-    /// Names both enums must read alike: every wire name, names neither knows, a miscased name and
-    /// the empty string.
-    const INPUTS: [&str; 12] = [
-        "short",
-        "long",
-        "image",
-        "video",
-        "link",
-        "file",
-        "collection",
-        "unknown",
-        "note",
-        "article",
-        "Short",
-        "",
+    /// Every variant and the wire name it writes, the v0 names Redis, Neo4j and the API hold.
+    const ALL: [(PostKind, &str); 8] = [
+        (PostKind::Short, "short"),
+        (PostKind::Long, "long"),
+        (PostKind::Image, "image"),
+        (PostKind::Video, "video"),
+        (PostKind::Link, "link"),
+        (PostKind::File, "file"),
+        (PostKind::Collection, "collection"),
+        (PostKind::Unknown, "unknown"),
     ];
 
-    /// Every variant next to its v0 counterpart and the wire name both must write.
-    fn all() -> [(PostKind, PubkyAppPostKind, &'static str); 8] {
-        [
-            (PostKind::Short, PubkyAppPostKind::Short, "short"),
-            (PostKind::Long, PubkyAppPostKind::Long, "long"),
-            (PostKind::Image, PubkyAppPostKind::Image, "image"),
-            (PostKind::Video, PubkyAppPostKind::Video, "video"),
-            (PostKind::Link, PubkyAppPostKind::Link, "link"),
-            (PostKind::File, PubkyAppPostKind::File, "file"),
-            (
-                PostKind::Collection,
-                PubkyAppPostKind::Collection,
-                "collection",
-            ),
-            (PostKind::Unknown, PubkyAppPostKind::Unknown, "unknown"),
-        ]
-    }
+    /// Names no variant writes: the catch-all's own name, other epochs' names, a miscased name and
+    /// the empty string.
+    const UNKNOWN_NAMES: [&str; 5] = ["unknown", "note", "article", "Short", ""];
 
     #[test]
-    fn from_legacy_maps_name_for_name() {
-        for (owned, legacy, _) in all() {
-            assert_eq!(PostKind::from(legacy), owned);
+    fn serializes_to_the_wire_name() {
+        for (kind, wire) in ALL {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{wire}\""));
         }
     }
 
     #[test]
-    fn serializes_to_the_legacy_wire_name() {
-        for (owned, legacy, wire) in all() {
-            let json = serde_json::to_string(&owned).unwrap();
-            assert_eq!(json, serde_json::to_string(&legacy).unwrap());
-            assert_eq!(json, format!("\"{wire}\""));
+    fn deserializes_unknown_names_to_unknown() {
+        for (kind, wire) in ALL {
+            let read: PostKind = serde_json::from_str(&format!("\"{wire}\"")).unwrap();
+            assert_eq!(read, kind, "{wire:?}");
         }
-    }
-
-    #[test]
-    fn deserializes_like_legacy() {
-        for input in INPUTS {
-            let json = format!("\"{input}\"");
-            let owned: PostKind = serde_json::from_str(&json).unwrap();
-            let legacy: PubkyAppPostKind = serde_json::from_str(&json).unwrap();
-            assert_eq!(owned, PostKind::from(legacy), "{input:?}");
+        for name in UNKNOWN_NAMES {
+            let read: PostKind = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(read, PostKind::Unknown, "{name:?}");
         }
     }
 
     /// `put.rs` stores both `to_string()` and the trimmed `serde_json::to_string`; all must agree.
     #[test]
-    fn displays_like_legacy() {
-        for (owned, legacy, wire) in all() {
-            assert_eq!(owned.to_string(), legacy.to_string());
-            assert_eq!(owned.to_string(), wire);
+    fn displays_the_wire_name() {
+        for (kind, wire) in ALL {
+            assert_eq!(kind.to_string(), wire);
             assert_eq!(
-                serde_json::to_string(&owned).unwrap().trim_matches('"'),
-                owned.to_string()
+                serde_json::to_string(&kind).unwrap().trim_matches('"'),
+                kind.to_string()
             );
         }
     }
 
+    /// Strict, as in v0: the catch-all is not a name a caller can ask for.
     #[test]
-    fn parses_like_legacy() {
-        for input in INPUTS {
-            let owned = input.parse::<PostKind>();
-            let legacy = input.parse::<PubkyAppPostKind>().map(PostKind::from);
-            assert_eq!(owned, legacy, "{input:?}");
+    fn parses_only_the_named_kinds() {
+        for (kind, wire) in &ALL[..7] {
+            assert_eq!(wire.parse::<PostKind>().as_ref(), Ok(kind));
+        }
+        for name in UNKNOWN_NAMES {
+            assert!(name.parse::<PostKind>().is_err(), "{name:?}");
         }
     }
 
     #[test]
-    fn default_is_legacy_default() {
-        assert_eq!(
-            PostKind::default(),
-            PostKind::from(PubkyAppPostKind::default())
-        );
+    fn default_is_short() {
+        assert_eq!(PostKind::default(), PostKind::Short);
     }
 
+    /// The v0 component name and schema, so the OpenAPI document does not change.
     #[test]
-    fn schema_matches_legacy() {
-        assert_eq!(PostKind::name(), PubkyAppPostKind::name());
+    fn schema_is_the_v0_one() {
+        assert_eq!(<PostKind as utoipa::ToSchema>::name(), "PubkyAppPostKind");
         assert_eq!(
             serde_json::to_value(PostKind::schema()).unwrap(),
-            serde_json::to_value(PubkyAppPostKind::schema()).unwrap()
+            serde_json::json!({
+                "type": "string",
+                "description": "Represents the type of pubky-app posted data\nUsed primarily to best display the content in UI",
+                "enum": ["short", "long", "image", "video", "link", "file", "collection", "unknown"]
+            })
         );
     }
 }

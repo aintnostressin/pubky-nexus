@@ -5,9 +5,11 @@
 use super::{resolve_reference, SkipReason, TranslatedDel, TranslatedPut};
 use crate::errors::EventProcessorError;
 use crate::events::handlers::{BookmarkInput, FileInput, PostInput, TagInput, Target, UserInput};
+use nexus_common::models::post::PostKind;
+use nexus_common::models::user::UserLink;
 use pubky_social_specs::legacy_v0::{
-    ExtendedParsedUri, PubkyAppBookmark, PubkyAppFile, PubkyAppObject, PubkyAppPost, PubkyAppTag,
-    PubkyAppUser, Resource,
+    ExtendedParsedUri, PubkyAppBookmark, PubkyAppFile, PubkyAppObject, PubkyAppPost,
+    PubkyAppPostKind, PubkyAppTag, PubkyAppUser, PubkyAppUserLink, Resource,
 };
 
 pub(super) fn skip_reason(
@@ -221,11 +223,32 @@ fn unknown_resource(uri: &str) -> EventProcessorError {
     EventProcessorError::InvalidEventLine(format!("Unknown resource in URI: {uri}"))
 }
 
+/// The owned kind of a v0 kind, name for name.
+fn post_kind(kind: PubkyAppPostKind) -> PostKind {
+    match kind {
+        PubkyAppPostKind::Short => PostKind::Short,
+        PubkyAppPostKind::Long => PostKind::Long,
+        PubkyAppPostKind::Image => PostKind::Image,
+        PubkyAppPostKind::Video => PostKind::Video,
+        PubkyAppPostKind::Link => PostKind::Link,
+        PubkyAppPostKind::File => PostKind::File,
+        PubkyAppPostKind::Collection => PostKind::Collection,
+        PubkyAppPostKind::Unknown => PostKind::Unknown,
+    }
+}
+
+fn user_link(link: PubkyAppUserLink) -> UserLink {
+    UserLink {
+        title: link.title,
+        url: link.url,
+    }
+}
+
 impl From<PubkyAppPost> for PostInput {
     fn from(post: PubkyAppPost) -> Self {
         Self {
             content: post.content,
-            kind: post.kind.into(),
+            kind: post_kind(post.kind),
             parent: post.parent.as_deref().map(resolve_reference),
             embed: post.embed.map(|embed| resolve_reference(&embed.uri)),
             attachments: post.attachments,
@@ -250,7 +273,7 @@ impl From<PubkyAppUser> for UserInput {
             image: user.image,
             links: user
                 .links
-                .map(|links| links.into_iter().map(Into::into).collect()),
+                .map(|links| links.into_iter().map(user_link).collect()),
             status: user.status,
         }
     }
@@ -411,5 +434,70 @@ mod tests {
         assert_eq!(file.content_type, "image/png");
         assert_eq!(file.size, 3);
         assert_eq!(file.created_at, 1);
+    }
+
+    /// Every v0 kind, a copy of each Nexus owns.
+    const V0_KINDS: [PubkyAppPostKind; 8] = [
+        PubkyAppPostKind::Short,
+        PubkyAppPostKind::Long,
+        PubkyAppPostKind::Image,
+        PubkyAppPostKind::Video,
+        PubkyAppPostKind::Link,
+        PubkyAppPostKind::File,
+        PubkyAppPostKind::Collection,
+        PubkyAppPostKind::Unknown,
+    ];
+
+    /// The owned kind writes, displays, reads and parses like the v0 kind it maps from, so the
+    /// stored and served names cannot drift from v0's.
+    #[test]
+    fn owned_post_kind_behaves_like_v0() {
+        for legacy in V0_KINDS {
+            let owned = post_kind(legacy.clone());
+            assert_eq!(
+                serde_json::to_string(&owned).unwrap(),
+                serde_json::to_string(&legacy).unwrap()
+            );
+            assert_eq!(owned.to_string(), legacy.to_string());
+        }
+        let names = [
+            "short",
+            "long",
+            "image",
+            "video",
+            "link",
+            "file",
+            "collection",
+            "unknown",
+            "note",
+            "article",
+            "Short",
+            "",
+        ];
+        for name in names {
+            let json = format!("\"{name}\"");
+            let owned: PostKind = serde_json::from_str(&json).unwrap();
+            let legacy: PubkyAppPostKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(owned, post_kind(legacy), "{name:?}");
+            assert_eq!(
+                name.parse::<PostKind>(),
+                name.parse::<PubkyAppPostKind>().map(post_kind),
+                "{name:?}"
+            );
+        }
+        assert_eq!(PostKind::default(), post_kind(PubkyAppPostKind::default()));
+    }
+
+    #[test]
+    fn owned_user_link_writes_like_v0() {
+        let legacy = PubkyAppUserLink {
+            title: "Website".into(),
+            url: "https://example.com".into(),
+        };
+        let owned = user_link(legacy.clone());
+        assert_eq!(
+            serde_json::to_string(&owned).unwrap(),
+            serde_json::to_string(&legacy).unwrap()
+        );
     }
 }
