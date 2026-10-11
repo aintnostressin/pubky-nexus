@@ -30,7 +30,7 @@ const FETCH_EVENTS_429_BACKOFF_SECS: [u64; 3] = [1, 2, 3];
 /// earlier event in the same batch. The whole batch is rejected before any handler
 /// runs. Labelled by `hs_id` only to avoid per-user metric cardinality.
 static OUT_OF_ORDER_CURSOR_EXTERNAL_HS: LazyLock<Counter<u64>> = LazyLock::new(|| {
-    global::meter(super::METER_NAME)
+    global::meter(crate::METER_NAME)
         .u64_counter("watcher.external_hs.cursor.out_of_order")
         .with_description("Per-user stream events a homeserver returned out of cursor order")
         .build()

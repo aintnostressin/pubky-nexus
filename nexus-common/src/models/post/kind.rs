@@ -71,6 +71,23 @@ mod tests {
     use super::*;
     use utoipa::PartialSchema;
 
+    /// Names both enums must read alike: every wire name, names neither knows, a miscased name and
+    /// the empty string.
+    const INPUTS: [&str; 12] = [
+        "short",
+        "long",
+        "image",
+        "video",
+        "link",
+        "file",
+        "collection",
+        "unknown",
+        "note",
+        "article",
+        "Short",
+        "",
+    ];
+
     /// Every variant next to its v0 counterpart and the wire name both must write.
     fn all() -> [(PostKind, PubkyAppPostKind, &'static str); 8] {
         [
@@ -107,21 +124,7 @@ mod tests {
 
     #[test]
     fn deserializes_like_legacy() {
-        let inputs = [
-            "short",
-            "long",
-            "image",
-            "video",
-            "link",
-            "file",
-            "collection",
-            "unknown",
-            "note",
-            "article",
-            "Short",
-            "",
-        ];
-        for input in inputs {
+        for input in INPUTS {
             let json = format!("\"{input}\"");
             let owned: PostKind = serde_json::from_str(&json).unwrap();
             let legacy: PubkyAppPostKind = serde_json::from_str(&json).unwrap();
@@ -144,20 +147,7 @@ mod tests {
 
     #[test]
     fn parses_like_legacy() {
-        let inputs = [
-            "short",
-            "long",
-            "image",
-            "video",
-            "link",
-            "file",
-            "collection",
-            "unknown",
-            "Short",
-            "note",
-            "",
-        ];
-        for input in inputs {
+        for input in INPUTS {
             let owned = input.parse::<PostKind>();
             let legacy = input.parse::<PubkyAppPostKind>().map(PostKind::from);
             assert_eq!(owned, legacy, "{input:?}");

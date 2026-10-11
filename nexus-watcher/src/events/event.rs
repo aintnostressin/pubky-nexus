@@ -1,11 +1,10 @@
-use super::translation::{self, EventRoute, SkipReason};
+use super::translation::{self, EventRoute, SkipReason, UNKNOWN_LABEL};
 use crate::errors::EventProcessorError;
-use crate::service::indexer::METER_NAME;
+use crate::METER_NAME;
 use nexus_common::models::event::EventLine;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky::Event as StreamEvent;
-use pubky_social_specs::legacy_v0::{ExtendedParsedUri, Resource};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::LazyLock;
@@ -13,7 +12,7 @@ use tracing::{debug, warn};
 
 /// Counter for events skipped before any fetch because their `social` epoch is not indexed.
 /// Labelled by `epoch` and `resource` kind only, never by user or object id.
-static SKIPPED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+static EPOCH_SKIPPED: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter(METER_NAME)
         .u64_counter("watcher.events.skipped")
         .with_description(
@@ -142,66 +141,24 @@ impl Event {
         uri: String,
         event_line: String,
     ) -> Result<ParseResult, EventProcessorError> {
-        let route = translation::route(&uri);
-
-        let skip = match &route {
-            EventRoute::Legacy(ExtendedParsedUri::PubkyApp { resource, .. }) => match resource {
-                Resource::Unknown => {
-                    return Err(EventProcessorError::InvalidEventLine(format!(
-                        "Unknown resource in URI: {uri}"
-                    )))
-                }
-                Resource::LastRead => Some(SkipReason::LastRead),
-                Resource::Feed(_) => Some(SkipReason::Feed),
-                Resource::Blob(_) => Some(SkipReason::Blob),
-                _ => None,
-            },
-            EventRoute::Legacy(ExtendedParsedUri::UniversalTag { .. }) => None,
-            // The social epochs are skipped before any fetch, so no GET is spent on them and the
-            // retry queue never holds one
-            EventRoute::Social { epoch, .. } => {
-                debug!(%uri, "Skipping social v{epoch} event until that epoch is indexed");
-                count_skipped(format!("v{epoch}"), &route);
-                Some(SkipReason::EpochNotIndexed { epoch: *epoch })
-            }
-            EventRoute::UnsupportedEpoch { version } => {
-                warn!(
-                    %uri,
-                    %version,
-                    "Skipping event of an unsupported social epoch; upgrade Nexus to index it"
-                );
-                count_skipped(epoch_label(version), &route);
-                Some(SkipReason::UnsupportedEpoch {
-                    version: version.clone(),
-                })
-            }
+        let route = match translation::route(&uri) {
             EventRoute::Malformed { reason } => {
-                return Ok(ParseResult::unrecognized_uri(
-                    event_type,
-                    uri,
-                    reason.clone(),
-                ))
+                return Ok(ParseResult::unrecognized_uri(event_type, uri, reason))
             }
+            route => route,
         };
 
-        if let Some(reason) = skip {
+        if let Some(reason) = translation::skip_reason(&route, &uri)? {
+            record_skip(&uri, &route);
             return Ok(ParseResult::Skipped { reason });
         }
 
-        // The v0 parser ignores segments past the resource id, so `posts/ID/extra` reads as
-        // `posts/ID`. Accept only the address the specs render for the parsed resource, so an
-        // alias path can neither overwrite nor delete the resource it parses to.
-        if let EventRoute::Legacy(parsed) = &route {
-            match parsed.try_to_uri_str() {
-                Ok(canonical) if canonical == uri => {}
-                _ => {
-                    return Ok(ParseResult::unrecognized_uri(
-                        event_type,
-                        uri,
-                        "non-canonical path".to_string(),
-                    ))
-                }
-            }
+        if !translation::is_canonical(&route, &uri) {
+            return Ok(ParseResult::unrecognized_uri(
+                event_type,
+                uri,
+                "non-canonical path".to_string(),
+            ));
         }
 
         Ok(ParseResult::Parsed(Event {
@@ -217,8 +174,24 @@ impl Event {
     }
 }
 
-fn count_skipped(epoch: String, route: &EventRoute) {
-    SKIPPED.add(
+/// Logs and counts the skip of a `social` epoch event; the skipped v0 resources stay silent.
+fn record_skip(uri: &str, route: &EventRoute) {
+    let epoch = match route {
+        EventRoute::Social { epoch, .. } => {
+            debug!(%uri, "Skipping social v{epoch} event until that epoch is indexed");
+            format!("v{epoch}")
+        }
+        EventRoute::UnsupportedEpoch { version } => {
+            warn!(
+                %uri,
+                %version,
+                "Skipping event of an unsupported social epoch; upgrade Nexus to index it"
+            );
+            epoch_label(version)
+        }
+        EventRoute::Legacy(_) | EventRoute::Malformed { .. } => return,
+    };
+    EPOCH_SKIPPED.add(
         1,
         &[
             KeyValue::new("epoch", epoch),
@@ -232,22 +205,16 @@ fn count_skipped(epoch: String, route: &EventRoute) {
 fn epoch_label(version: &str) -> String {
     match version.strip_prefix('v').map(str::parse::<u8>) {
         Some(Ok(epoch)) if version == format!("v{epoch}") => version.to_string(),
-        _ => "unknown".to_string(),
+        _ => UNKNOWN_LABEL.to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::translation::test_support::{uri, HASH, HOST, TS};
 
-    const USER: &str = "operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo";
-    const POST_ID: &str = "0032SSN7Q4EVG";
     const TAG_ID: &str = "ABCDEFGHJK";
-    const HASH: &str = "8Z8CWH8NVYQY39ZEBFGKQWWEKG";
-
-    fn uri(path: &str) -> String {
-        format!("pubky://{USER}/pub/{path}")
-    }
 
     fn parse(line: String) -> ParseResult {
         Event::parse_event(&line).expect("event line parses")
@@ -285,31 +252,31 @@ mod tests {
 
     #[test]
     fn canonical_addresses_are_parsed() {
-        assert_parsed(&format!("pubky.app/posts/{POST_ID}"));
-        assert_parsed("pubky.app/profile.json");
-        assert_parsed(&format!("pubky.app/tags/{TAG_ID}"));
-        assert_parsed(&format!("pubky.app/follows/{USER}"));
-        assert_parsed(&format!("mapky/tags/{TAG_ID}"));
+        assert_parsed(&format!("pub/pubky.app/posts/{TS}"));
+        assert_parsed("pub/pubky.app/profile.json");
+        assert_parsed(&format!("pub/pubky.app/tags/{TAG_ID}"));
+        assert_parsed(&format!("pub/pubky.app/follows/{HOST}"));
+        assert_parsed(&format!("pub/mapky/tags/{TAG_ID}"));
     }
 
     #[test]
     fn extra_segments_are_rejected() {
-        assert_non_canonical(&format!("pubky.app/posts/{POST_ID}/shadow"));
-        assert_non_canonical(&format!("pubky.app/posts/{POST_ID}/"));
-        assert_non_canonical(&format!("pubky.app/tags/{TAG_ID}/extra/more"));
+        assert_non_canonical(&format!("pub/pubky.app/posts/{TS}/shadow"));
+        assert_non_canonical(&format!("pub/pubky.app/posts/{TS}/"));
+        assert_non_canonical(&format!("pub/pubky.app/tags/{TAG_ID}/extra/more"));
     }
 
     #[test]
     fn query_and_fragment_are_rejected() {
-        assert_non_canonical(&format!("pubky.app/posts/{POST_ID}?x=1"));
-        assert_non_canonical(&format!("pubky.app/posts/{POST_ID}#frag"));
-        assert_non_canonical(&format!("mapky/tags/{TAG_ID}?x=1"));
-        assert_non_canonical(&format!("mapky/tags/{TAG_ID}#frag"));
+        assert_non_canonical(&format!("pub/pubky.app/posts/{TS}?x=1"));
+        assert_non_canonical(&format!("pub/pubky.app/posts/{TS}#frag"));
+        assert_non_canonical(&format!("pub/mapky/tags/{TAG_ID}?x=1"));
+        assert_non_canonical(&format!("pub/mapky/tags/{TAG_ID}#frag"));
     }
 
     #[test]
     fn uppercase_scheme_is_rejected() {
-        let line = format!("PUT PUBKY://{USER}/pub/pubky.app/posts/{POST_ID}");
+        let line = format!("PUT PUBKY://{HOST}/pub/pubky.app/posts/{TS}");
         assert!(
             matches!(parse(line), ParseResult::UnrecognizedUri { reason, .. } if reason == "non-canonical path")
         );
@@ -318,7 +285,7 @@ mod tests {
     /// Unknown and skipped resources are classified before the canonical check, as before it.
     #[test]
     fn unknown_and_skipped_resources_keep_their_outcome() {
-        for path in ["pubky.app/foo/bar", "pubky.app/profile.json/extra"] {
+        for path in ["pub/pubky.app/foo/bar", "pub/pubky.app/profile.json/extra"] {
             let result = Event::parse_event(&format!("PUT {}", uri(path)));
             assert!(
                 matches!(result, Err(EventProcessorError::InvalidEventLine(_))),
@@ -326,7 +293,7 @@ mod tests {
             );
         }
         assert!(matches!(
-            parse(format!("PUT {}", uri("pubky.app/last_read"))),
+            parse(format!("PUT {}", uri("pub/pubky.app/last_read"))),
             ParseResult::Skipped { .. }
         ));
     }
@@ -336,10 +303,10 @@ mod tests {
     #[test]
     fn v1_lines_are_skipped_as_not_indexed() {
         for path in [
-            format!("social/v1/posts/{POST_ID}/{POST_ID}.json"),
-            "social/v1/profile.json".to_string(),
-            format!("social/v1/tags/{HASH}.json"),
-            "social/v1/widgets/ABC".to_string(),
+            format!("pub/social/v1/posts/{TS}/{TS}.json"),
+            "pub/social/v1/profile.json".to_string(),
+            format!("pub/social/v1/tags/{HASH}.json"),
+            "pub/social/v1/widgets/ABC".to_string(),
         ] {
             for event_type in [EventType::Put, EventType::Del] {
                 let line = format!("{event_type} {}", uri(&path));
@@ -354,7 +321,7 @@ mod tests {
 
     #[test]
     fn v2_line_is_skipped_as_unsupported() {
-        let line = format!("PUT {}", uri(&format!("social/v2/posts/{POST_ID}")));
+        let line = format!("PUT {}", uri(&format!("pub/social/v2/posts/{TS}")));
         assert_eq!(
             skipped(&line),
             SkipReason::UnsupportedEpoch {
@@ -366,9 +333,9 @@ mod tests {
     #[test]
     fn unindexed_v0_lines_are_still_skipped() {
         let cases = [
-            ("pubky.app/last_read".to_string(), SkipReason::LastRead),
-            (format!("pubky.app/feeds/{HASH}"), SkipReason::Feed),
-            (format!("pubky.app/blobs/{HASH}"), SkipReason::Blob),
+            ("pub/pubky.app/last_read".to_string(), SkipReason::LastRead),
+            (format!("pub/pubky.app/feeds/{HASH}"), SkipReason::Feed),
+            (format!("pub/pubky.app/blobs/{HASH}"), SkipReason::Blob),
         ];
         for (path, expected) in cases {
             assert_eq!(skipped(&format!("PUT {}", uri(&path))), expected, "{path}");
@@ -377,12 +344,12 @@ mod tests {
 
     #[test]
     fn v0_post_line_parses_into_a_legacy_event() {
-        let line = format!("PUT {}", uri(&format!("pubky.app/posts/{POST_ID}")));
+        let line = format!("PUT {}", uri(&format!("pub/pubky.app/posts/{TS}")));
         match Event::parse_event(&line) {
             Ok(ParseResult::Parsed(event)) => {
                 assert_eq!(event.event_type, EventType::Put);
                 assert!(matches!(event.route, EventRoute::Legacy(_)));
-                assert_eq!(event.route.resource_id().as_deref(), Some(POST_ID));
+                assert_eq!(event.route.resource_id().as_deref(), Some(TS));
             }
             other => panic!("expected a parsed event, got {other:?}"),
         }
@@ -390,7 +357,7 @@ mod tests {
 
     #[test]
     fn epoch_less_social_line_is_unrecognized() {
-        let line = format!("PUT {}", uri("social/tags/ABC"));
+        let line = format!("PUT {}", uri("pub/social/tags/ABC"));
         assert!(matches!(
             Event::parse_event(&line),
             Ok(ParseResult::UnrecognizedUri { .. })
@@ -399,7 +366,7 @@ mod tests {
 
     #[test]
     fn unknown_v0_resource_is_still_an_error() {
-        let line = format!("PUT {}", uri("pubky.app/widgets/ABC"));
+        let line = format!("PUT {}", uri("pub/pubky.app/widgets/ABC"));
         assert!(matches!(
             Event::parse_event(&line),
             Err(EventProcessorError::InvalidEventLine(_))
