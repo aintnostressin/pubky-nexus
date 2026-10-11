@@ -202,6 +202,18 @@ pub(super) fn translate_del(
     Ok(translated)
 }
 
+/// Reads the bytes of the v0 blob `blob_id` with the frozen reader, which checks them against the
+/// id and the size limit.
+pub(super) fn read_blob(blob_id: &str, bytes: &[u8]) -> Result<Vec<u8>, EventProcessorError> {
+    match PubkyAppObject::from_resource(&Resource::Blob(blob_id.to_string()), bytes) {
+        Ok(PubkyAppObject::Blob(blob)) => Ok(blob.0),
+        Ok(_) => Err(EventProcessorError::SpecValidation(format!(
+            "The v0 reader returned another object kind for blob {blob_id}"
+        ))),
+        Err(e) => Err(EventProcessorError::SpecValidation(e.to_string())),
+    }
+}
+
 fn unknown_resource(uri: &str) -> EventProcessorError {
     EventProcessorError::InvalidEventLine(format!("Unknown resource in URI: {uri}"))
 }
@@ -254,7 +266,7 @@ impl From<PubkyAppFile> for FileInput {
     fn from(file: PubkyAppFile) -> Self {
         Self {
             name: file.name,
-            src: file.src,
+            src: resolve_reference(&file.src),
             content_type: file.content_type,
             size: file.size,
             created_at: file.created_at,
@@ -383,7 +395,16 @@ mod tests {
         });
 
         assert_eq!(file.name, "a.png");
-        assert_eq!(file.src, src);
+        assert_eq!(
+            file.src,
+            Reference {
+                uri: src,
+                target: Target::Blob {
+                    owner_id: PubkyId::try_from(AUTHOR).unwrap(),
+                    blob_id: "8Z8CWH8NVYQY39ZEBFGKQWWEKG".into(),
+                },
+            }
+        );
         assert_eq!(file.content_type, "image/png");
         assert_eq!(file.size, 3);
         assert_eq!(file.created_at, 1);

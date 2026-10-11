@@ -192,8 +192,8 @@ pub struct TagInput {
 #[derive(Debug, Clone)]
 pub struct FileInput {
     pub name: String,
-    /// URI of the blob holding the bytes.
-    pub src: String,
+    /// The blob holding the bytes.
+    pub src: Reference,
     pub content_type: String,
     pub size: usize,
     pub created_at: i64,
@@ -205,7 +205,7 @@ impl FileInput {
         FileDetails {
             urls,
             name: self.name,
-            src: self.src,
+            src: self.src.uri,
             content_type: self.content_type,
             uri,
             id: file_id,

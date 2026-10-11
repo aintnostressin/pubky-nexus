@@ -144,6 +144,19 @@ pub fn is_canonical(route: &EventRoute, uri: &str) -> bool {
     }
 }
 
+/// Reads the bytes fetched from a file's source. Only a v0 blob holds a file's bytes; its reader
+/// checks them, so a blob that fails is a `SpecValidation` error, and a source naming anything else
+/// is an `InvalidEventLine`.
+pub fn read_file_source(src: &Reference, bytes: &[u8]) -> Result<Vec<u8>, EventProcessorError> {
+    match &src.target {
+        Target::Blob { blob_id, .. } => legacy::read_blob(blob_id, bytes),
+        _ => Err(EventProcessorError::InvalidEventLine(format!(
+            "The file has a source uri that is not a blob path: {}",
+            src.uri
+        ))),
+    }
+}
+
 /// Resolves a URI an object points at with the router event paths take, so each reference is read
 /// by its own epoch's parser, whichever epoch wrote the object holding it. A URI no parser reads,
 /// a bare `pubky://<pk>` included, names nothing Nexus reads.
@@ -424,7 +437,14 @@ mod tests {
             } => {
                 assert_eq!(user_id, host());
                 assert_eq!(id, file_id);
-                assert_eq!(file.src, src);
+                assert_eq!(file.src.uri, src);
+                assert_eq!(
+                    file.src.target,
+                    Target::Blob {
+                        owner_id: host(),
+                        blob_id: HASH.into()
+                    }
+                );
                 assert_eq!(event_uri, uri(&path));
             }
             other => panic!("expected File, got {other:?}"),
@@ -571,6 +591,28 @@ mod tests {
                 other => panic!("{path}: expected Skip, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_file_source_is_read_as_the_blob_it_names() {
+        let bytes = b"hello".to_vec();
+        let id = PubkyAppBlob::new(bytes.clone()).create_id();
+        let blob = resolve_reference(&uri(&format!("pub/pubky.app/blobs/{id}")));
+        assert_eq!(read_file_source(&blob, &bytes).unwrap(), bytes);
+
+        // The v0 reader checks the bytes against the blob id
+        let err = read_file_source(&blob, b"other bytes").unwrap_err();
+        assert!(
+            matches!(err, EventProcessorError::SpecValidation(_)),
+            "{err:?}"
+        );
+
+        let post = resolve_reference(&uri(&format!("pub/pubky.app/posts/{TS}")));
+        let err = read_file_source(&post, &bytes).unwrap_err();
+        assert!(
+            matches!(err, EventProcessorError::InvalidEventLine(_)),
+            "{err:?}"
+        );
     }
 
     /// What a reference names; it keeps the URI exactly as written.
