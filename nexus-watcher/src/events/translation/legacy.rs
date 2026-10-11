@@ -101,11 +101,13 @@ pub(super) fn translate_put(
         (PubkyAppObject::User(user), Resource::User) => TranslatedPut::User {
             user_id,
             user: user.into(),
+            uri: uri.to_string(),
         },
         (PubkyAppObject::Post(post), Resource::Post(post_id)) => TranslatedPut::Post {
             author_id: user_id,
             post_id: post_id.clone(),
             post: post.into(),
+            uri: uri.to_string(),
         },
         (PubkyAppObject::Follow(_), Resource::Follow(followee_id)) => TranslatedPut::Follow {
             user_id,
@@ -119,6 +121,7 @@ pub(super) fn translate_put(
                 ExtendedParsedUri::UniversalTag { app, .. } => Some(app.clone()),
                 ExtendedParsedUri::PubkyApp { .. } => None,
             },
+            uri: uri.to_string(),
         },
         (PubkyAppObject::Bookmark(bookmark), Resource::Bookmark(bookmark_id)) => {
             TranslatedPut::Bookmark {

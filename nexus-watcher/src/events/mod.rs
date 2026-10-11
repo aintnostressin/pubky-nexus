@@ -104,16 +104,15 @@ pub async fn handle_put_event(
     let blob = fetch_resource(&event.uri).await?;
 
     match translation::translate_put(&event.route, &event.uri, blob.as_slice())? {
-        TranslatedPut::User { user_id, user } => {
-            handlers::user::sync_put(user, event.uri.clone(), user_id).await?
+        TranslatedPut::User { user_id, user, uri } => {
+            handlers::user::sync_put(user, uri, user_id).await?
         }
         TranslatedPut::Post {
             author_id,
             post_id,
             post,
-        } => {
-            handlers::post::sync_put(post, event.uri.clone(), author_id, post_id, &ingestor).await?
-        }
+            uri,
+        } => handlers::post::sync_put(post, uri, author_id, post_id, &ingestor).await?,
         TranslatedPut::Follow {
             user_id,
             followee_id,
@@ -128,6 +127,7 @@ pub async fn handle_put_event(
             tag_id,
             tag,
             app,
+            uri,
         } => {
             if moderation.should_delete(&tag, &tagger_id) {
                 moderation
@@ -135,19 +135,11 @@ pub async fn handle_put_event(
                     .await?
             } else if let Some(app) = app {
                 // Universal tags (non-pubky.app apps) go to sync_put_resource, which handles
-                // Resource nodes for InternalUnknown/External URIs.
-                handlers::tag::sync_put_resource(
-                    tag,
-                    event.uri.clone(),
-                    tagger_id,
-                    tag_id,
-                    app,
-                    &ingestor,
-                )
-                .await?
-            } else {
-                handlers::tag::sync_put(tag, event.uri.clone(), tagger_id, tag_id, &ingestor)
+                // Resource nodes for targets other than a post or a user.
+                handlers::tag::sync_put_resource(tag, uri, tagger_id, tag_id, app, &ingestor)
                     .await?
+            } else {
+                handlers::tag::sync_put(tag, uri, tagger_id, tag_id, &ingestor).await?
             }
         }
         TranslatedPut::File {
