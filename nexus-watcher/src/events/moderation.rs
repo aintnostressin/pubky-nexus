@@ -2,10 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::errors::EventProcessorError;
-use crate::events::handlers::{self, TagInput};
+use crate::events::handlers::{self, TagInput, Target};
 use nexus_common::models::user::UserIngestor;
 use nexus_common::WatcherConfig;
-use pubky_social_specs::legacy_v0::{ParsedUri, Resource};
 use pubky_social_specs::PubkyId;
 use tracing::info;
 
@@ -34,9 +33,8 @@ impl Moderation {
 
     /// Apply moderation to the tagged resource.
     ///
-    /// Parses the embedded URI in the moderator tag and removes the corresponding
-    /// resource (tag, user, or file). Posts are hard-deleted when edge-free or
-    /// tombstoned when engagement edges remain.
+    /// Removes the resource the moderator tag names (a tag, a post, a user profile or a file).
+    /// Posts are hard-deleted when edge-free or tombstoned when engagement edges remain.
     #[tracing::instrument(name = "moderation.apply", skip_all)]
     pub async fn apply_moderation(
         &self,
@@ -45,39 +43,39 @@ impl Moderation {
         ingestor: &UserIngestor,
     ) -> Result<(), EventProcessorError> {
         let label = moderator_tag.label;
-        let moderated_uri = &moderator_tag.target;
+        let moderated = moderator_tag.target;
 
-        // ParsedUri does not handle app-specific tag storage paths (Universal Tags), so they must be intercepted first.
-        if handlers::tag::is_tag_storage_uri(moderated_uri) {
-            info!("Moderation tag '{label}' detected. Deleting moderated tag {moderated_uri}",);
-            return handlers::tag::del(moderated_uri).await;
-        }
-
-        // Parse the embeded URI to extract author_id and post_id using parse_tagged_post_uri
-        let parsed_uri =
-            ParsedUri::try_from(moderated_uri.as_str()).map_err(EventProcessorError::generic)?;
-        let user_id = parsed_uri.user_id;
-
-        match parsed_uri.resource {
-            Resource::Post(post_id) => {
-                info!("Moderation tag '{label}' detected. Deleting post {user_id}:{post_id}");
+        match moderated.target {
+            Target::Tag {
+                tagger_id,
+                tag_id,
+                app,
+            } => {
+                info!(
+                    "Moderation tag '{label}' detected. Deleting moderated tag {}",
+                    moderated.uri
+                );
+                handlers::tag::del(tagger_id, tag_id, app).await
+            }
+            Target::Post { author_id, post_id } => {
+                info!("Moderation tag '{label}' detected. Deleting post {author_id}:{post_id}");
                 // Same gate as user-issued DEL events: hard-delete when edge-free, tombstone
                 // when any engagement edge remains (tags, bookmarks, replies, reposts, mentions).
-                handlers::post::del(user_id, post_id, ingestor).await
+                handlers::post::del(author_id, post_id, ingestor).await
             }
-            Resource::Tag(tag_id) => {
-                info!("Moderation tag '{label}' detected. Deleting tag {user_id}:{tag_id}");
-                handlers::tag::del(moderated_uri).await
-            }
-            Resource::User => {
+            Target::User(user_id) => {
                 info!("Moderation tag '{label}' detected. Deleting user profile {user_id}");
                 handlers::user::del(user_id).await
             }
-            Resource::File(file_id) => {
-                info!("Moderation tag '{label}' detected. Deleting file {user_id}:{file_id}");
-                handlers::file::del(&user_id, file_id, files_path).await
+            Target::File { owner_id, file_id } => {
+                info!("Moderation tag '{label}' detected. Deleting file {owner_id}:{file_id}");
+                handlers::file::del(&owner_id, file_id, files_path).await
             }
-            _ => Ok(()),
+            Target::Blob { .. } | Target::Unkeyed { .. } => Ok(()),
+            Target::External => Err(EventProcessorError::generic(format!(
+                "Moderated URI names nothing Nexus indexes: {}",
+                moderated.uri
+            ))),
         }
     }
 }

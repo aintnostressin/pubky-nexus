@@ -169,8 +169,13 @@ pub(super) fn translate_del(
             user_id,
             followee_id: followee_id.clone(),
         },
-        Resource::Tag(_) => TranslatedDel::Tag {
-            uri: uri.to_string(),
+        Resource::Tag(tag_id) => TranslatedDel::Tag {
+            tagger_id: user_id,
+            tag_id: tag_id.clone(),
+            app: match parsed {
+                ExtendedParsedUri::UniversalTag { app, .. } => Some(app.clone()),
+                ExtendedParsedUri::PubkyApp { .. } => None,
+            },
         },
         Resource::Bookmark(bookmark_id) => TranslatedDel::Bookmark {
             user_id,
@@ -217,7 +222,7 @@ impl From<PubkyAppPost> for PostInput {
 impl From<PubkyAppBookmark> for BookmarkInput {
     fn from(bookmark: PubkyAppBookmark) -> Self {
         Self {
-            target: bookmark.uri,
+            target: resolve_reference(&bookmark.uri),
         }
     }
 }
@@ -239,7 +244,7 @@ impl From<PubkyAppUser> for UserInput {
 impl From<PubkyAppTag> for TagInput {
     fn from(tag: PubkyAppTag) -> Self {
         Self {
-            target: tag.uri,
+            target: resolve_reference(&tag.uri),
             label: tag.label,
         }
     }
@@ -326,7 +331,7 @@ mod tests {
             uri: uri_of_post(POST_ID),
             created_at: 1,
         });
-        assert_eq!(bookmark.target, uri_of_post(POST_ID));
+        assert_eq!(bookmark.target, post_reference(POST_ID));
     }
 
     #[test]
@@ -362,7 +367,7 @@ mod tests {
             label: "rust".into(),
             created_at: 1,
         });
-        assert_eq!(tag.target, uri_of_post(POST_ID));
+        assert_eq!(tag.target, post_reference(POST_ID));
         assert_eq!(tag.label, "rust");
     }
 

@@ -94,8 +94,11 @@ pub enum TranslatedDel {
         user_id: PubkyId,
         followee_id: PubkyId,
     },
+    /// `app` is set for a universal tag written under another app's namespace.
     Tag {
-        uri: String,
+        tagger_id: PubkyId,
+        tag_id: String,
+        app: Option<String>,
     },
     Bookmark {
         user_id: PubkyId,
@@ -171,8 +174,7 @@ pub fn translate_put(
     }
 }
 
-/// Maps a DEL to its handler call from the ids in the path. `uri` is the event URI as received,
-/// which the tag handler takes.
+/// Maps a DEL to its handler call from the ids in the path. `uri` is the event URI as received.
 pub fn translate_del(route: &EventRoute, uri: &str) -> Result<TranslatedDel, EventProcessorError> {
     match route {
         EventRoute::Legacy(parsed) => legacy::translate_del(parsed, uri),
@@ -348,6 +350,14 @@ mod tests {
                 assert_eq!(tagger_id, host());
                 assert_eq!(tag_id, id);
                 assert_eq!(tag.label, "rust");
+                assert_eq!(tag.target.uri, target);
+                assert_eq!(
+                    tag.target.target,
+                    Target::Post {
+                        author_id: host(),
+                        post_id: TS.into()
+                    }
+                );
                 assert_eq!(app, None);
             }
             other => panic!("expected Tag, got {other:?}"),
@@ -390,7 +400,8 @@ mod tests {
             } => {
                 assert_eq!(user_id, host());
                 assert_eq!(bookmark_id, id);
-                assert_eq!(bookmark.target, target);
+                assert_eq!(bookmark.target.uri, target);
+                assert_eq!(bookmark.target.post_key(), Some((host(), TS.to_string())));
             }
             other => panic!("expected Bookmark, got {other:?}"),
         }
@@ -525,13 +536,22 @@ mod tests {
     }
 
     #[test]
-    fn del_tag_carries_the_event_uri() {
-        for path in [
-            format!("pub/pubky.app/tags/{HASH}"),
-            "pub/mapky/tags/ABC123".into(),
-        ] {
+    fn del_tag_carries_the_tag_keys() {
+        let cases = [
+            (format!("pub/pubky.app/tags/{HASH}"), HASH, None),
+            ("pub/mapky/tags/ABC123".into(), "ABC123", Some("mapky")),
+        ];
+        for (path, expected_id, expected_app) in cases {
             match del(&path) {
-                TranslatedDel::Tag { uri: event_uri } => assert_eq!(event_uri, uri(&path)),
+                TranslatedDel::Tag {
+                    tagger_id,
+                    tag_id,
+                    app,
+                } => {
+                    assert_eq!(tagger_id, host(), "{path}");
+                    assert_eq!(tag_id, expected_id, "{path}");
+                    assert_eq!(app.as_deref(), expected_app, "{path}");
+                }
                 other => panic!("expected Tag, got {other:?}"),
             }
         }
@@ -657,6 +677,7 @@ mod tests {
             // A bare key is v1's user reference; it waits for a v1 reader to need it.
             format!("pubky://{HOST}"),
             uri("pub/eventky.app/events/E001"),
+            format!("PUBKY://{OTHER}/pub/eventky.app/events/E001"),
             uri(&format!("pub/social/v2/posts/{TS}")),
             uri("pub/social/tags/ABC"),
         ];

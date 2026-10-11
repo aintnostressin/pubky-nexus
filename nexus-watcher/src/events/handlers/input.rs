@@ -151,8 +151,8 @@ impl PostInput {
 /// A bookmark as the bookmark handler reads it.
 #[derive(Debug, Clone)]
 pub struct BookmarkInput {
-    /// URI of the bookmarked post.
-    pub target: String,
+    /// The bookmarked post.
+    pub target: Reference,
 }
 
 /// A profile as the user handler reads it.
@@ -183,8 +183,8 @@ impl UserInput {
 /// A tag as the tag handlers and moderation read it.
 #[derive(Debug, Clone)]
 pub struct TagInput {
-    /// URI of the tagged object.
-    pub target: String,
+    /// The tagged object.
+    pub target: Reference,
     pub label: String,
 }
 
