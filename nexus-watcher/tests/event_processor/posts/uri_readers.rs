@@ -101,7 +101,8 @@ async fn test_relationship_parents_return_parent_stored_uri() -> Result<()> {
     });
     let (repost_id, repost_path) = test.create_post(&author_kp, &repost).await?;
 
-    // `ParsedUri` only holds a `pubky.app` address, so store a different one
+    // Another address than the one the reply and the repost wrote, so the reader is shown to
+    // return the parent's stored `uri`
     let stored = post_uri_builder(author_id.clone(), generate_post_id());
     set_post_uri(&author_id, &post_id, Some(&stored)).await?;
 
@@ -109,13 +110,13 @@ async fn test_relationship_parents_return_parent_stored_uri() -> Result<()> {
         .await?
         .and_then(|rel| rel.replied)
         .expect("reply parent");
-    assert_eq!(replied.try_to_uri_str().unwrap(), stored);
+    assert_eq!(replied, stored);
 
     let reposted = PostRelationships::get_from_graph(&author_id, &repost_id)
         .await?
         .and_then(|rel| rel.reposted)
         .expect("repost parent");
-    assert_eq!(reposted.try_to_uri_str().unwrap(), stored);
+    assert_eq!(reposted, stored);
 
     test.cleanup_post(&author_kp, &repost_path).await?;
     test.cleanup_post(&author_kp, &reply_path).await?;

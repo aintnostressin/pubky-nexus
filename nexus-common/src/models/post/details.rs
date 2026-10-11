@@ -1,4 +1,4 @@
-use super::{PostKind, PostRelationships, PostStream};
+use super::{PostKind, PostLinks, PostStream};
 use crate::db::kv::RedisResult;
 use crate::db::{
     execute_graph_operation, fetch_row_from_graph, queries, GraphResult, OperationOutcome, RedisOps,
@@ -121,11 +121,8 @@ impl PostDetails {
     }
 
     // Save new graph node
-    pub async fn put_to_graph(
-        &self,
-        post_relationships: &PostRelationships,
-    ) -> GraphResult<OperationOutcome> {
-        let query = queries::put::create_post(self, post_relationships)?;
+    pub async fn put_to_graph(&self, links: &PostLinks) -> GraphResult<OperationOutcome> {
+        let query = queries::put::create_post(self, links)?;
         execute_graph_operation(query).await
     }
 

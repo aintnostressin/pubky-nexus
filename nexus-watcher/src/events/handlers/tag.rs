@@ -225,7 +225,7 @@ async fn put_sync_post(
         OperationOutcome::MissingDependency => {
             if let Ok(post_uri) = ParsedUri::try_from(post_uri_str) {
                 // Drop the tag (non-retryable) if the tagged post's author is on a blacklisted HS.
-                fail_on_blacklisted_hs(ingestor.maybe_ingest_author_of_post(&post_uri).await)?;
+                fail_on_blacklisted_hs(ingestor.maybe_ingest_user(&post_uri.user_id).await)?;
             }
             Err(EventProcessorError::MissingDependency {
                 dependency: vec![post_uri_str.to_owned()],
