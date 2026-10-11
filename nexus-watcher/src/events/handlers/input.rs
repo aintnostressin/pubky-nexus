@@ -3,20 +3,91 @@
 
 use chrono::Utc;
 use nexus_common::models::file::{FileDetails, FileUrls};
-use nexus_common::models::post::{PostDetails, PostKind, PostRelationships};
+use nexus_common::models::post::{PostDetails, PostKind, PostLinks, PostRelationships};
 use nexus_common::models::user::{UserDetails, UserLink};
-use pubky_social_specs::legacy_v0::{ParsedUri, Resource};
 use pubky_social_specs::PubkyId;
+
+/// A URI an object points at, resolved once by the translation layer: the URI as the object wrote
+/// it, which is what Nexus stores and serves, and what it names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reference {
+    pub uri: String,
+    pub target: Target,
+}
+
+/// What a reference names, keyed the way Nexus keys it, whichever epoch's spelling the URI uses.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Target {
+    Post {
+        author_id: PubkyId,
+        post_id: String,
+    },
+    User(PubkyId),
+    File {
+        owner_id: PubkyId,
+        file_id: String,
+    },
+    /// A v0 blob: the bytes a v0 file points at.
+    Blob {
+        owner_id: PubkyId,
+        blob_id: String,
+    },
+    /// A tag file. `app` is the folder of another app's universal tag, `None` for a `pubky.app` or
+    /// `social` tag.
+    Tag {
+        tagger_id: PubkyId,
+        tag_id: String,
+        app: Option<String>,
+    },
+    /// Another resource of `pubky.app` or `social`, one Nexus keys nothing by: a follow, a mute, a
+    /// bookmark, a feed, or a path naming no resource.
+    Unkeyed {
+        owner_id: PubkyId,
+    },
+    /// Nothing Nexus reads: another app's path, a URI of another scheme, a `social` epoch this
+    /// build does not speak, or no URI at all.
+    External,
+}
+
+impl Reference {
+    /// Whether the reference names a post.
+    pub fn names_a_post(&self) -> bool {
+        matches!(self.target, Target::Post { .. })
+    }
+
+    /// The `(author_id, post_id)` of the post the reference names.
+    pub fn post_key(&self) -> Option<(PubkyId, String)> {
+        match &self.target {
+            Target::Post { author_id, post_id } => Some((author_id.clone(), post_id.clone())),
+            _ => None,
+        }
+    }
+}
+
+impl Target {
+    /// The user the named resource belongs to.
+    pub fn owner_id(&self) -> Option<&PubkyId> {
+        match self {
+            Target::Post { author_id, .. } => Some(author_id),
+            Target::User(user_id) => Some(user_id),
+            Target::File { owner_id, .. }
+            | Target::Blob { owner_id, .. }
+            | Target::Unkeyed { owner_id } => Some(owner_id),
+            Target::Tag { tagger_id, .. } => Some(tagger_id),
+            Target::External => None,
+        }
+    }
+}
 
 /// A post as the post handler reads it.
 #[derive(Debug, Clone)]
 pub struct PostInput {
     pub content: String,
     pub kind: PostKind,
-    /// URI of the post this one replies to.
-    pub parent: Option<String>,
-    /// URI of the embedded object, the only part of an embed Nexus reads.
-    pub embed: Option<String>,
+    /// The post this one replies to.
+    pub parent: Option<Reference>,
+    /// The embedded object, the only part of an embed Nexus reads.
+    pub embed: Option<Reference>,
     pub attachments: Option<Vec<String>>,
     pub lock: Option<String>,
 }
@@ -37,21 +108,43 @@ impl PostInput {
         }
     }
 
-    /// The post this one replies to and the post it reposts.
+    /// The parent, when it names a post: only a post can be replied to.
+    pub fn replied(&self) -> Option<&Reference> {
+        self.parent.as_ref().filter(|parent| parent.names_a_post())
+    }
+
+    /// The embed, when it names a post: only a post can be reposted; other embeds stay plain
+    /// embeds.
+    pub fn reposted(&self) -> Option<&Reference> {
+        self.embed.as_ref().filter(|embed| embed.names_a_post())
+    }
+
+    /// Whether the parent names a resource other than a post, which no reply can point at. A parent
+    /// naming nothing Nexus reads is not one: such a post is indexed as a reply to no post.
+    pub fn replies_to_a_non_post(&self) -> bool {
+        self.parent.as_ref().is_some_and(|parent| {
+            !matches!(
+                parent.target,
+                Target::Post { .. } | Target::External | Target::Tag { app: Some(_), .. }
+            )
+        })
+    }
+
+    /// The URIs of the post this one replies to and the post it reposts, as the post wrote them.
     pub fn relationships(&self) -> PostRelationships {
-        let mut relationship = PostRelationships::default();
-
-        if let Some(parent_uri) = &self.parent {
-            relationship.replied = ParsedUri::try_from(parent_uri.as_str()).ok()
+        PostRelationships {
+            replied: self.replied().map(|parent| parent.uri.clone()),
+            reposted: self.reposted().map(|embed| embed.uri.clone()),
+            mentioned: Vec::new(),
         }
+    }
 
-        // Only a post can be reposted; other embed targets stay plain embeds.
-        if let Some(embed_uri) = &self.embed {
-            relationship.reposted = ParsedUri::try_from(embed_uri.as_str())
-                .ok()
-                .filter(|uri| matches!(uri.resource, Resource::Post(_)));
+    /// The posts the graph write links this one to.
+    pub fn links(&self) -> PostLinks {
+        PostLinks {
+            replied: self.replied().and_then(Reference::post_key),
+            reposted: self.reposted().and_then(Reference::post_key),
         }
-        relationship
     }
 }
 
@@ -128,13 +221,28 @@ impl FileInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_social_specs::legacy_v0::{file_uri_builder, post_uri_builder};
 
     const AUTHOR: &str = "4snwyct86m383rsduhw5xgcxpw7c63j3pq8x4ycqikxgik8y64ro";
     const POST_ID: &str = "003286NSMY490";
+    const POST_URI: &str =
+        "pubky://4snwyct86m383rsduhw5xgcxpw7c63j3pq8x4ycqikxgik8y64ro/pub/pubky.app/posts/003286NSMY490";
 
-    fn uri_of_post(id: &str) -> String {
-        post_uri_builder(AUTHOR.into(), id.into())
+    fn author() -> PubkyId {
+        PubkyId::try_from(AUTHOR).unwrap()
+    }
+
+    fn reference(target: Target) -> Reference {
+        Reference {
+            uri: POST_URI.to_string(),
+            target,
+        }
+    }
+
+    fn post() -> Target {
+        Target::Post {
+            author_id: author(),
+            post_id: POST_ID.to_string(),
+        }
     }
 
     fn post_without_relations() -> PostInput {
@@ -156,37 +264,76 @@ mod tests {
             ..post_without_relations()
         };
 
-        let author = PubkyId::try_from(AUTHOR).unwrap();
-        let details = post.into_details(uri_of_post(POST_ID), &author, POST_ID);
+        let details = post.into_details(POST_URI.to_string(), &author(), POST_ID);
         assert_eq!(details.attachments, None);
-        assert_eq!(details.uri, uri_of_post(POST_ID));
+        assert_eq!(details.uri, POST_URI);
         assert!(!details.deleted);
     }
 
     #[test]
     fn post_embed_becomes_a_repost() {
-        let rel = PostInput {
-            embed: Some(uri_of_post(POST_ID)),
+        let post = PostInput {
+            embed: Some(reference(post())),
             ..post_without_relations()
-        }
-        .relationships();
-        assert!(
-            matches!(rel.reposted.as_ref(), Some(u) if matches!(u.resource, Resource::Post(_))),
-            "a post embed should become a reposted relationship"
-        );
+        };
+        assert_eq!(post.relationships().reposted.as_deref(), Some(POST_URI));
+        assert_eq!(post.links().reposted, Some((author(), POST_ID.to_string())));
     }
 
     #[test]
     fn non_post_embed_is_not_a_repost() {
-        // A non-post embed (file URI) must not become a repost.
-        let rel = PostInput {
-            embed: Some(file_uri_builder(AUTHOR.into(), POST_ID.into())),
+        let file = Target::File {
+            owner_id: author(),
+            file_id: POST_ID.to_string(),
+        };
+        let post = PostInput {
+            embed: Some(reference(file)),
             ..post_without_relations()
-        }
-        .relationships();
+        };
         assert!(
-            rel.reposted.is_none(),
+            post.relationships().reposted.is_none(),
             "a non-post embed must not become a repost"
         );
+        assert!(post.links().reposted.is_none());
+    }
+
+    #[test]
+    fn post_parent_becomes_a_reply() {
+        let post = PostInput {
+            parent: Some(reference(post())),
+            ..post_without_relations()
+        };
+        assert_eq!(post.relationships().replied.as_deref(), Some(POST_URI));
+        assert_eq!(post.links().replied, Some((author(), POST_ID.to_string())));
+        assert!(!post.replies_to_a_non_post());
+    }
+
+    /// A parent naming nothing Nexus reads leaves a reply to no post; one naming a resource of
+    /// another kind cannot be indexed at all.
+    #[test]
+    fn non_post_parents() {
+        let universal_tag = Target::Tag {
+            tagger_id: author(),
+            tag_id: "ABC".into(),
+            app: Some("mapky".into()),
+        };
+        for target in [Target::External, universal_tag] {
+            let post = PostInput {
+                parent: Some(reference(target.clone())),
+                ..post_without_relations()
+            };
+            assert!(post.relationships().replied.is_none(), "{target:?}");
+            assert!(!post.replies_to_a_non_post(), "{target:?}");
+        }
+        for target in [
+            Target::User(author()),
+            Target::Unkeyed { owner_id: author() },
+        ] {
+            let post = PostInput {
+                parent: Some(reference(target.clone())),
+                ..post_without_relations()
+            };
+            assert!(post.replies_to_a_non_post(), "{target:?}");
+        }
     }
 }

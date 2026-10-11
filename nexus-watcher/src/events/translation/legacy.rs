@@ -2,9 +2,9 @@
 //! objects read with the frozen v0 reader and copied into the handler inputs by the conversions
 //! below, ids taken from the v0 path.
 
-use super::{SkipReason, TranslatedDel, TranslatedPut};
+use super::{resolve_reference, SkipReason, TranslatedDel, TranslatedPut};
 use crate::errors::EventProcessorError;
-use crate::events::handlers::{BookmarkInput, FileInput, PostInput, TagInput, UserInput};
+use crate::events::handlers::{BookmarkInput, FileInput, PostInput, TagInput, Target, UserInput};
 use pubky_social_specs::legacy_v0::{
     ExtendedParsedUri, PubkyAppBookmark, PubkyAppFile, PubkyAppObject, PubkyAppPost, PubkyAppTag,
     PubkyAppUser, Resource,
@@ -33,6 +33,53 @@ pub(super) fn is_canonical(parsed: &ExtendedParsedUri, uri: &str) -> bool {
     parsed
         .try_to_uri_str()
         .is_ok_and(|canonical| canonical == uri)
+}
+
+/// What a v0 URI names.
+pub(super) fn target(parsed: &ExtendedParsedUri) -> Target {
+    match parsed {
+        ExtendedParsedUri::PubkyApp { user_id, resource } => {
+            let owner_id = user_id.clone();
+            match resource {
+                Resource::Post(id) => Target::Post {
+                    author_id: owner_id,
+                    post_id: id.clone(),
+                },
+                Resource::User => Target::User(owner_id),
+                Resource::File(id) => Target::File {
+                    owner_id,
+                    file_id: id.clone(),
+                },
+                Resource::Blob(id) => Target::Blob {
+                    owner_id,
+                    blob_id: id.clone(),
+                },
+                Resource::Tag(id) => Target::Tag {
+                    tagger_id: owner_id,
+                    tag_id: id.clone(),
+                    app: None,
+                },
+                Resource::Follow(_)
+                | Resource::Mute(_)
+                | Resource::Bookmark(_)
+                | Resource::Feed(_)
+                | Resource::LastRead
+                | Resource::Unknown => Target::Unkeyed { owner_id },
+            }
+        }
+        ExtendedParsedUri::UniversalTag {
+            user_id,
+            app,
+            resource,
+        } => match resource {
+            Resource::Tag(id) => Target::Tag {
+                tagger_id: user_id.clone(),
+                tag_id: id.clone(),
+                app: Some(app.clone()),
+            },
+            _ => Target::External,
+        },
+    }
 }
 
 pub(super) fn translate_put(
@@ -159,8 +206,8 @@ impl From<PubkyAppPost> for PostInput {
         Self {
             content: post.content,
             kind: post.kind.into(),
-            parent: post.parent,
-            embed: post.embed.map(|embed| embed.uri),
+            parent: post.parent.as_deref().map(resolve_reference),
+            embed: post.embed.map(|embed| resolve_reference(&embed.uri)),
             attachments: post.attachments,
             lock: post.lock,
         }
@@ -213,17 +260,30 @@ impl From<PubkyAppFile> for FileInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::handlers::Reference;
     use nexus_common::models::post::PostKind;
     use pubky_social_specs::legacy_v0::{
         blob_uri_builder, file_uri_builder, post_uri_builder, PubkyAppPostEmbed, PubkyAppPostKind,
         PubkyAppUserLink,
     };
+    use pubky_social_specs::PubkyId;
 
     const AUTHOR: &str = "4snwyct86m383rsduhw5xgcxpw7c63j3pq8x4ycqikxgik8y64ro";
     const POST_ID: &str = "003286NSMY490";
 
     fn uri_of_post(id: &str) -> String {
         post_uri_builder(AUTHOR.into(), id.into())
+    }
+
+    /// The parent and the embed resolve to the post they name, keeping the URI as written.
+    fn post_reference(id: &str) -> Reference {
+        Reference {
+            uri: uri_of_post(id),
+            target: Target::Post {
+                author_id: PubkyId::try_from(AUTHOR).unwrap(),
+                post_id: id.to_string(),
+            },
+        }
     }
 
     #[test]
@@ -243,8 +303,8 @@ mod tests {
 
         assert_eq!(post.content, "Hello");
         assert_eq!(post.kind, PostKind::Long);
-        assert_eq!(post.parent, Some(uri_of_post("003286NSMY491")));
-        assert_eq!(post.embed, Some(uri_of_post("003286NSMY492")));
+        assert_eq!(post.parent, Some(post_reference("003286NSMY491")));
+        assert_eq!(post.embed, Some(post_reference("003286NSMY492")));
         assert_eq!(post.attachments, Some(vec![attachment]));
         assert_eq!(post.lock.as_deref(), Some("pubky://lockserver/pub/lock"));
     }
