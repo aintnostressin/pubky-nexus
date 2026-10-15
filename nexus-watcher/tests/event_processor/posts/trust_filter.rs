@@ -173,6 +173,43 @@ async fn test_threads_keep_the_authors_own_replies() -> Result<()> {
     Ok(())
 }
 
+/// Only the immediate parent's author skips the gate: an unranked owner's
+/// answer to a reply under their own post goes to that reply's thread, whose
+/// author is the replier, and stays out of it. The planned follow-up that
+/// exempts the thread root's author flips this.
+#[tokio_shared_rt::test(shared)]
+async fn test_an_unranked_owners_nested_answer_is_gated() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+
+    let owner_kp = Keypair::random();
+    let owner_id = test
+        .create_user(&owner_kp, &test_user("Watcher:Gate:NestedOwner", BIO))
+        .await?;
+    unrank_user(&owner_id).await?;
+    let ranked_kp = Keypair::random();
+    let ranked_id = test
+        .create_user(&ranked_kp, &test_user("Watcher:Gate:NestedReplier", BIO))
+        .await?;
+
+    let (post_id, _) = test
+        .create_post(&owner_kp, &short_post("Watcher:Gate:NestedRoot"))
+        .await?;
+    let reply = PubkyAppPost {
+        parent: Some(post_uri_builder(owner_id.clone(), post_id)),
+        ..short_post("Watcher:Gate:NestedReply")
+    };
+    let (reply_id, _) = test.create_post(&ranked_kp, &reply).await?;
+    let answer = PubkyAppPost {
+        parent: Some(post_uri_builder(ranked_id.clone(), reply_id.clone())),
+        ..short_post("Watcher:Gate:NestedAnswer")
+    };
+    let (answer_id, _) = test.create_post(&owner_kp, &answer).await?;
+
+    let member = check_member_post_replies(&ranked_id, &reply_id, &[&owner_id, &answer_id]).await?;
+    assert!(member.is_none(), "the answer's thread is the replier's");
+    Ok(())
+}
+
 /// An unranked user's reply notifies the post's author like a ranked user's,
 /// though the thread hides it from others: the author sees every reply.
 #[tokio_shared_rt::test(shared)]

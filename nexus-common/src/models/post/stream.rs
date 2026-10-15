@@ -1136,8 +1136,10 @@ impl PostStream {
 }
 
 /// Whether a reply skips the trust gate in its thread: the thread is its parent
-/// post's author's own, so their replies always stay. The reply write and the
-/// reconcile's thread entries both follow it.
+/// post's author's own, so their replies always stay. Only the immediate
+/// parent's author is exempt: the thread root's author answering deeper in the
+/// thread still goes through the gate. The reply write and the reconcile's
+/// thread entries both follow it.
 fn gate_exempts_reply(reply_author: &str, parent_author: &str) -> bool {
     reply_author == parent_author
 }
