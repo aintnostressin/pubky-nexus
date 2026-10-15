@@ -419,8 +419,9 @@ impl PostStream {
     }
 
     /// The thread under `author_id`'s post `post_id` as `viewer` gets it while
-    /// the filter may hide posts: every reply for the post's author, and for
-    /// anyone else the shared thread with their own hidden replies merged in.
+    /// the filter may hide posts: every reply for the post's author, the shared
+    /// thread with their own hidden replies merged in for a viewer whose replies
+    /// it may hide, and the shared thread alone for anyone else.
     async fn get_viewers_thread(
         author_id: &str,
         post_id: &str,
@@ -433,8 +434,28 @@ impl PostStream {
             let replies = Self::get_replies_from_graph(parent, None, &order, &pagination).await?;
             return Ok(PostKeyStream::from_scored_entries(replies));
         }
+        if trust_filter::may_hide_replies_of(viewer).await? {
+            return Self::get_merged_thread(parent, viewer, order, pagination).await;
+        }
+        let Pagination {
+            skip,
+            limit,
+            start,
+            end,
+        } = pagination;
+        Ok(Self::get_post_replies(author_id, post_id, order, start, end, skip, limit).await?)
+    }
+
+    /// The `parent` post's shared thread with `viewer`'s own replies to it
+    /// merged in, paged as one sorted set would page them.
+    async fn get_merged_thread(
+        parent: (&str, &str),
+        viewer: &str,
+        order: SortOrder,
+        pagination: Pagination,
+    ) -> ModelResult<PostKeyStream> {
         let window = merge_window(&pagination);
-        let key_parts = [&POST_REPLIES_PER_POST_KEY_PARTS[..], &[author_id, post_id]].concat();
+        let key_parts = [&POST_REPLIES_PER_POST_KEY_PARTS[..], &[parent.0, parent.1]].concat();
         let shared = Self::try_from_index_sorted_set(
             &key_parts,
             window.start,
@@ -445,10 +466,7 @@ impl PostStream {
             None,
         )
         .await?;
-        let own = match trust_filter::may_hide_replies_of(viewer).await? {
-            true => Self::get_replies_from_graph(parent, Some(viewer), &order, &window).await?,
-            false => Vec::new(),
-        };
+        let own = Self::get_replies_from_graph(parent, Some(viewer), &order, &window).await?;
         let entries = shared.unwrap_or_default().into_iter().chain(own).collect();
         Ok(merged_page(entries, &order, &pagination))
     }
