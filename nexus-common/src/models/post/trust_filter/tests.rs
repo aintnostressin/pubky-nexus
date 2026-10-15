@@ -910,7 +910,8 @@ mod live {
     /// A replier sees their own replies while either ranking leaves them out:
     /// the live one ranked them before a reconcile showed their older replies,
     /// or dropped them while the applied copy still has them and the gate turns
-    /// their new replies away. A viewer in both gets no merge.
+    /// their new replies away. A viewer in both rankings gets no merge, nor does
+    /// one who never replied.
     #[tokio_shared_rt::test(shared)]
     async fn a_replier_sees_own_replies_while_either_ranking_leaves_them_out() -> TestResult {
         setup(&[]).await?;
@@ -922,7 +923,8 @@ mod live {
         unrank(SPAMMER).await?;
         let _: () = conn.zadd(applied_key(), SPAMMER, 0).await?;
         let newly_dropped = d2_thread_walk(Some(SPAMMER)).await;
-        let ranked_viewer = may_hide_posts_of(ENGAGED).await;
+        let ranked_viewer = may_hide_replies_of(ENGAGED).await;
+        let silent_viewer = may_hide_replies_of(BOB).await;
         cleanup(&[]).await?;
 
         assert!(newly_ranked?.contains(&own_reply), "ranked, not yet shown");
@@ -931,6 +933,7 @@ mod live {
             "dropped, still in the copy"
         );
         assert!(!ranked_viewer?, "a viewer in both rankings");
+        assert!(!silent_viewer?, "an unranked viewer who never replied");
         Ok(())
     }
 

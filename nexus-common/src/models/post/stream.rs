@@ -445,7 +445,7 @@ impl PostStream {
             None,
         )
         .await?;
-        let own = match trust_filter::may_hide_posts_of(viewer).await? {
+        let own = match trust_filter::may_hide_replies_of(viewer).await? {
             true => Self::get_replies_from_graph(parent, Some(viewer), &order, &window).await?,
             false => Vec::new(),
         };

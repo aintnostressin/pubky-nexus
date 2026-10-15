@@ -17,6 +17,7 @@ use redis::AsyncCommands;
 
 use crate::db::get_redis_conn;
 use crate::db::kv::{sorted_key, RedisResult, ScoreAction};
+use crate::models::post::POST_REPLIES_PER_USER_KEY_PARTS;
 use crate::models::user::SocialGraphStatus;
 use scripts::{add_call, gate_call, INCR};
 
@@ -69,18 +70,20 @@ pub(crate) async fn is_ranking_applied() -> RedisResult<bool> {
     Ok(present == 2)
 }
 
-/// Whether the shared sets may hide some of `user_id`'s posts: the live
-/// ranking, which gates new writes, or the applied copy, which the posts already
-/// there follow, leaves them out. A missing ranking or copy counts as leaving
-/// them out, which costs a caller at most a needless merge.
-pub(crate) async fn may_hide_posts_of(user_id: &str) -> RedisResult<bool> {
+/// Whether threads may hide some of `user_id`'s replies: they wrote any, and
+/// the live ranking, which gates new writes, or the applied copy, which the
+/// replies already there follow, leaves them out. A missing ranking or copy
+/// counts as leaving them out, which costs a caller at most a needless merge.
+pub(crate) async fn may_hide_replies_of(user_id: &str) -> RedisResult<bool> {
+    let replies_key = sorted_key(&[&POST_REPLIES_PER_USER_KEY_PARTS[..], &[user_id]].concat());
     let mut conn = get_redis_conn().await?;
-    let (ranked, applied): (Option<f64>, Option<f64>) = redis::pipe()
+    let (replied, ranked, applied): (bool, Option<f64>, Option<f64>) = redis::pipe()
+        .exists(replies_key)
         .zscore(SocialGraphStatus::ranking_key(), user_id)
         .zscore(applied_key(), user_id)
         .query_async(&mut conn)
         .await?;
-    Ok(ranked.is_none() || applied.is_none())
+    Ok(replied && (ranked.is_none() || applied.is_none()))
 }
 
 /// Adds `entries` (`(score, "author:post")`) to the shared sorted set at
