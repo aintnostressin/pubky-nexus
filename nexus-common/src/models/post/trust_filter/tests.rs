@@ -1009,23 +1009,37 @@ mod live {
 
     /// An unranked replier's merged thread pages like the sorted set too: the
     /// shared set's D2_REPLY and the graph's SPAMMER_REPLY are each cut by the
-    /// window, `start` as the highest score kept and `end` the lowest.
+    /// window, `start` as the highest score kept and `end` the lowest, and with
+    /// a stray entry in the shared set the oldest first page still follows the
+    /// order in both reads and the merge.
     #[tokio_shared_rt::test(shared)]
     async fn a_repliers_merged_thread_pages_like_the_sorted_set() -> TestResult {
+        let key = replies_key(D2, "WOTPOSTTAGS01");
+        let stray = format!("{BOB}:stray");
         setup(&[]).await?;
-        let page = |start, end| Pagination {
+        let mut conn = get_redis_conn().await?;
+        let page = |start, end, limit| Pagination {
             start,
             end,
-            limit: Some(10),
+            limit: Some(limit),
             ..Default::default()
         };
-        let read = |pagination| d2_thread(Some(SPAMMER), SortOrder::Descending, pagination);
+        let read = |order, pagination| d2_thread(Some(SPAMMER), order, pagination);
 
-        let below = read(page(Some(1650000000012.0), None)).await?;
-        let above = read(page(None, Some(1650000000009.0))).await?;
+        let below = read(SortOrder::Descending, page(Some(1650000000012.0), None, 10)).await;
+        let above = read(SortOrder::Descending, page(None, Some(1650000000009.0), 10)).await;
+        let _: () = conn.zadd(&key, &stray, 1650000000010.0).await?;
+        let oldest = read(SortOrder::Ascending, page(None, None, 1)).await;
+        let _: () = conn.zrem(&key, &stray).await?;
+        cleanup(&[]).await?;
 
-        assert_eq!(below, [D2_REPLY], "the graph read cuts the replier's own");
-        assert_eq!(above, [SPAMMER_REPLY], "the shared read cuts D2's");
+        assert_eq!(below?, [D2_REPLY], "the graph read cuts the replier's own");
+        assert_eq!(above?, [SPAMMER_REPLY], "the shared read cuts D2's");
+        assert_eq!(
+            oldest?,
+            [D2_REPLY],
+            "both reads and the merge follow the order"
+        );
         Ok(())
     }
 
