@@ -198,7 +198,7 @@ impl Write {
             .map(|(score, member)| (*score, member.as_str()));
         match self {
             Write::Hide => remove_call(key, entries.map(|(_, member)| member)),
-            Write::Show => add_call(key, entries),
+            Write::Show => add_call(key, false, entries),
         }
     }
 }
@@ -268,7 +268,8 @@ pub(crate) struct AuthorPost {
     pub author: String,
     pub id: String,
     pub indexed_at: i64,
-    pub is_reply: bool,
+    /// `(author, post)` of the post it replies to.
+    pub parent: Option<(String, String)>,
     /// The labels it is tagged with.
     pub labels: Vec<String>,
     /// Its tags, replies and reposts.
@@ -279,11 +280,13 @@ pub(crate) struct AuthorPost {
 
 impl AuthorPost {
     pub(super) fn from_row(row: &Row) -> GraphResult<Self> {
+        let parent_author: Option<String> = row.get("parent_author_id")?;
+        let parent_post: Option<String> = row.get("parent_post_id")?;
         Ok(AuthorPost {
             author: row.get("author_id")?,
             id: row.get("post_id")?,
             indexed_at: row.get("indexed_at")?,
-            is_reply: row.get("is_reply")?,
+            parent: parent_author.zip(parent_post),
             labels: row.get("labels")?,
             engagement: row.get("engagement")?,
             mentions: row.get("mentions")?,

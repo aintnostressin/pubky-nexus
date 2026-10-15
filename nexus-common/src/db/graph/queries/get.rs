@@ -354,10 +354,12 @@ pub fn author_post_entries(author_id: &str, after: (i64, &str), limit: usize) ->
         WITH author, p
         ORDER BY p.indexed_at, p.id
         LIMIT $limit
+        OPTIONAL MATCH (p)-[:REPLIED]->(parent:Post)<-[:AUTHORED]-(parent_author:User)
         RETURN author.id AS author_id,
             p.id AS post_id,
             p.indexed_at AS indexed_at,
-            EXISTS { (p)-[:REPLIED]->(:Post) } AS is_reply,
+            parent_author.id AS parent_author_id,
+            parent.id AS parent_post_id,
             COLLECT { MATCH (p)<-[tag:TAGGED]-(:User) RETURN DISTINCT tag.label } AS labels,
             COUNT { (p)<-[:TAGGED]-() }
                 + COUNT { (p)<-[:REPLIED]-() }
@@ -389,6 +391,48 @@ pub fn get_user_ids_page(after_id: &str, limit: usize) -> Query {
     )
     .param("after_id", after_id.to_string())
     .param("limit", limit.min(MAX_QUERY_LIMIT) as i64)
+}
+
+/// Replies to `author_id`'s post `post_id`, only `replier_id`'s when given, as
+/// `author:reply` keys scored by `indexed_at`. Windowed and paged like the
+/// thread's sorted set: `start` is the highest score kept and `end` the lowest,
+/// whatever the order.
+pub fn post_replies(
+    (author_id, post_id): (&str, &str),
+    replier_id: Option<&str>,
+    order: &SortOrder,
+    pagination: &Pagination,
+) -> Query {
+    let direction = match order {
+        SortOrder::Ascending => "ASC",
+        SortOrder::Descending => "DESC",
+    };
+    let cypher = format!(
+        "
+        // Anchor on the post's unique id: matching via the author would make the
+        // planner expand every post they wrote.
+        MATCH (p:Post {{id: $post_id}})
+        WHERE EXISTS {{ (:User {{id: $author_id}})-[:AUTHORED]->(p) }}
+        MATCH (p)<-[:REPLIED]-(reply:Post)<-[:AUTHORED]-(replier:User)
+        WHERE ($replier_id IS NULL OR replier.id = $replier_id)
+          AND reply.indexed_at <= $start AND reply.indexed_at >= $end
+        RETURN replier.id + ':' + reply.id AS key, reply.indexed_at AS score
+        ORDER BY score {direction}, key {direction}
+        SKIP {skip}
+        LIMIT {limit}
+        ",
+        skip = pagination.skip.unwrap_or(0).min(MAX_QUERY_SKIP),
+        limit = pagination
+            .limit
+            .unwrap_or(MAX_QUERY_LIMIT)
+            .min(MAX_QUERY_LIMIT),
+    );
+    Query::new("post_replies", &cypher)
+        .param("author_id", author_id)
+        .param("post_id", post_id)
+        .param("replier_id", replier_id)
+        .param("start", pagination.start.unwrap_or(f64::MAX))
+        .param("end", pagination.end.unwrap_or(f64::MIN))
 }
 
 /// Users whose profile carries any of the given tag labels, scored by distinct
