@@ -277,16 +277,11 @@ impl PostStream {
 
         // Decide whether to use index or fallback to graph query
         let use_index = Self::can_use_index(&sorting, &source, &tags, &kind);
-        // The trust filter hides an unranked author's posts from everyone, so
-        // their own ALL timeline gets them back, and a thread gives its post's
-        // author every reply and anyone else their own.
-        let hidden_posts_viewer = match (&source, &sorting, &tags, viewer_id) {
-            (StreamSource::All, StreamSorting::Timeline, None, Some(viewer))
-            | (StreamSource::PostReplies { .. }, _, None, Some(viewer)) => {
-                trust_filter::may_hide_posts().await?.then_some(viewer)
-            }
-            _ => None,
-        };
+        let hidden_posts_viewer =
+            match Self::hidden_posts_candidate(&source, &sorting, &tags, viewer_id) {
+                Some(viewer) => trust_filter::may_hide_posts().await?.then_some(viewer),
+                None => None,
+            };
         let rule = Self::trust_rule(&source, use_index, hidden_posts_viewer).await?;
 
         let started = std::time::Instant::now();
@@ -471,6 +466,23 @@ impl PostStream {
         rows.iter()
             .map(|row| Ok((row.get("key")?, row.get::<i64>("score")? as f64)))
             .collect()
+    }
+
+    /// The viewer this stream gives their hidden posts back to, if the trust
+    /// filter hides any: it hides an unranked author's posts from everyone, so
+    /// their own ALL timeline gets them back, and a thread gives its post's
+    /// author every reply and anyone else their own.
+    fn hidden_posts_candidate<'a>(
+        source: &StreamSource,
+        sorting: &StreamSorting,
+        tags: &Option<Vec<String>>,
+        viewer_id: Option<&'a str>,
+    ) -> Option<&'a str> {
+        match (source, sorting, tags) {
+            (StreamSource::All, StreamSorting::Timeline, None)
+            | (StreamSource::PostReplies { .. }, _, None) => viewer_id,
+            _ => None,
+        }
     }
 
     // Determine if we have a quick access sorted set for this combination
@@ -1122,8 +1134,6 @@ impl PostStream {
     }
 }
 
-/// Orders entries as one sorted set would: by score, ties by member, each
-/// member once.
 /// The window each source of a merged stream reads: every entry up to the
 /// page's end, so the merged list can be skipped and limited like one set.
 fn merge_window(pagination: &Pagination) -> Pagination {
@@ -1150,6 +1160,8 @@ fn merged_page(
     PostKeyStream::from_scored_entries(page)
 }
 
+/// Orders entries as one sorted set would: by score, ties by member, each
+/// member once.
 fn merge_scored(mut merged: Vec<(String, f64)>, order: &SortOrder) -> Vec<(String, f64)> {
     merged.sort_by(|x, y| {
         let ascending = x.1.total_cmp(&y.1).then_with(|| x.0.cmp(&y.0));
@@ -1223,6 +1235,39 @@ mod tests {
             assert_eq!(source.get_observer(), Some("observer"));
             assert_eq!(source, expected);
         }
+    }
+
+    /// Only the ALL timeline and threads give a viewer their hidden posts back:
+    /// the timeline without tags, and a thread whatever its sorting.
+    #[test]
+    fn test_hidden_posts_candidate_is_the_all_timeline_or_a_thread() {
+        let viewer = Some("viewer");
+        let tags = Some(vec!["tag".to_string()]);
+        let thread = StreamSource::PostReplies {
+            author_id: "author".to_string(),
+            post_id: "post".to_string(),
+        };
+        let author = StreamSource::Author {
+            author_id: "author".to_string(),
+        };
+        let candidate = |source, sorting, tags, viewer| {
+            PostStream::hidden_posts_candidate(source, &sorting, tags, viewer)
+        };
+        let all = &StreamSource::All;
+        let timeline = StreamSorting::Timeline;
+        let engagement = StreamSorting::TotalEngagement;
+
+        assert_eq!(candidate(all, timeline.clone(), &None, viewer), viewer);
+        assert_eq!(candidate(&thread, timeline.clone(), &None, viewer), viewer);
+        assert_eq!(
+            candidate(&thread, engagement.clone(), &None, viewer),
+            viewer
+        );
+        assert_eq!(candidate(all, engagement, &None, viewer), None);
+        assert_eq!(candidate(all, timeline.clone(), &tags, viewer), None);
+        assert_eq!(candidate(&thread, timeline.clone(), &tags, viewer), None);
+        assert_eq!(candidate(&author, timeline.clone(), &None, viewer), None);
+        assert_eq!(candidate(all, timeline, &None, None), None);
     }
 
     /// PostCollections is served from the graph only; no sorted set backs it.
