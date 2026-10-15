@@ -1007,8 +1007,7 @@ impl PostStream {
         let score = indexed_at as f64;
         let element = format!("{author_id}:{reply_id}");
         let entry = [(score, element.as_str())];
-        // The thread is the parent's author's own: their replies always get in.
-        if author_id == parent_post_key_parts[0] {
+        if gate_exempts_reply(author_id, parent_post_key_parts[0]) {
             return trust_filter::add_always(&key_parts, &entry).await;
         }
         trust_filter::add(&key_parts, &entry).await
@@ -1101,7 +1100,9 @@ impl PostStream {
     pub(crate) fn shared_set_entries(post: &AuthorPost) -> Vec<(String, f64)> {
         let indexed_at = post.indexed_at as f64;
         match &post.parent {
-            Some((parent_author, _)) if *parent_author == post.author => Vec::new(),
+            Some((parent_author, _)) if gate_exempts_reply(&post.author, parent_author) => {
+                Vec::new()
+            }
             Some((parent_author, parent_post)) => {
                 let key = [
                     &POST_REPLIES_PER_POST_KEY_PARTS[..],
@@ -1132,6 +1133,13 @@ impl PostStream {
         )
         .await
     }
+}
+
+/// Whether a reply skips the trust gate in its thread: the thread is its parent
+/// post's author's own, so their replies always stay. The reply write and the
+/// reconcile's thread entries both follow it.
+fn gate_exempts_reply(reply_author: &str, parent_author: &str) -> bool {
+    reply_author == parent_author
 }
 
 /// The window each source of a merged stream reads: every entry up to the
