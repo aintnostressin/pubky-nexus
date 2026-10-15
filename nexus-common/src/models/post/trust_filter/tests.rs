@@ -1007,6 +1007,28 @@ mod live {
         Ok(())
     }
 
+    /// An unranked replier's merged thread pages like the sorted set too: the
+    /// shared set's D2_REPLY and the graph's SPAMMER_REPLY are each cut by the
+    /// window, `start` as the highest score kept and `end` the lowest.
+    #[tokio_shared_rt::test(shared)]
+    async fn a_repliers_merged_thread_pages_like_the_sorted_set() -> TestResult {
+        setup(&[]).await?;
+        let page = |start, end| Pagination {
+            start,
+            end,
+            limit: Some(10),
+            ..Default::default()
+        };
+        let read = |pagination| d2_thread(Some(SPAMMER), SortOrder::Descending, pagination);
+
+        let below = read(page(Some(1650000000012.0), None)).await?;
+        let above = read(page(None, Some(1650000000009.0))).await?;
+
+        assert_eq!(below, [D2_REPLY], "the graph read cuts the replier's own");
+        assert_eq!(above, [SPAMMER_REPLY], "the shared read cuts D2's");
+        Ok(())
+    }
+
     /// The post's author reads their thread from the graph only while posts may
     /// be hidden: with the switch off and the sets shown again, it comes from
     /// the shared set, here holding an entry the graph doesn't have.
