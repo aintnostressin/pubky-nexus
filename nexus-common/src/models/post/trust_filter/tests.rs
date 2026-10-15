@@ -887,23 +887,34 @@ mod live {
 
     /// A thread hides the unranked spammer's reply from everyone but the post's
     /// author and the spammer, while the post's author's own reply stays for
-    /// all.
+    /// all. BOB, unranked with a reply elsewhere, gets their own replies merged
+    /// in, and none of the hidden ones.
     #[tokio_shared_rt::test(shared)]
     async fn threads_give_hidden_replies_back_to_the_owner_and_replier() -> TestResult {
-        setup(&[]).await?;
+        let bob_replies = sorted_key(&[&POST_REPLIES_PER_USER_KEY_PARTS[..], &[BOB]].concat());
+        setup(&[&bob_replies]).await?;
+        let mut conn = get_redis_conn().await?;
+        let _: () = conn.zadd(&bob_replies, "elsewhere", 1.0).await?;
         let both = vec![SPAMMER_REPLY.to_string(), D2_REPLY.to_string()];
         let own_only = vec![D2_REPLY.to_string()];
 
-        assert_eq!(d2_thread_walk(None).await?, own_only, "no viewer");
+        let anonymous = d2_thread_walk(None).await;
+        let ranked = d2_thread_walk(Some(ENGAGED)).await;
+        let bob_merges = may_hide_replies_of(BOB).await;
+        let unranked = d2_thread_walk(Some(BOB)).await;
+        let owner = d2_thread_walk(Some(D2)).await;
+        let replier = d2_thread_walk(Some(SPAMMER)).await;
+        cleanup(&[&bob_replies]).await?;
+
+        assert_eq!(anonymous?, own_only, "no viewer");
+        assert_eq!(ranked?, own_only, "a ranked viewer");
+        assert!(bob_merges?, "BOB replied elsewhere, so their thread merges");
         assert_eq!(
-            d2_thread_walk(Some(ENGAGED)).await?,
-            own_only,
-            "a ranked viewer"
+            unranked?, own_only,
+            "an unranked replier with no reply there"
         );
-        let unranked = d2_thread_walk(Some(BOB)).await?;
-        assert_eq!(unranked, own_only, "an unranked viewer with no reply there");
-        assert_eq!(d2_thread_walk(Some(D2)).await?, both, "the post's author");
-        assert_eq!(d2_thread_walk(Some(SPAMMER)).await?, both, "the replier");
+        assert_eq!(owner?, both, "the post's author");
+        assert_eq!(replier?, both, "the replier");
         Ok(())
     }
 
