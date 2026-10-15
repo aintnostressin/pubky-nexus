@@ -1011,7 +1011,8 @@ mod live {
     /// shared set's D2_REPLY and the graph's SPAMMER_REPLY are each cut by the
     /// window, `start` as the highest score kept and `end` the lowest, and with
     /// a stray entry in the shared set the oldest first page still follows the
-    /// order in both reads and the merge.
+    /// order in the shared read and the merge. The graph read's order is pinned
+    /// by the owner's test: the spammer has one reply in this thread.
     #[tokio_shared_rt::test(shared)]
     async fn a_repliers_merged_thread_pages_like_the_sorted_set() -> TestResult {
         let key = replies_key(D2, "WOTPOSTTAGS01");
@@ -1038,7 +1039,7 @@ mod live {
         assert_eq!(
             oldest?,
             [D2_REPLY],
-            "both reads and the merge follow the order"
+            "the shared read and the merge follow the order"
         );
         Ok(())
     }
