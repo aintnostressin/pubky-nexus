@@ -205,7 +205,10 @@ async fn test_an_unranked_owners_nested_answer_is_gated() -> Result<()> {
     };
     let (answer_id, _) = test.create_post(&owner_kp, &answer).await?;
 
+    // The answer is indexed, so its absence from the thread is the gate's doing.
+    let indexed = check_member_user_replies_timeline(&owner_id, &answer_id).await?;
     let member = check_member_post_replies(&ranked_id, &reply_id, &[&owner_id, &answer_id]).await?;
+    assert!(indexed.is_some(), "the answer was indexed");
     assert!(member.is_none(), "the answer's thread is the replier's");
     Ok(())
 }
