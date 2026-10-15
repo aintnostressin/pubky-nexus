@@ -877,6 +877,9 @@ mod live {
                 ..Default::default()
             };
             let page = d2_thread(viewer, SortOrder::Descending, pagination).await?;
+            if page.len() > 1 {
+                return Err(format!("a page of {} keys for a limit of 1", page.len()).into());
+            }
             if page.is_empty() {
                 return Ok(keys);
             }
@@ -969,6 +972,38 @@ mod live {
         assert_eq!(ascending, [D2_REPLY, SPAMMER_REPLY]);
         assert_eq!(below, [D2_REPLY]);
         assert_eq!(above, [SPAMMER_REPLY]);
+        Ok(())
+    }
+
+    /// A ranked viewer's thread is the shared set, paged in Redis: `limit`, the
+    /// order, and `start` and `end` as the highest and lowest score kept. A stray
+    /// entry gives each window something to cut.
+    #[tokio_shared_rt::test(shared)]
+    async fn a_ranked_viewers_thread_pages_like_the_sorted_set() -> TestResult {
+        let key = replies_key(D2, "WOTPOSTTAGS01");
+        let stray = format!("{BOB}:stray");
+        setup(&[]).await?;
+        let mut conn = get_redis_conn().await?;
+        let _: () = conn.zadd(&key, &stray, 1650000000010.0).await?;
+        let page = |start, end, limit| Pagination {
+            start,
+            end,
+            limit: Some(limit),
+            ..Default::default()
+        };
+        let read = |order, pagination| d2_thread(Some(ENGAGED), order, pagination);
+
+        let newest = read(SortOrder::Descending, page(None, None, 1)).await;
+        let oldest = read(SortOrder::Ascending, page(None, None, 1)).await;
+        let below = read(SortOrder::Descending, page(Some(1650000000009.0), None, 10)).await;
+        let above = read(SortOrder::Descending, page(None, Some(1650000000009.0), 10)).await;
+        let _: () = conn.zrem(&key, &stray).await?;
+        cleanup(&[]).await?;
+
+        assert_eq!(newest?, std::slice::from_ref(&stray));
+        assert_eq!(oldest?, [D2_REPLY]);
+        assert_eq!(below?, [D2_REPLY]);
+        assert_eq!(above?, [stray]);
         Ok(())
     }
 
