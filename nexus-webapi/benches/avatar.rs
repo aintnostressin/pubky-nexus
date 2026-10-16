@@ -11,7 +11,6 @@ use http_body_util::BodyExt;
 use nexus_common::models::{
     file::{FileDetails, FileUrls},
     traits::Collection,
-    user::{Epoch, UserDetails},
 };
 use nexus_common::utils::test_utils::default_ingestor_tests;
 use nexus_webapi::media::test_utils::default_subprocess_tests;
@@ -52,7 +51,7 @@ impl AvatarBenchSetup {
         let source_path = PathBuf::from(BLOB_PATH).join(AVATAR_BLOB_NAME);
         let source_size = fs::copy(source_path, image_dir.join("main")).await.unwrap();
 
-        Self::seed_avatar_records(&user_id, source_size).await;
+        Self::seed_avatar_records(source_size).await;
 
         let setup = Self {
             _temp_dir: temp_dir,
@@ -70,24 +69,9 @@ impl AvatarBenchSetup {
         setup
     }
 
-    async fn seed_avatar_records(user_id: &PubkyId, source_size: u64) {
+    // The mock graph user already carries this avatar as their image.
+    async fn seed_avatar_records(source_size: u64) {
         let avatar_uri = format!("pubky://{USER_PUBKY}/pub/pubky.app/files/{FILE_ID}");
-
-        let user = UserDetails {
-            name: "Avatar Bench User".to_string(),
-            bio: None,
-            id: user_id.clone(),
-            links: None,
-            status: None,
-            image: Some(avatar_uri.clone()),
-            indexed_at: 1_724_134_095_000,
-            deleted: false,
-            epoch: Epoch::V0,
-        };
-
-        UserDetails::put_to_index(&[USER_PUBKY], vec![Some(user)])
-            .await
-            .unwrap();
 
         let file = FileDetails {
             id: FILE_ID.to_string(),
