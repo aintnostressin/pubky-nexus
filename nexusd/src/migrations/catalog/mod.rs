@@ -12,6 +12,7 @@ use resource_stream_keys_retire_1790208000::ResourceStreamKeysRetire1790208000;
 use uri_backfill_1791196997::UriBackfill1791196997;
 use user_deleted_flag_1780617600::UserDeletedFlag1780617600;
 use user_epoch_backfill_1791812997::UserEpochBackfill1791812997;
+use user_search_state_backfill_1792157548::UserSearchStateBackfill1792157548;
 use users_by_pk_reindex_1751635096::UsersByPkReindex1751635096;
 use users_by_tags_index_backfill_1786924800::UsersByTagsIndexBackfill1786924800;
 
@@ -35,6 +36,7 @@ pub fn import_migrations(migration_manager: &mut MigrationManager) {
         Box::new(UriBackfill1791196997),
         Box::new(ResourceStreamKeysRetire1790208000),
         Box::new(UserEpochBackfill1791812997),
+        Box::new(UserSearchStateBackfill1792157548),
     ];
     for migration in migrations {
         migration_manager.register(migration);
@@ -53,5 +55,6 @@ pub mod resource_stream_keys_retire_1790208000;
 pub mod uri_backfill_1791196997;
 pub mod user_deleted_flag_1780617600;
 pub mod user_epoch_backfill_1791812997;
+pub mod user_search_state_backfill_1792157548;
 pub mod users_by_pk_reindex_1751635096;
 pub mod users_by_tags_index_backfill_1786924800;
