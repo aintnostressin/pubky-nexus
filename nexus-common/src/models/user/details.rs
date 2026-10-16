@@ -1,40 +1,16 @@
-use super::{Epoch, UserSearch};
-use crate::db::graph::Query;
-use crate::db::kv::RedisResult;
-use crate::db::{exec_single_row, queries, GraphResult, RedisOps};
+use super::Epoch;
+use crate::db::{exec_single_row, fetch_all_rows_from_graph, queries, GraphResult};
 use crate::models::error::ModelResult;
-use crate::models::traits::Collection;
-use async_trait::async_trait;
 use chrono::Utc;
+use neo4rs::Row;
 use pubky_app_specs::{PubkyAppUser, PubkyAppUserLink, PubkyId};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json;
+use tracing::warn;
 use utoipa::ToSchema;
 
-#[async_trait]
-impl RedisOps for UserDetails {}
-
-#[async_trait]
-impl Collection<&str> for UserDetails {
-    fn collection_details_graph_query(id_list: &[&str]) -> Query {
-        queries::get::get_users_details_by_ids(id_list)
-    }
-
-    fn put_graph_query(&self) -> GraphResult<Query> {
-        queries::put::create_user(self, None)
-    }
-
-    async fn extend_on_index_miss(details: &[std::option::Option<Self>]) -> RedisResult<()> {
-        let user_details_refs: Vec<&UserDetails> = details
-            .iter()
-            .filter_map(|detail| detail.as_ref())
-            .collect();
-
-        UserSearch::put_to_index(&user_details_refs).await
-    }
-}
-
 /// Represents user data with name, bio, image, links, and status.
+// Read from the graph, never cached: see `get_by_ids`.
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct UserDetails {
     pub name: String,
@@ -91,9 +67,8 @@ where
     D: Deserializer<'de>,
 {
     // Neo4j drops null/missing properties, so pre-migration nodes will lack the
-    // `deleted` field entirely. Redis JSON cache entries written before the
-    // migration similarly lack this key. Deserialize through Option<bool> so a
-    // missing property yields None (→ false), while a present value is respected.
+    // `deleted` field entirely. Deserialize through Option<bool> so a missing
+    // property yields None (→ false), while a present value is respected.
     // Serializes as a plain non-optional `bool` for the API.
     let value = Option::<bool>::deserialize(deserializer)?;
     Ok(value.unwrap_or(false))
@@ -103,19 +78,70 @@ fn deserialize_user_epoch<'de, D>(deserializer: D) -> Result<Epoch, D::Error>
 where
     D: Deserializer<'de>,
 {
-    // Nodes and cached JSON without an epoch lack the field. neo4rs
-    // hands a missing node property to a deserializer that only accepts `Option`,
-    // so `#[serde(default)]` alone is not enough.
+    // Nodes without an epoch lack the field. neo4rs hands a missing node
+    // property to a deserializer that only accepts `Option`, so
+    // `#[serde(default)]` alone is not enough.
     let value = Option::<Epoch>::deserialize(deserializer)?;
     Ok(value.unwrap_or_default())
 }
 
 impl UserDetails {
-    /// Retrieves details by user ID, first trying to get from Redis, then from Neo4j if not found.
+    /// Reads the user's details from the graph: `None` when there is no such
+    /// node, or when the node does not deserialize (see [`Self::from_row`]).
     pub async fn get_by_id(user_id: &str) -> ModelResult<Option<Self>> {
-        // Delegate to UserDetailsCollection::get_by_ids for single item retrieval
-        let details_collection = Self::get_by_ids(&[user_id]).await?;
-        Ok(details_collection.into_iter().flatten().next())
+        Ok(Self::get_by_ids(&[user_id]).await?.pop().flatten())
+    }
+
+    /// Reads each user's details from the graph: one slot per id, in order,
+    /// `None` where there is no such node or it does not deserialize (see
+    /// [`Self::from_row`]); callers that filter rankings evict on `None`.
+    pub async fn get_by_ids(user_ids: &[impl AsRef<str>]) -> ModelResult<Vec<Option<Self>>> {
+        if user_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<&str> = user_ids.iter().map(AsRef::as_ref).collect();
+        let rows = fetch_all_rows_from_graph(queries::get::get_users_details_by_ids(&ids)).await?;
+        Ok(rows.iter().map(Self::from_row).collect())
+    }
+
+    /// The `record` node of a row with an `id` column: `None` for a missing
+    /// node, and for a node that does not deserialize, which is logged with
+    /// its id rather than failing the whole read.
+    pub fn from_row(row: &Row) -> Option<Self> {
+        match row.get::<Option<Self>>("record") {
+            Ok(record) => record,
+            Err(error) => {
+                let id: String = row.get("id").unwrap_or_default();
+                warn!(user_id = %id, %error, "Skipping a user node that does not deserialize");
+                None
+            }
+        }
+    }
+
+    /// Splits `items` by the details read for them, in order: the ones whose
+    /// user is live, and the ones to evict, whose user is tombstoned or gone.
+    pub fn split_live<T>(items: Vec<T>, details: Vec<Option<Self>>) -> (Vec<T>, Vec<T>) {
+        let mut live = Vec::with_capacity(items.len());
+        let mut evicted = Vec::new();
+        for (item, details) in items.into_iter().zip(details) {
+            match details {
+                Some(details) if !details.deleted => live.push(item),
+                _ => evicted.push(item),
+            }
+        }
+        (live, evicted)
+    }
+
+    /// Writes the node without a `uri`, keeping the stored one: for stubs and tombstones.
+    pub async fn put_to_graph(&self) -> GraphResult<()> {
+        exec_single_row(queries::put::create_user(self, None)?).await
+    }
+
+    /// A node created by key discovery and never read from a profile: it is
+    /// named after its id. A profile name is at most 50 characters and an id
+    /// 52, so no profile can take this shape.
+    pub fn is_stub(&self) -> bool {
+        self.name == self.id.as_ref()
     }
 
     /// Creates a minimal `UserDetails` with only the public key.
@@ -166,18 +192,8 @@ impl UserDetails {
     }
 
     /// Writes a profile read from the homeserver, storing `uri` (its event path) on the node.
-    /// `put_to_graph` writes no `uri` and keeps the stored one: stubs and tombstones use it.
     pub async fn put_profile_to_graph(&self, uri: &str) -> GraphResult<()> {
         exec_single_row(queries::put::create_user(self, Some(uri))?).await
-    }
-
-    pub async fn delete(user_id: &str) -> ModelResult<()> {
-        // Delete user_details on Redis
-        Self::remove_from_index_multiple_json(&[&[user_id]]).await?;
-        // Delete user graph node;
-        exec_single_row(queries::del::delete_user(user_id)).await?;
-
-        Ok(())
     }
 }
 
@@ -195,6 +211,7 @@ pub async fn set_user_homeserver_stale(user_id: &str, stale: bool) -> GraphResul
 mod tests {
     use super::*;
     use neo4rs::{BoltInteger, BoltList, BoltMap, BoltNode, BoltString, BoltType, Node};
+    use tracing_test::traced_test;
 
     /// Deserializing a UserDetails from a BoltNode without the links property
     /// should succeed with links: None. Neo4j drops null properties from nodes,
@@ -255,6 +272,74 @@ mod tests {
         assert!(details.deleted);
     }
 
+    /// Only a key-discovery node is a stub: a profile cannot be named after its id.
+    #[test]
+    fn only_a_discovery_node_is_a_stub() {
+        let id = PubkyId::try_from("uo7jgkykft4885n8cruizwy6khw71mnu5pq3ay9i8pw1ymcn85ko").unwrap();
+        assert!(UserDetails::from_pubky(id.clone()).is_stub());
+        assert!(!UserDetails::tombstone(&id).is_stub());
+        let profile = PubkyAppUser {
+            name: "Dave".to_string(),
+            bio: None,
+            image: None,
+            links: None,
+            status: None,
+        };
+        assert!(!UserDetails::from_homeserver(profile, &id).is_stub());
+    }
+
+    /// A live user is kept; a tombstone and a missing node are evicted.
+    #[test]
+    fn split_live_keeps_live_users_only() {
+        let id = PubkyId::try_from("uo7jgkykft4885n8cruizwy6khw71mnu5pq3ay9i8pw1ymcn85ko").unwrap();
+        let details = vec![
+            Some(UserDetails::from_pubky(id.clone())),
+            Some(UserDetails::tombstone(&id)),
+            None,
+        ];
+        let (live, evicted) = UserDetails::split_live(vec!["live", "tombstone", "gone"], details);
+        assert_eq!(live, vec!["live"]);
+        assert_eq!(evicted, vec!["tombstone", "gone"]);
+    }
+
+    /// A null record is a missing node and logs nothing, a valid node reads,
+    /// and a node that does not deserialize is skipped with its id logged.
+    #[traced_test]
+    #[test]
+    fn from_row_tells_a_missing_node_from_a_malformed_one() {
+        let id = "uo7jgkykft4885n8cruizwy6khw71mnu5pq3ay9i8pw1ymcn85ko";
+        let node = |indexed_at: Option<i64>| {
+            let mut props = BoltMap::new();
+            props.put(BoltString::from("name"), BoltType::from("Dave"));
+            props.put(BoltString::from("id"), BoltType::from(id));
+            if let Some(indexed_at) = indexed_at {
+                props.put(BoltString::from("indexed_at"), BoltType::from(indexed_at));
+            }
+            BoltType::Node(BoltNode::new(
+                BoltInteger::new(1),
+                BoltList::from(vec![BoltType::from("User")]),
+                props,
+            ))
+        };
+        let row = |record: BoltType| {
+            let fields = BoltList::from(vec![BoltType::from("id"), BoltType::from("record")]);
+            let data = BoltList::from(vec![BoltType::from(id), record]);
+            Row::new(fields, data)
+        };
+
+        assert!(UserDetails::from_row(&row(BoltType::Null(neo4rs::BoltNull))).is_none());
+        assert!(!logs_contain("does not deserialize"));
+
+        let details = UserDetails::from_row(&row(node(Some(1724134095000)))).expect("a valid node");
+        assert_eq!(details.name, "Dave");
+
+        assert!(UserDetails::from_row(&row(node(None))).is_none());
+        assert!(logs_contain(
+            "Skipping a user node that does not deserialize"
+        ));
+        assert!(logs_contain(id));
+    }
+
     /// A node without an epoch reads as `V0`; a stored `epoch` is respected.
     #[test]
     fn deserialize_epoch_from_node() {
@@ -283,24 +368,5 @@ mod tests {
             let details: UserDetails = node(stored).to().expect("should deserialize");
             assert_eq!(details.epoch, expected, "stored epoch {stored:?}");
         }
-    }
-
-    /// A `User:Details` JSON document cached before epochs existed reads as `V0`.
-    #[test]
-    fn deserialize_from_json_without_epoch() {
-        let json = serde_json::json!({
-            "name": "Dave",
-            "bio": null,
-            "id": "uo7jgkykft4885n8cruizwy6khw71mnu5pq3ay9i8pw1ymcn85ko",
-            "links": null,
-            "status": null,
-            "image": null,
-            "indexed_at": 1724134095000_i64,
-            "deleted": false
-        });
-
-        let details: UserDetails =
-            serde_json::from_value(json).expect("should deserialize without epoch");
-        assert_eq!(details.epoch, Epoch::V0);
     }
 }

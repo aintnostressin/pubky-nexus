@@ -104,7 +104,7 @@ impl UserStream {
         viewer_id: Option<&str>,
         depth: Option<u8>,
     ) -> ModelResult<Option<Self>> {
-        // Use the new mget batch operation to retrieve all user views efficiently
+        // One bulk read for every user view
         let user_views_result = UserView::get_by_ids(user_ids, viewer_id, depth).await?;
 
         let mut user_views = Vec::with_capacity(user_ids.len());
@@ -152,18 +152,8 @@ impl UserStream {
         // Attempt to get cached data from Redis
         if let Some(cached_ids) = Self::try_get_cached_recommended(user_id, count).await? {
             // Filter out deleted users from cached IDs
-            let details_list = UserDetails::mget(&cached_ids).await?;
-
-            // Collect both filtered IDs and deleted IDs in one pass
-            let mut filtered_ids: Vec<String> = Vec::new();
-            let mut deleted_ids: Vec<String> = Vec::new();
-
-            for (id, details) in cached_ids.into_iter().zip(details_list) {
-                match details {
-                    Some(ref d) if !d.deleted => filtered_ids.push(id),
-                    _ => deleted_ids.push(id),
-                }
-            }
+            let details_list = UserDetails::get_by_ids(&cached_ids).await?;
+            let (filtered_ids, deleted_ids) = UserDetails::split_live(cached_ids, details_list);
 
             // Remove deleted users from the cache set to improve cache quality
             Self::remove_from_cached_recommended(user_id, &deleted_ids).await;
@@ -282,7 +272,7 @@ impl UserStream {
     async fn get_most_followed(
         skip: Option<usize>,
         limit: Option<usize>,
-    ) -> RedisResult<Option<Vec<String>>> {
+    ) -> ModelResult<Option<Vec<String>>> {
         let result = Self::try_from_index_sorted_set(
             &USER_MOSTFOLLOWED_KEY_PARTS,
             None,
@@ -298,18 +288,9 @@ impl UserStream {
             return Ok(None);
         };
 
-        let ids: Vec<String> = set.iter().map(|(id, _)| id.clone()).collect();
-        let details_list = UserDetails::mget(&ids).await?;
-
-        let mut filtered_ids = Vec::new();
-        let mut deleted_ids = Vec::new();
-
-        for ((id, _score), details) in set.into_iter().zip(details_list) {
-            match details {
-                Some(ref d) if !d.deleted => filtered_ids.push(id),
-                _ => deleted_ids.push(id),
-            }
-        }
+        let ids: Vec<String> = set.into_iter().map(|(id, _score)| id).collect();
+        let details_list = UserDetails::get_by_ids(&ids).await?;
+        let (filtered_ids, deleted_ids) = UserDetails::split_live(ids, details_list);
 
         if !deleted_ids.is_empty() {
             let refs: Vec<&str> = deleted_ids.iter().map(|s| s.as_str()).collect();

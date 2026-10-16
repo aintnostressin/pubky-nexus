@@ -76,21 +76,23 @@ impl UserView {
         }))
     }
 
-    /// Retrieves multiple users by their IDs using batch Redis operations for better performance.
-    ///
-    /// This method uses the new `mget` operation to fetch user details and counts in bulk,
-    /// significantly improving performance when retrieving multiple users.
+    /// Retrieves multiple users by their IDs, reading the details, counts
+    /// and social graph status in bulk.
     pub async fn get_by_ids(
         user_ids: &[String],
         viewer_id: Option<&str>,
         depth: Option<u8>,
     ) -> ModelResult<Vec<Option<Self>>> {
-        // Use mget to fetch all user details and counts in bulk. The social
-        // graph lookup belongs here, batched, not in the per-user fan-out below.
+        // Bulk reads; the social graph lookup belongs here, batched, not in
+        // the per-user fan-out below.
         let (details_list, counts_list, social_graph_list) = tokio::try_join!(
-            UserDetails::mget(user_ids),
-            UserCounts::mget(user_ids),
-            SocialGraphStatus::get_by_ids(user_ids),
+            UserDetails::get_by_ids(user_ids),
+            async { UserCounts::mget(user_ids).await.map_err(ModelError::from) },
+            async {
+                SocialGraphStatus::get_by_ids(user_ids)
+                    .await
+                    .map_err(ModelError::from)
+            },
         )?;
         // Each returns one slot per id; the positional zip below relies on it.
         debug_assert_eq!(details_list.len(), user_ids.len());
