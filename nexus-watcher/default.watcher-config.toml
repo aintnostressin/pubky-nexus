@@ -53,9 +53,11 @@ max_missing_dep_backoff_secs = 3600
 # where every service follows them.
 [features]
 # Hide posts by authors outside the trust ranking from the streams every viewer
-# shares. Restart the watcher (or `nexusd run`) to apply a change: it then
-# updates the shared post sets, and the next trust recompute retries that if it
-# fails. Wiping Redis switches it off until the watcher's next start.
+# shares, and their replies from other users' threads, where only the thread's
+# author and the replier still see them. Restart the watcher (or `nexusd run`)
+# to apply a change: it then updates the shared post sets, and the next trust
+# recompute retries that if it fails. Wiping Redis switches it off until the
+# watcher's next start.
 hide_unranked_authors = false
 
 [stack]

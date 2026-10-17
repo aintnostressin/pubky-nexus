@@ -1,9 +1,10 @@
 //! Keeps posts by authors outside the trust ranking out of the sorted sets every
-//! viewer shares (global and per-tag). Every write goes through [`add`] or
-//! [`incr`], which check the author in the same atomic step, and [`reconcile()`]
-//! applies a new ranking, or a toggled `[features]` switch, to the posts already
-//! there. The switch lives in Redis, so every service follows the one the
-//! watcher stored. The scripts assume a single Redis instance.
+//! viewer shares (global, per-tag and per-thread). Every write goes through
+//! [`add`] or [`incr`], which check the author in the same atomic step; only a
+//! thread owner's own replies skip the check, through [`add_always`].
+//! [`reconcile()`] applies a new ranking, or a toggled `[features]` switch, to
+//! the posts already there. The switch lives in Redis, so every service follows
+//! the one the watcher stored. The scripts assume a single Redis instance.
 
 mod reconcile;
 mod scripts;
@@ -16,6 +17,8 @@ use redis::AsyncCommands;
 
 use crate::db::get_redis_conn;
 use crate::db::kv::{sorted_key, RedisResult, ScoreAction};
+use crate::models::post::POST_REPLIES_PER_USER_KEY_PARTS;
+use crate::models::user::SocialGraphStatus;
 use scripts::{add_call, gate_call, INCR};
 
 /// A copy of the ranking the shared sets were last reconciled with. Absent
@@ -67,13 +70,38 @@ pub(crate) async fn is_ranking_applied() -> RedisResult<bool> {
     Ok(present == 2)
 }
 
+/// Whether threads may hide some of `user_id`'s replies: they wrote any, and
+/// the live ranking, which gates new writes, or the applied copy, which the
+/// replies already there follow, leaves them out. A missing ranking or copy
+/// counts as leaving them out, which costs a caller at most a needless merge.
+pub(crate) async fn may_hide_replies_of(user_id: &str) -> RedisResult<bool> {
+    let replies_key = sorted_key(&[&POST_REPLIES_PER_USER_KEY_PARTS[..], &[user_id]].concat());
+    let mut conn = get_redis_conn().await?;
+    let (replied, ranked, applied): (bool, Option<f64>, Option<f64>) = redis::pipe()
+        .exists(replies_key)
+        .zscore(SocialGraphStatus::ranking_key(), user_id)
+        .zscore(applied_key(), user_id)
+        .query_async(&mut conn)
+        .await?;
+    Ok(replied && (ranked.is_none() || applied.is_none()))
+}
+
 /// Adds `entries` (`(score, "author:post")`) to the shared sorted set at
 /// `key_parts`, leaving out those whose author the filter hides.
 pub(crate) async fn add(key_parts: &[&str], entries: &[(f64, &str)]) -> RedisResult<()> {
-    let key = sorted_key(key_parts);
+    add_batches(&sorted_key(key_parts), entries, false).await
+}
+
+/// Adds `entries` to the shared sorted set at `key_parts` whatever their
+/// authors' rank.
+pub(crate) async fn add_always(key_parts: &[&str], entries: &[(f64, &str)]) -> RedisResult<()> {
+    add_batches(&sorted_key(key_parts), entries, true).await
+}
+
+async fn add_batches(key: &str, entries: &[(f64, &str)], always: bool) -> RedisResult<()> {
     let mut conn = get_redis_conn().await?;
     for batch in entries.chunks(BATCH) {
-        let call = add_call(&key, batch.iter().copied());
+        let call = add_call(key, always, batch.iter().copied());
         let _: usize = call.invoke_async(&mut conn).await?;
     }
     Ok(())
