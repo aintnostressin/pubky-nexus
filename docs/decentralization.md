@@ -200,11 +200,15 @@ Nexus has acted on is kept on the `User` node as `hs_record_ts`, the user's
 | none | record names a HS | edge created, clock set |
 | none | no record, or a record naming no HS | nothing; retried with an in-memory backoff |
 | HS A | record names HS A | edge kept, `resolved_at` refreshed, clock advanced |
-| HS A | record names HS B, newer than the clock | **edge moved to HS B**, clock set; `catch_up` flagged when B is the primary HS |
+| HS A | record names HS B, newer than the clock | **edge moved to HS B** and flagged `catch_up`, clock set |
 | HS A | record names HS B, not newer than the clock | ignored: edge kept, `resolved_at` refreshed |
 | HS A | record names no HS | edge kept, `resolved_at` refreshed, clock advanced |
 | HS A | no record found | edge kept, `resolved_at` refreshed |
 | any | lookup failed | nothing; retried on the next run |
+
+Deleted users stay in the sweep while they are bound, so a tombstone written
+from the homeserver a user left (a wipe after a move) does not stop Nexus from
+following their record. Deleted users with no edge are left out.
 
 The edge is never removed by the resolver. A record naming no HS (no `_pubky`
 entry, or a target that is not a public key) and a missing record say nothing
@@ -222,33 +226,37 @@ fails to resolve and lands in the offline-HS backoff
 ([Section 3](#3-indexing-externally-hosted-users-key-based)). Content already
 indexed stays. A later record naming a real HS resumes indexing there.
 
-### Switching to the primary HS: catch-up
+### After a switch: catch-up
 
-The primary HS is indexed in bulk through one global cursor. While a user's edge
-names another HS, every event they write on the primary (a copy of their data
-included) is fetched by the bulk processor, skipped as bound elsewhere, and
-passed for good. When the edge moves to the primary, those events have to be
-read some other way, so the switch flags the new edge `catch_up`:
+A switch flags the user's new edge `catch_up`: the user is read per user on the
+new HS, from their stored cursor there (0 on a first stay), until a read returns
+fewer events than `key_based_events_limit`, which clears the flag. On an
+external HS that is what the key-based loop does for every bound user anyway;
+the flag matters in two cases:
 
-- The bulk processor skips the flagged user's events; the per-user reader covers
-  them, and skipping keeps a single in-order consumer per user.
-- The external-HS runner ([Section 3](#3-indexing-externally-hosted-users-key-based))
-  includes the primary HS, first and outside `monitored_homeservers_limit`, while
-  any of its users is flagged, and reads those users' history from the primary's
-  per-user `/events-stream` from their stored cursor, `key_based_events_limit`
-  events per user per run.
-- A read returning fewer events than the limit means the user is caught up. The
-  flag is cleared, then the stream is read once more from the stored cursor, so
-  an event the bulk processor skipped between the last read and the clear is
-  still picked up. Handlers are idempotent, and a replayed PUT fetches the
-  resource at processing time, so it cannot resurrect something deleted later.
-- When an edge leaves the primary (and the user was not catching up), the bulk
-  cursor is stored as the user's per-user cursor there. A later return replays
-  only the gap instead of the user's whole history on the primary.
+- **The new HS is the primary.** The primary is indexed in bulk through one
+  global cursor. While the user's edge named another HS, every event they wrote
+  on the primary (a copy of their data included) was fetched by the bulk
+  processor, skipped as bound elsewhere, and passed for good. So the bulk
+  processor skips a flagged user's events, which keeps a single in-order
+  consumer per user, and the external-HS runner
+  ([Section 3](#3-indexing-externally-hosted-users-key-based)) includes the
+  primary HS, first and outside `monitored_homeservers_limit`, while any of its
+  users is flagged, reading those users' history from the primary's per-user
+  `/events-stream`. When a read exhausts the stream, the flag is cleared and the
+  stream read once more from the stored cursor, so an event the bulk processor
+  skipped between the last read and the clear is still picked up. Handlers are
+  idempotent, and a replayed PUT fetches the resource at processing time, so it
+  cannot resurrect something deleted later.
+- **The user is tombstoned.** Deleted users are not read from their HS. A user
+  who wiped the HS they left before Nexus noticed the switch has been tombstoned
+  from those DEL events; flagged, they are read on the new HS once, where the
+  copy of their profile clears the tombstone. A tombstoned user who is not on
+  the new HS either is dropped from the poll list again when the flag clears.
 
-A switch between two external HSs needs none of this: the new HS is read per
-user from cursor 0 (or the cursor left from an earlier stay), and the per-user
-cursors are kept per `(user, HS)`.
+When an edge leaves the primary (and the user was not catching up), the bulk
+cursor is stored as the user's per-user cursor there. A later return replays
+only the gap instead of the user's whole history on the primary.
 
 ### Monitoring the resolver
 
@@ -259,9 +267,9 @@ cursors are kept per `(user, HS)`.
 | `nexus.task.hs-resolver.ignored_older_record` | counter | Records naming another HS that were not newer than the user's clock. A steady rate for one user is a replayed record. |
 | `nexus.task.hs-resolver.no_homeserver_record` | counter | Records naming no HS for a bound user; the binding was kept. |
 | `nexus.task.hs-resolver.mapped_users` | gauge | Non-deleted users with a `HOSTED_BY` mapping. Recorded on the first run after startup, then refreshed after every run that processed users. |
-| `nexus.task.hs-resolver.catch_up_users` | gauge | Subset of `mapped_users` whose history on the primary HS is still being read per user. |
+| `nexus.task.hs-resolver.catch_up_users` | gauge | Subset of `mapped_users` whose history on the HS they switched to is still being read per user. |
 | `nexus.task.hs-resolver.heartbeat_timestamp` | gauge, unit `s` | Unix time of the resolver's most recent progress: a user handled or a run finished. |
-| `watcher.catch_up.completed` | counter, label `hs_id` | Users handed back to the bulk stream after their catch-up. |
+| `watcher.catch_up.completed` | counter, label `hs_id` | Users whose catch-up on the HS they switched to completed (on the primary: handed back to the bulk stream). |
 
 Prometheus alerting rules for these metrics live in the external observability
 stack (metric names as translated by the Prometheus exporter; under SigNoz drop

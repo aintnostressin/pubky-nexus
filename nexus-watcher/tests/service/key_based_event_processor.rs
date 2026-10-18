@@ -1044,10 +1044,11 @@ async fn catch_up_processor_restores_flag_when_final_read_fails() -> Result<(), 
     Ok(())
 }
 
-/// In the hosted scope a flagged user is read like any other: the flag only
-/// matters to the primary homeserver's catch-up processor and its bulk guard.
+/// In the hosted scope a flagged user is read like any other, and an exhausted
+/// read clears the flag with no handoff read: nothing else reads an external
+/// homeserver's users.
 #[tokio_shared_rt::test(shared)]
-async fn hosted_processor_ignores_catch_up_flag() -> Result<(), DynError> {
+async fn hosted_processor_clears_catch_up_flag_after_exhausted_read() -> Result<(), DynError> {
     setup().await?;
 
     let (_hs_keypair, homeserver) = create_homeserver().await?;
@@ -1070,10 +1071,70 @@ async fn hosted_processor_ignores_catch_up_flag() -> Result<(), DynError> {
 
     assert_eq!(handler.get_handle_count(), 1);
     assert_eq!(
-        get_catch_up_user_ids_by_homeserver(&hs_id).await?,
-        vec![user_id],
-        "the hosted scope does not touch the flag"
+        source.calls().await,
+        vec![user_id.clone()],
+        "one read, no handoff read"
     );
+    assert!(
+        get_catch_up_user_ids_by_homeserver(&hs_id)
+            .await?
+            .is_empty(),
+        "the flag is cleared once the stream is exhausted"
+    );
+
+    Ok(())
+}
+
+/// A tombstoned user is read on a homeserver only while flagged: that is how a
+/// user wiped on the homeserver they left gets their profile on the new one
+/// indexed, which clears the tombstone.
+#[tokio_shared_rt::test(shared)]
+async fn hosted_processor_reads_tombstoned_user_only_while_flagged() -> Result<(), DynError> {
+    setup().await?;
+
+    let (_hs_keypair, homeserver) = create_homeserver().await?;
+    let hs_id = homeserver.id.to_string();
+    let user_id = create_user_on_homeserver(&homeserver).await?;
+    exec_single_row(
+        Query::new(
+            "tombstone_test_user",
+            "MATCH (u:User {id: $id}) SET u.deleted = true, u.name = ''",
+        )
+        .param("id", user_id.as_str()),
+    )
+    .await?;
+
+    // Not flagged: not read.
+    let source =
+        Arc::new(
+            MockKeyBasedEventSource::default().with_events(vec![vec![stream_event(
+                1,
+                &user_id,
+                "/pub/pubky.app/profile.json",
+            )?]]),
+        );
+    let handler = create_mock_handler(Ok(()), None);
+    let unflagged = processor(
+        Homeserver::new(homeserver.id.clone()),
+        handler.clone(),
+        source.clone(),
+    );
+    unflagged.run().await?;
+    assert_eq!(handler.get_handle_count(), 0);
+    assert!(
+        source.calls().await.is_empty(),
+        "a tombstoned user is not read"
+    );
+
+    // Flagged, as after a switch: read once, then the flag goes.
+    set_user_homeserver_catch_up(&user_id, &hs_id, true).await?;
+    let flagged = processor(homeserver, handler.clone(), source.clone());
+    flagged.run().await?;
+    assert_eq!(handler.get_handle_count(), 1);
+    assert_eq!(source.calls().await, vec![user_id.clone()]);
+    assert!(get_catch_up_user_ids_by_homeserver(&hs_id)
+        .await?
+        .is_empty());
 
     Ok(())
 }

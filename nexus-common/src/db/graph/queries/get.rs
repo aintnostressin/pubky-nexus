@@ -687,16 +687,21 @@ pub fn get_all_homeservers_with_active_users() -> Query {
 
 /// Retrieves user IDs whose homeserver mapping is due for re-resolution
 /// (`resolved_at` is older than `ttl_ms`) or missing (no `HOSTED_BY` edge).
+///
+/// Deleted users stay in the sweep while they are bound: a tombstone written
+/// from the homeserver they left (a wipe after a move) must not stop nexus
+/// from following their record to the homeserver that now holds their data.
+/// Deleted users without an edge are left out; nothing would be read for them.
 pub fn get_users_needing_hs_resolution(ttl_ms: u64) -> Query {
     Query::new(
         "get_users_needing_hs_resolution",
         "MATCH (u:User)
-         WHERE NOT coalesce(u.deleted, false)
          OPTIONAL MATCH (u)-[r:HOSTED_BY]->(:Homeserver)
          WITH u, r
-         WHERE r IS NULL
-            OR r.resolved_at IS NULL
-            OR r.resolved_at < (timestamp() - $ttl_ms)
+         WHERE (NOT coalesce(u.deleted, false) OR r IS NOT NULL)
+           AND (r IS NULL
+                OR r.resolved_at IS NULL
+                OR r.resolved_at < (timestamp() - $ttl_ms))
          RETURN collect(u.id) AS user_ids",
     )
     .param("ttl_ms", ttl_ms as i64)
@@ -731,25 +736,31 @@ pub fn count_user_homeserver_mappings() -> Query {
     )
 }
 
-/// Retrieves the IDs of all non-deleted users hosted on a given homeserver.
+/// Retrieves the IDs of the users to read from a given homeserver: every
+/// non-deleted user bound to it, plus deleted users whose binding is flagged
+/// `catch_up`. The flag is set when a user switches homeserver, so a user
+/// tombstoned from the homeserver they left is read on the new one until their
+/// stream there has been exhausted once; a profile found there clears the
+/// tombstone.
 pub fn get_active_users_by_homeserver(hs_id: &str) -> Query {
     Query::new(
         "get_active_users_by_homeserver",
-        "MATCH (u:User)-[:HOSTED_BY]->(:Homeserver {id: $hs_id})
-         WHERE NOT coalesce(u.deleted, false)
+        "MATCH (u:User)-[r:HOSTED_BY]->(:Homeserver {id: $hs_id})
+         WHERE NOT coalesce(u.deleted, false) OR coalesce(r.catch_up, false)
          RETURN collect(u.id) AS user_ids",
     )
     .param("hs_id", hs_id.to_string())
 }
 
-/// Retrieves the IDs of the non-deleted users hosted on a given homeserver whose
-/// binding is flagged `catch_up`: their history there still has to be read per
-/// user before the homeserver's bulk stream covers them.
+/// Retrieves the IDs of the users hosted on a given homeserver whose binding is
+/// flagged `catch_up`: their history there still has to be read per user, until
+/// their stream has been exhausted once. Deleted users are included for the
+/// reason given on [`get_active_users_by_homeserver`].
 pub fn get_catch_up_users_by_homeserver(hs_id: &str) -> Query {
     Query::new(
         "get_catch_up_users_by_homeserver",
         "MATCH (u:User)-[r:HOSTED_BY]->(:Homeserver {id: $hs_id})
-         WHERE NOT coalesce(u.deleted, false) AND coalesce(r.catch_up, false)
+         WHERE coalesce(r.catch_up, false)
          RETURN collect(u.id) AS user_ids",
     )
     .param("hs_id", hs_id.to_string())

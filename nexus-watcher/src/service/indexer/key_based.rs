@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     sync::{Arc, LazyLock},
     time::Duration,
 };
@@ -36,23 +37,31 @@ static OUT_OF_ORDER_CURSOR_EXTERNAL_HS: LazyLock<Counter<u64>> = LazyLock::new(|
         .build()
 });
 
-/// Counter for users handed over to the bulk stream after their history on the
-/// primary homeserver was read per user (see [`UserScope::CatchUp`]).
+/// Counter for users whose `catch_up` flag was cleared after their stream on the
+/// homeserver they switched to was exhausted once (see [`UserScope`]).
 static CAUGHT_UP: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter(super::METER_NAME)
         .u64_counter("watcher.catch_up.completed")
-        .with_description("Users whose per-user catch-up on the primary homeserver completed")
+        .with_description(
+            "Users whose per-user catch-up on a homeserver they switched to completed",
+        )
         .build()
 });
 
 /// Which of a homeserver's users a [`KeyBasedEventProcessor`] reads.
+///
+/// A switch flags the user's new `HOSTED_BY` edge `catch_up`: the user is read
+/// per user until their stream on the new homeserver has been exhausted once.
+/// For a tombstoned user that is the only way to be read at all, and the profile
+/// found there clears the tombstone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserScope {
-    /// Every non-deleted user bound to the homeserver: the external homeserver loop.
+    /// Every non-deleted user bound to the homeserver, plus flagged deleted
+    /// ones: the external homeserver loop. An exhausted read clears the flag.
     Hosted,
-    /// Only users whose `HOSTED_BY` edge is flagged `catch_up`: the primary
-    /// homeserver, whose bulk stream has already passed these users' events.
-    /// A user is handed back to the bulk stream once their stream is exhausted.
+    /// Only flagged users: the primary homeserver, whose bulk stream has already
+    /// passed these users' events and leaves them to this reader. An exhausted
+    /// read clears the flag and hands the user back to the bulk stream.
     CatchUp,
 }
 
@@ -196,6 +205,11 @@ impl TEventProcessor for KeyBasedEventProcessor {
 
         info!(user_count = users.len(), "Found users");
 
+        let flagged = self
+            .flagged_users(&users)
+            .await
+            .inspect_err(|e| error!(error = ?e, "Failed to resolve catch-up users"))?;
+
         for (user_pk, cursor) in &users {
             if *self.shutdown_rx.borrow() {
                 debug!("Shutdown detected; stopping user iteration");
@@ -214,12 +228,9 @@ impl TEventProcessor for KeyBasedEventProcessor {
             }
 
             let result = match self.process_user(&hs_pk, user_pk, *cursor).await {
-                // Fewer events than asked for: the user's stream is exhausted, so
-                // a catch-up is complete and the bulk stream takes over.
-                Ok(fetched)
-                    if self.user_scope == UserScope::CatchUp
-                        && fetched < usize::from(self.limit) =>
-                {
+                // Fewer events than asked for: the stream of a flagged user is
+                // exhausted, so their catch-up is complete.
+                Ok(fetched) if flagged.contains(&user_id) && fetched < usize::from(self.limit) => {
                     self.finish_catch_up(&hs_pk, user_pk).await
                 }
                 Ok(_) => Ok(()),
@@ -294,6 +305,24 @@ impl KeyBasedEventProcessor {
         Ok(users)
     }
 
+    /// The users among `users` whose edge is flagged `catch_up`: all of them in
+    /// [`UserScope::CatchUp`], the flagged subset in [`UserScope::Hosted`].
+    async fn flagged_users(
+        &self,
+        users: &[(PublicKey, EventCursor)],
+    ) -> Result<HashSet<String>, EventProcessorError> {
+        let flagged = match self.user_scope {
+            UserScope::CatchUp => users.iter().map(|(pk, _)| pk.z32()).collect(),
+            UserScope::Hosted => {
+                user_hs_resolver::get_catch_up_user_ids_by_homeserver(self.homeserver_id.as_ref())
+                    .await?
+                    .into_iter()
+                    .collect()
+            }
+        };
+        Ok(flagged)
+    }
+
     /// Subscribes to the event stream for a single user and processes incoming events.
     ///
     /// Each user gets their own `limit` budget, ensuring fair progress regardless
@@ -331,14 +360,17 @@ impl KeyBasedEventProcessor {
         result.map(|()| fetched)
     }
 
-    /// Hands a caught-up user over to the bulk stream.
+    /// Ends a flagged user's catch-up once their stream has been exhausted.
     ///
-    /// The flag is cleared first and the user's stream read once more from the
-    /// stored cursor: any event the bulk processor skipped between the last read
-    /// and the clear sits in a batch it fetched before the clear, so it exists on
-    /// the homeserver now and this read picks it up. Events both readers process
-    /// are processed in id order by each, and the handlers are idempotent. A
-    /// failed final read sets the flag back, so the next run tries again.
+    /// On the primary homeserver this hands the user over to the bulk stream:
+    /// the flag is cleared first and the user's stream read once more from the
+    /// stored cursor, so any event the bulk processor skipped between the last
+    /// read and the clear, which sits in a batch it fetched before the clear and
+    /// so exists on the homeserver now, is still picked up. Events both readers
+    /// process are processed in id order by each, and the handlers are
+    /// idempotent. A failed final read sets the flag back, so the next run tries
+    /// again. On an external homeserver nothing else reads the user, so clearing
+    /// the flag is all there is to do.
     async fn finish_catch_up(
         &self,
         hs_pk: &PublicKey,
@@ -348,6 +380,12 @@ impl KeyBasedEventProcessor {
         let user_id = user_pk.z32();
 
         set_user_homeserver_catch_up(&user_id, hs_id, false).await?;
+
+        if self.user_scope == UserScope::Hosted {
+            CAUGHT_UP.add(1, &[KeyValue::new("hs_id", hs_id.to_string())]);
+            info!(%user_id, "Caught up with the user's history on this homeserver");
+            return Ok(());
+        }
 
         let final_read = async {
             let cursor = UserHsCursor::read(&[user_id.as_str()], hs_id)

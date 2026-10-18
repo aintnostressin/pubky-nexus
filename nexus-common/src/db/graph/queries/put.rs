@@ -461,9 +461,12 @@ pub fn create_homeserver(homeserver_id: &str) -> Query {
 /// in hand, as the ingestor does.
 ///
 /// `catch_up` flags the edge when the user's events on this homeserver still
-/// have to be read per user: a switch to the primary homeserver, whose bulk
-/// stream has already passed them. `false` leaves the flag as it is, so
-/// confirming a binding does not end a catch-up in progress.
+/// have to be read per user until their stream is exhausted once: every switch
+/// sets it. On the primary homeserver the bulk stream has already passed the
+/// events the user wrote while bound elsewhere; on any homeserver a user
+/// tombstoned from the one they left is otherwise never read again. `false`
+/// leaves the flag as it is, so confirming a binding does not end a catch-up
+/// in progress.
 pub fn set_user_homeserver(
     user_id: &str,
     homeserver_id: &str,

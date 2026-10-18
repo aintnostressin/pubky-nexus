@@ -13,12 +13,14 @@
 //! one way for a user to stop being indexed is a record naming a key that is no
 //! homeserver: a plain switch to a homeserver that answers nothing.
 //!
-//! A switch to the primary homeserver flags the new edge `catch_up`: the primary
-//! is read in bulk through one global cursor, which has already passed the
-//! events this user wrote there while bound elsewhere, so they are read per user
-//! by the external loop before the bulk stream takes over. A switch away from
-//! the primary stores the bulk cursor as the user's per-user floor there, so a
-//! later return replays only the gap.
+//! A switch flags the new edge `catch_up`: the user is read per user on the new
+//! homeserver until their stream there has been exhausted once. On the primary
+//! homeserver that is what recovers the events the bulk stream passed while the
+//! user was bound elsewhere, and the bulk guard leaves the user to that reader
+//! until it hands over. On any homeserver it is what gets a user tombstoned from
+//! the one they left read again, so the profile found there clears the
+//! tombstone. A switch away from the primary stores the bulk cursor as the
+//! user's per-user floor there, so a later return replays only the gap.
 
 use nexus_common::db::kv::RedisError;
 use nexus_common::db::{
@@ -463,9 +465,10 @@ enum Resolution {
     Bound,
     /// The record names the stored homeserver; `resolved_at` refreshed.
     Confirmed,
-    /// A record newer than the clock names another homeserver; edge moved there.
-    /// `catch_up` is set when the target is the primary homeserver.
-    Switched { catch_up: bool },
+    /// A record newer than the clock names another homeserver; edge moved there
+    /// and flagged `catch_up`. `to_primary` tells the bulk-indexed homeserver
+    /// from an external one.
+    Switched { to_primary: bool },
     /// A record not newer than the clock names another homeserver; edge kept.
     IgnoredOlder,
     /// The record names no homeserver; edge kept, clock advanced.
@@ -620,7 +623,7 @@ async fn resolve_user(
                 return Ok(Resolution::IgnoredOlder);
             }
 
-            let catch_up = resolved_hs_id.as_ref() == primary_homeserver.as_ref();
+            let to_primary = resolved_hs_id.as_ref() == primary_homeserver.as_ref();
             // Leaving the primary with the bulk stream covering the user: its cursor
             // is the floor for a later return. Not while a catch-up is still on, when
             // the bulk stream skipped the user and the per-user cursor is the truth.
@@ -631,17 +634,17 @@ async fn resolve_user(
                 &user_id,
                 &resolved_hs_id,
                 record_ts_i64(timestamp),
-                catch_up,
+                true,
             )
             .await?;
             info!(
                 %user_id,
                 stored_homeserver = %stored_hs_id,
                 homeserver = %resolved_hs_id,
-                catch_up,
+                to_primary,
                 "User published another homeserver; HS mapping switched"
             );
-            Resolution::Switched { catch_up }
+            Resolution::Switched { to_primary }
         }
 
         // The record carries a time but no homeserver: it says nothing about
@@ -774,9 +777,9 @@ struct HsResolverMetrics {
     no_homeserver_record: Counter<u64>,
     /// Non-deleted users with a `HOSTED_BY` mapping.
     mapped_users: Gauge<u64>,
-    /// Subset of `mapped_users` flagged `catch_up`: their history on the primary
-    /// is still being read per user. Refreshed after every run that processed
-    /// users.
+    /// Subset of `mapped_users` flagged `catch_up`: their history on the
+    /// homeserver they switched to is still being read per user. Refreshed after
+    /// every run that processed users.
     catch_up_users: Gauge<u64>,
     /// Whether the population gauges have been recorded since startup.
     gauges_populated: AtomicBool,
@@ -821,7 +824,7 @@ impl HsResolverMetrics {
                 .build(),
             catch_up_users: meter
                 .u64_gauge("nexus.task.hs-resolver.catch_up_users")
-                .with_description("Users whose history on the primary homeserver is still being read per user")
+                .with_description("Users whose history on the homeserver they switched to is still being read per user")
                 .build(),
             heartbeat: meter
                 .u64_gauge("nexus.task.hs-resolver.heartbeat_timestamp")
@@ -835,8 +838,8 @@ impl HsResolverMetrics {
     /// Counts the resolutions that changed or deliberately kept a mapping.
     fn record_resolution(&self, resolution: Resolution) {
         match resolution {
-            Resolution::Switched { catch_up } => {
-                let target = if catch_up { "primary" } else { "external" };
+            Resolution::Switched { to_primary } => {
+                let target = if to_primary { "primary" } else { "external" };
                 self.switched.add(1, &[KeyValue::new("target", target)]);
             }
             Resolution::IgnoredOlder => self.ignored_older_record.add(1, &[]),
@@ -1481,11 +1484,12 @@ mod tests {
         set_user_homeserver_from_record(&user_id, &stored_hs, 10, false).await?;
 
         let outcome = resolve_user(&MockResolver::naming(&new_hs, 20), &primary, &user_pk).await?;
-        assert_eq!(outcome, Resolution::Switched { catch_up: false });
+        assert_eq!(outcome, Resolution::Switched { to_primary: false });
 
         assert_eq!(
             get_user_homeserver(&user_id).await?,
-            mapping(&new_hs, false, Some(20))
+            mapping(&new_hs, true, Some(20)),
+            "every switch flags the new edge for a per-user read"
         );
         assert!(!get_user_ids_by_homeserver(&stored_hs)
             .await?
@@ -1495,6 +1499,74 @@ mod tests {
             .contains(&user_id));
 
         cleanup_test_user(&user_id).await?;
+
+        Ok(())
+    }
+
+    /// A user tombstoned while bound stays in the sweep and is read on the
+    /// homeserver they switch to; a tombstoned user with no edge is left alone.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_tombstoned_user_follows_record_while_bound() -> Result<(), DynError> {
+        setup().await?;
+
+        let user_pk = random_pk();
+        let user_id = user_pk.z32();
+        let stored_hs = random_pubky_id();
+        let new_hs = random_pubky_id();
+        let primary = random_pubky_id();
+        let unbound_deleted = random_pk().z32();
+
+        create_test_user(&user_id).await?;
+        create_test_user(&unbound_deleted).await?;
+        set_user_homeserver_from_record(&user_id, &stored_hs, 10, false).await?;
+        backdate_resolved_at(&user_id).await?;
+        for id in [&user_id, &unbound_deleted] {
+            exec_single_row(
+                Query::new(
+                    "tombstone_test_user",
+                    "MATCH (u:User {id: $id}) SET u.deleted = true, u.name = ''",
+                )
+                .param("id", id.as_str()),
+            )
+            .await?;
+        }
+
+        let due = get_users_needing_resolution(TTL_MS).await?;
+        assert!(due.contains(&user_id), "a bound tombstoned user is due");
+        assert!(
+            !due.contains(&unbound_deleted),
+            "an unbound tombstoned user is not"
+        );
+        assert!(
+            !get_user_ids_by_homeserver(&stored_hs)
+                .await?
+                .contains(&user_id),
+            "a tombstoned user is not read from the homeserver they were tombstoned on"
+        );
+
+        let outcome = resolve_user(&MockResolver::naming(&new_hs, 20), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::Switched { to_primary: false });
+        assert!(
+            get_user_ids_by_homeserver(&new_hs)
+                .await?
+                .contains(&user_id),
+            "flagged, the tombstoned user is read on the new homeserver"
+        );
+        assert_eq!(
+            get_catch_up_user_ids_by_homeserver(&new_hs).await?,
+            vec![user_id.clone()]
+        );
+
+        set_user_homeserver_catch_up(&user_id, &new_hs, false).await?;
+        assert!(
+            !get_user_ids_by_homeserver(&new_hs)
+                .await?
+                .contains(&user_id),
+            "once the flag is cleared a still-tombstoned user is not read any more"
+        );
+
+        cleanup_test_user(&user_id).await?;
+        cleanup_test_user(&unbound_deleted).await?;
 
         Ok(())
     }
@@ -1559,10 +1631,10 @@ mod tests {
         set_user_homeserver(&user_id, &stored_hs).await?;
 
         let outcome = resolve_user(&MockResolver::naming(&new_hs, 1), &primary, &user_pk).await?;
-        assert_eq!(outcome, Resolution::Switched { catch_up: false });
+        assert_eq!(outcome, Resolution::Switched { to_primary: false });
         assert_eq!(
             get_user_homeserver(&user_id).await?,
-            mapping(&new_hs, false, Some(1))
+            mapping(&new_hs, true, Some(1))
         );
 
         cleanup_test_user(&user_id).await?;
@@ -1584,7 +1656,7 @@ mod tests {
         set_user_homeserver_from_record(&user_id, &stored_hs, 10, false).await?;
 
         let outcome = resolve_user(&MockResolver::naming(&primary, 20), &primary, &user_pk).await?;
-        assert_eq!(outcome, Resolution::Switched { catch_up: true });
+        assert_eq!(outcome, Resolution::Switched { to_primary: true });
 
         assert_eq!(
             get_user_homeserver(&user_id).await?,
@@ -1626,7 +1698,7 @@ mod tests {
         .await?;
 
         let outcome = resolve_user(&MockResolver::naming(&new_hs, 20), &primary, &user_pk).await?;
-        assert_eq!(outcome, Resolution::Switched { catch_up: false });
+        assert_eq!(outcome, Resolution::Switched { to_primary: false });
 
         assert_eq!(
             UserHsCursor::read(&[user_id.as_str()], primary.as_ref()).await?,
@@ -1635,7 +1707,7 @@ mod tests {
         );
         assert_eq!(
             get_user_homeserver(&user_id).await?,
-            mapping(&new_hs, false, Some(20))
+            mapping(&new_hs, true, Some(20))
         );
 
         cleanup_test_user(&user_id).await?;
@@ -1666,7 +1738,7 @@ mod tests {
         .await?;
 
         let outcome = resolve_user(&MockResolver::naming(&new_hs, 20), &primary, &user_pk).await?;
-        assert_eq!(outcome, Resolution::Switched { catch_up: false });
+        assert_eq!(outcome, Resolution::Switched { to_primary: false });
 
         assert_eq!(
             UserHsCursor::read(&[user_id.as_str()], primary.as_ref()).await?,
@@ -1718,7 +1790,7 @@ mod tests {
 
         let outcome =
             resolve_user(&MockResolver::naming(&other_hs, 40), &primary, &user_pk).await?;
-        assert_eq!(outcome, Resolution::Switched { catch_up: false });
+        assert_eq!(outcome, Resolution::Switched { to_primary: false });
 
         cleanup_test_user(&user_id).await?;
 
@@ -1835,12 +1907,12 @@ mod tests {
             (Resolution::Bound, Outcome::Resolved, Unbound),
             (Resolution::Confirmed, Outcome::Resolved, Active),
             (
-                Resolution::Switched { catch_up: false },
+                Resolution::Switched { to_primary: false },
                 Outcome::Resolved,
                 Active,
             ),
             (
-                Resolution::Switched { catch_up: true },
+                Resolution::Switched { to_primary: true },
                 Outcome::Resolved,
                 Active,
             ),
