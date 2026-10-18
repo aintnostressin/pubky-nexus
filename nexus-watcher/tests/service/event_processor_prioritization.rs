@@ -8,7 +8,7 @@ use nexus_common::db::graph::exec::exec_single_row;
 use nexus_common::db::graph::Query;
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::traits::Collection;
-use nexus_common::models::user::{set_user_homeserver, UserDetails};
+use nexus_common::models::user::{set_user_homeserver, set_user_homeserver_catch_up, UserDetails};
 use nexus_common::types::DynError;
 use nexus_common::utils::test_utils::{default_ingestor_tests, random_pubky_id};
 use nexus_common::DEFAULT_MAX_FILE_SIZE;
@@ -22,6 +22,71 @@ use pubky_app_specs::PubkyId;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// The primary homeserver joins `pre_run` first, and only, while one of its users
+/// is flagged `catch_up`; its slot comes on top of the external cap.
+#[tokio_shared_rt::test(shared)]
+async fn test_event_processor_runner_includes_primary_for_catch_up() -> Result<(), DynError> {
+    setup().await?;
+
+    let event_handler: Arc<dyn EventHandler> = Arc::new(DefaultEventHandler::new(
+        default_moderation_tests(),
+        default_ingestor_tests(),
+        DEFAULT_MAX_FILE_SIZE,
+        PathBuf::from("/tmp/nexus-watcher-test"),
+    ));
+    let store: Arc<dyn RetryStore> = Arc::new(RedisRetryStore::new());
+    let retry_scheduler = Arc::new(RetryScheduler::new(
+        store,
+        InitialBackoff {
+            missing_dep_ms: 60_000,
+            transient_ms: 10_000,
+        },
+    ));
+    // A fresh primary homeserver, so no other test's users are bound to it.
+    let primary = random_pubky_id();
+    Homeserver::new(primary.clone()).put_to_graph().await?;
+    let runner = KeyBasedEventProcessorRunner {
+        limit: 1000,
+        monitored_hs_limit: 3,
+        event_handler,
+        event_source: Arc::new(PubkyKeyBasedEventSource),
+        shutdown_rx: tokio::sync::watch::channel(false).1,
+        primary_homeserver: primary.clone(),
+        primary_catch_up: Default::default(),
+        hs_blacklist: HsBlacklist::default(),
+        backoff: Mutex::new(HomeserverBackoff::default()),
+        user_not_found_backoff: Arc::new(UserNotFoundBackoff::default()),
+        retry_scheduler,
+    };
+
+    // A user bound to the primary without the flag: the primary stays out.
+    let user_id = create_active_user_on_homeserver_with_trust(&primary, None).await?;
+    let hs_ids = runner.pre_run().await?;
+    assert!(
+        !hs_ids.contains(&primary.to_string()),
+        "Primary homeserver should be excluded from pre_run without catch-up users"
+    );
+    assert_eq!(runner.poll_limit(), 3);
+
+    // Flagged: the primary comes first, on top of the cap.
+    set_user_homeserver_catch_up(&user_id, &primary, true).await?;
+    let hs_ids = runner.pre_run().await?;
+    assert_eq!(
+        hs_ids.first(),
+        Some(&primary.to_string()),
+        "Primary homeserver should lead pre_run while a user is catching up"
+    );
+    assert_eq!(runner.poll_limit(), 4);
+
+    // Cleared again: back out.
+    set_user_homeserver_catch_up(&user_id, &primary, false).await?;
+    let hs_ids = runner.pre_run().await?;
+    assert!(!hs_ids.contains(&primary.to_string()));
+    assert_eq!(runner.poll_limit(), 3);
+
+    Ok(())
+}
 
 #[tokio_shared_rt::test(shared)]
 async fn test_event_processor_runner_primary_homeserver_excluded() -> Result<(), DynError> {
@@ -49,6 +114,7 @@ async fn test_event_processor_runner_primary_homeserver_excluded() -> Result<(),
         event_source: Arc::new(PubkyKeyBasedEventSource),
         shutdown_rx: tokio::sync::watch::channel(false).1,
         primary_homeserver: PubkyId::try_from(HS_IDS[3]).unwrap(),
+        primary_catch_up: Default::default(),
         hs_blacklist: HsBlacklist::default(),
         backoff: Mutex::new(HomeserverBackoff::default()),
         user_not_found_backoff: Arc::new(UserNotFoundBackoff::default()),
@@ -101,6 +167,7 @@ async fn test_event_processor_runner_blacklisted_homeserver_excluded() -> Result
         event_source: Arc::new(PubkyKeyBasedEventSource),
         shutdown_rx: tokio::sync::watch::channel(false).1,
         primary_homeserver: PubkyId::try_from(HS_IDS[3]).unwrap(),
+        primary_catch_up: Default::default(),
         hs_blacklist: HsBlacklist::new([blacklisted_hs.clone()]),
         backoff: Mutex::new(HomeserverBackoff::default()),
         user_not_found_backoff: Arc::new(UserNotFoundBackoff::default()),

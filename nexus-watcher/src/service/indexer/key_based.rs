@@ -8,7 +8,7 @@ use crate::events::Event;
 use futures::StreamExt;
 use nexus_common::db::PubkyConnector;
 use nexus_common::models::homeserver::HsBlacklist;
-use nexus_common::models::user::UserHsCursor;
+use nexus_common::models::user::{set_user_homeserver_catch_up, UserHsCursor};
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky::errors::RequestError;
@@ -35,6 +35,26 @@ static OUT_OF_ORDER_CURSOR_EXTERNAL_HS: LazyLock<Counter<u64>> = LazyLock::new(|
         .with_description("Per-user stream events a homeserver returned out of cursor order")
         .build()
 });
+
+/// Counter for users handed over to the bulk stream after their history on the
+/// primary homeserver was read per user (see [`UserScope::CatchUp`]).
+static CAUGHT_UP: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter(super::METER_NAME)
+        .u64_counter("watcher.catch_up.completed")
+        .with_description("Users whose per-user catch-up on the primary homeserver completed")
+        .build()
+});
+
+/// Which of a homeserver's users a [`KeyBasedEventProcessor`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserScope {
+    /// Every non-deleted user bound to the homeserver: the external homeserver loop.
+    Hosted,
+    /// Only users whose `HOSTED_BY` edge is flagged `catch_up`: the primary
+    /// homeserver, whose bulk stream has already passed these users' events.
+    /// A user is handed back to the bulk stream once their stream is exhausted.
+    CatchUp,
+}
 
 #[async_trait::async_trait]
 pub trait KeyBasedEventSource: Send + Sync + 'static {
@@ -111,6 +131,9 @@ pub struct KeyBasedEventProcessor {
     /// Max events the homeserver will send before closing the stream.
     /// Bounds execution time per user, preventing timeout and starvation.
     pub limit: u16,
+
+    /// Which of the homeserver's users this processor reads.
+    pub user_scope: UserScope,
 
     pub event_handler: Arc<dyn EventHandler>,
     pub event_source: Arc<dyn KeyBasedEventSource>,
@@ -190,7 +213,20 @@ impl TEventProcessor for KeyBasedEventProcessor {
                 continue;
             }
 
-            match self.process_user(&hs_pk, user_pk, *cursor).await {
+            let result = match self.process_user(&hs_pk, user_pk, *cursor).await {
+                // Fewer events than asked for: the user's stream is exhausted, so
+                // a catch-up is complete and the bulk stream takes over.
+                Ok(fetched)
+                    if self.user_scope == UserScope::CatchUp
+                        && fetched < usize::from(self.limit) =>
+                {
+                    self.finish_catch_up(&hs_pk, user_pk).await
+                }
+                Ok(_) => Ok(()),
+                Err(err) => Err(err),
+            };
+
+            match result {
                 Ok(()) => self.user_not_found_backoff.record_success(user_pk).await,
                 Err(err) => {
                     if err.should_not_retry_now() {
@@ -222,14 +258,20 @@ impl TEventProcessor for KeyBasedEventProcessor {
 }
 
 impl KeyBasedEventProcessor {
-    /// Resolves monitored users on this homeserver and reads their cursors from Redis.
+    /// Resolves the users this processor reads on its homeserver (see
+    /// [`UserScope`]) and reads their cursors from Redis.
     #[tracing::instrument(name = "dx.users.resolve", skip_all)]
     async fn resolve_users_with_cursors(
         &self,
     ) -> Result<Vec<(PublicKey, EventCursor)>, EventProcessorError> {
         let hs_id: &str = self.homeserver_id.as_ref();
-        let user_ids = user_hs_resolver::get_user_ids_by_homeserver(hs_id).await?;
-        debug!(user_count = user_ids.len(), "Resolved users");
+        let user_ids = match self.user_scope {
+            UserScope::Hosted => user_hs_resolver::get_user_ids_by_homeserver(hs_id).await?,
+            UserScope::CatchUp => {
+                user_hs_resolver::get_catch_up_user_ids_by_homeserver(hs_id).await?
+            }
+        };
+        debug!(user_count = user_ids.len(), ?self.user_scope, "Resolved users");
 
         let mut valid_users: Vec<(PublicKey, &str)> = Vec::with_capacity(user_ids.len());
         for user_id in &user_ids {
@@ -256,17 +298,21 @@ impl KeyBasedEventProcessor {
     ///
     /// Each user gets their own `limit` budget, ensuring fair progress regardless
     /// of how many events other users have produced.
+    ///
+    /// Returns how many events the homeserver sent: fewer than `limit` means the
+    /// user's stream is exhausted at this cursor.
     #[tracing::instrument(name = "dx.user_events.process", skip_all, fields(user_id = %user_pk.z32()))]
     async fn process_user(
         &self,
         hs_pk: &PublicKey,
         user_pk: &PublicKey,
         cursor: EventCursor,
-    ) -> Result<(), EventProcessorError> {
+    ) -> Result<usize, EventProcessorError> {
         let hs_id: &str = self.homeserver_id.as_ref();
         let stream_events = self
             .fetch_user_events_with_429_backoff(hs_pk, user_pk, cursor)
             .await?;
+        let fetched = stream_events.len();
 
         let user_id = user_pk.z32();
         let (latest_cursor, result) = self
@@ -282,7 +328,54 @@ impl KeyBasedEventProcessor {
             }
         }
 
-        result
+        result.map(|()| fetched)
+    }
+
+    /// Hands a caught-up user over to the bulk stream.
+    ///
+    /// The flag is cleared first and the user's stream read once more from the
+    /// stored cursor: any event the bulk processor skipped between the last read
+    /// and the clear sits in a batch it fetched before the clear, so it exists on
+    /// the homeserver now and this read picks it up. Events both readers process
+    /// are processed in id order by each, and the handlers are idempotent. A
+    /// failed final read sets the flag back, so the next run tries again.
+    async fn finish_catch_up(
+        &self,
+        hs_pk: &PublicKey,
+        user_pk: &PublicKey,
+    ) -> Result<(), EventProcessorError> {
+        let hs_id: &str = self.homeserver_id.as_ref();
+        let user_id = user_pk.z32();
+
+        set_user_homeserver_catch_up(&user_id, hs_id, false).await?;
+
+        let final_read = async {
+            let cursor = UserHsCursor::read(&[user_id.as_str()], hs_id)
+                .await?
+                .into_iter()
+                .next()
+                .unwrap_or_default();
+            self.process_user(hs_pk, user_pk, EventCursor::new(cursor))
+                .await
+        };
+
+        match final_read.await {
+            Ok(_) => {
+                CAUGHT_UP.add(1, &[KeyValue::new("hs_id", hs_id.to_string())]);
+                info!(
+                    %user_id,
+                    "Caught up with the user's history on this homeserver; the bulk stream takes over"
+                );
+                Ok(())
+            }
+            Err(err) => {
+                warn!(%user_id, ?err, "Final catch-up read failed; keeping the user in catch-up");
+                if let Err(flag_err) = set_user_homeserver_catch_up(&user_id, hs_id, true).await {
+                    error!(%user_id, ?flag_err, "Failed to restore the catch-up flag");
+                }
+                Err(err)
+            }
+        }
     }
 
     async fn fetch_user_events_with_429_backoff(

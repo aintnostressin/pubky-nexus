@@ -62,15 +62,16 @@ static STALLED_CURSOR_PRIMARY_HS: LazyLock<Counter<u64>> = LazyLock::new(|| {
 
 /// A user's `HOSTED_BY` mapping, classified relative to a processor's HS.
 ///
-/// The `stale` flag is only carried where it is meaningful: a stale mapping means
-/// the user's published HS has diverged from the stored one (see
-/// [`set_user_homeserver_stale`](nexus_common::db::queries::put::set_user_homeserver_stale)).
+/// The `catch_up` flag is only carried where it is meaningful: a user who just
+/// switched to this homeserver, whose history here is still being read per user
+/// because the bulk stream already passed it (see
+/// [`set_user_homeserver`](nexus_common::db::queries::put::set_user_homeserver)).
 #[derive(Clone)]
 pub enum HsMapping {
     /// The user has no `HOSTED_BY` edge yet.
     Unbound,
     /// The user is mapped to this processor's HS.
-    Current { stale: bool },
+    Current { catch_up: bool },
     /// The user is mapped to a different HS.
     Other { hs_id: String },
 }
@@ -144,7 +145,7 @@ pub struct HsEventProcessor {
     ///
     /// Entries are deliberately never refreshed within a run: once a user's mapping
     /// is resolved, the same decision is reused for the rest of the batch even if the
-    /// resolver realigns the underlying edge mid-run. The cache is dropped when the run ends.
+    /// resolver moves the underlying edge mid-run. The cache is dropped when the run ends.
     pub hs_mapping_cache: Mutex<HashMap<String, HsMapping>>,
 }
 
@@ -166,26 +167,28 @@ impl TEventProcessor for HsEventProcessor {
         Some(self.homeserver.id.as_ref())
     }
 
-    /// Skips events from users that are not actively bound to this homeserver.
+    /// Skips events from users whose events this bulk stream must not apply.
     ///
     /// Before an event is processed we inspect the user's `HOSTED_BY` edge:
-    /// - No edge, or a non-stale edge to this processor's homeserver: process.
-    /// - A stale edge to this homeserver (the user's published homeserver has
-    ///   diverged): log a warning and skip until the resolver realigns it.
+    /// - No edge, or an edge to this processor's homeserver: process.
+    /// - An edge to this homeserver flagged `catch_up` (the user just switched
+    ///   here and their history is being read per user): skip. The per-user
+    ///   reader covers this event too, and skipping keeps one in-order consumer
+    ///   per user until it hands over.
     /// - An edge to a different homeserver: log a warning and skip.
     async fn should_process_event(&self, event: &Event) -> Result<bool, EventProcessorError> {
         let user_id = event.parsed_uri.user_id();
 
         match self.user_hs_mapping(user_id).await? {
-            // No mapping yet (graceful fallback) or actively bound here: process.
-            HsMapping::Unbound | HsMapping::Current { stale: false } => Ok(true),
+            // No mapping yet (graceful fallback) or bound here: process.
+            HsMapping::Unbound | HsMapping::Current { catch_up: false } => Ok(true),
 
-            // Bound here but the mapping is stale: skip until the resolver realigns it.
-            HsMapping::Current { stale: true } => {
-                warn!(
+            // Bound here, but the per-user catch-up reads this user's events for now.
+            HsMapping::Current { catch_up: true } => {
+                debug!(
                     event.uri = %event.uri,
                     user_id = %user_id,
-                    "User's homeserver mapping is stale; skipping event"
+                    "User is catching up on this homeserver; event left to the per-user reader"
                 );
                 Ok(false)
             }
@@ -232,13 +235,15 @@ impl HsEventProcessor {
         let mapping = match fetch_row_from_graph(query).await? {
             None => HsMapping::Unbound,
             Some(row) => {
-                let hs_id: String = row.get("homeserver_id")?;
-                let stale: bool = row.get("stale")?;
+                let hs_id: Option<String> = row.get("homeserver_id")?;
+                let catch_up: bool = row.get("catch_up")?;
 
-                if hs_id.as_str() == self.homeserver.id.as_ref() {
-                    HsMapping::Current { stale }
-                } else {
-                    HsMapping::Other { hs_id }
+                match hs_id {
+                    None => HsMapping::Unbound,
+                    Some(hs_id) if hs_id.as_str() == self.homeserver.id.as_ref() => {
+                        HsMapping::Current { catch_up }
+                    }
+                    Some(hs_id) => HsMapping::Other { hs_id },
                 }
             }
         };

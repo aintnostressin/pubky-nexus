@@ -7,7 +7,9 @@ use chrono::Utc;
 use nexus_common::db::{exec_single_row, graph::Query, PubkyClientError, RedisOps};
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::traits::Collection;
-use nexus_common::models::user::{set_user_homeserver, user_hs_cursor_key, UserDetails};
+use nexus_common::models::user::{
+    set_user_homeserver, set_user_homeserver_catch_up, user_hs_cursor_key, UserDetails,
+};
 use nexus_common::types::DynError;
 use nexus_common::utils::test_utils::random_pubky_id;
 use nexus_common::WatcherConfig;
@@ -15,8 +17,11 @@ use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::retry::{InitialBackoff, RetryScheduler};
 use nexus_watcher::events::Event;
 use nexus_watcher::events::EventHandler;
-use nexus_watcher::service::indexer::{KeyBasedEventProcessor, RunError, TEventProcessor};
+use nexus_watcher::service::indexer::{
+    KeyBasedEventProcessor, RunError, TEventProcessor, UserScope,
+};
 use nexus_watcher::service::runner::UserNotFoundBackoff;
+use nexus_watcher::service::user_hs_resolver::get_catch_up_user_ids_by_homeserver;
 use nexus_watcher::service::{KeyBasedEventProcessorRunner, TEventProcessorRunner};
 use pubky::{Event as StreamEvent, EventCursor, EventType, Keypair, PubkyResource, PublicKey};
 use pubky_app_specs::PubkyId;
@@ -913,6 +918,166 @@ async fn key_based_processor_aborts_blacklisted_homeserver() -> Result<(), DynEr
     Ok(())
 }
 
+// ============================================================================
+// Catch-up scope: a user who switched to the primary homeserver has their history
+// there read per user, then is handed over to the bulk stream.
+// ============================================================================
+
+/// Only flagged users are read. A read under the limit means the user is caught
+/// up: the flag is cleared, the stream is read once more from the stored cursor,
+/// and the cursor ends at the last event seen.
+#[tokio_shared_rt::test(shared)]
+async fn catch_up_processor_reads_flagged_users_and_hands_over() -> Result<(), DynError> {
+    setup().await?;
+
+    let (_hs_keypair, homeserver) = create_homeserver().await?;
+    let hs_id = homeserver.id.to_string();
+    let catching_up = create_user_on_homeserver(&homeserver).await?;
+    let _settled = create_user_on_homeserver(&homeserver).await?;
+    set_user_homeserver_catch_up(&catching_up, &hs_id, true).await?;
+
+    // First read: two events, under the limit. Final read after the clear: one more.
+    let source = Arc::new(MockKeyBasedEventSource::default().with_events(vec![
+        vec![
+            stream_event(1, &catching_up, "/pub/pubky.app/profile.json")?,
+            stream_event(2, &catching_up, "/pub/pubky.app/posts/0032SSN7Q4EVG")?,
+        ],
+        vec![stream_event(
+            3,
+            &catching_up,
+            "/pub/pubky.app/posts/0032SSN7Q4EVH",
+        )?],
+    ]));
+    let handler = create_mock_handler(Ok(()), None);
+    let processor = catch_up_processor(homeserver, handler.clone(), source.clone(), 100);
+
+    processor.run().await?;
+
+    assert_eq!(
+        handler.get_handle_count(),
+        3,
+        "both reads reach the handler"
+    );
+    assert_eq!(
+        source.calls().await,
+        vec![catching_up.clone(), catching_up.clone()],
+        "only the flagged user is read: the catch-up read and the final read"
+    );
+    assert_eq!(user_cursor(&catching_up, &hs_id).await?, Some(3));
+    assert!(
+        get_catch_up_user_ids_by_homeserver(&hs_id)
+            .await?
+            .is_empty(),
+        "the flag is cleared once the user is caught up"
+    );
+
+    Ok(())
+}
+
+/// A full page means more history may follow: the flag stays on and the next
+/// run continues from the stored cursor.
+#[tokio_shared_rt::test(shared)]
+async fn catch_up_processor_keeps_flag_while_pages_are_full() -> Result<(), DynError> {
+    setup().await?;
+
+    let (_hs_keypair, homeserver) = create_homeserver().await?;
+    let hs_id = homeserver.id.to_string();
+    let user_id = create_user_on_homeserver(&homeserver).await?;
+    set_user_homeserver_catch_up(&user_id, &hs_id, true).await?;
+
+    let source = Arc::new(MockKeyBasedEventSource::default().with_events(vec![vec![
+        stream_event(1, &user_id, "/pub/pubky.app/profile.json")?,
+        stream_event(2, &user_id, "/pub/pubky.app/posts/0032SSN7Q4EVG")?,
+    ]]));
+    let handler = create_mock_handler(Ok(()), None);
+    let processor = catch_up_processor(homeserver, handler.clone(), source.clone(), 2);
+
+    processor.run().await?;
+
+    assert_eq!(handler.get_handle_count(), 2);
+    assert_eq!(
+        source.calls().await,
+        vec![user_id.clone()],
+        "no final read yet"
+    );
+    assert_eq!(user_cursor(&user_id, &hs_id).await?, Some(2));
+    assert_eq!(
+        get_catch_up_user_ids_by_homeserver(&hs_id).await?,
+        vec![user_id],
+        "a full page keeps the user in catch-up"
+    );
+
+    Ok(())
+}
+
+/// A failing final read puts the flag back, so the handoff is retried and the
+/// bulk stream does not take over with events possibly unread.
+#[tokio_shared_rt::test(shared)]
+async fn catch_up_processor_restores_flag_when_final_read_fails() -> Result<(), DynError> {
+    setup().await?;
+
+    let (_hs_keypair, homeserver) = create_homeserver().await?;
+    let hs_id = homeserver.id.to_string();
+    let user_id = create_user_on_homeserver(&homeserver).await?;
+    set_user_homeserver_catch_up(&user_id, &hs_id, true).await?;
+
+    let source = Arc::new(MockKeyBasedEventSource::default().with_results(vec![
+        Ok(vec![stream_event(1, &user_id, "/pub/pubky.app/profile.json")?]),
+        Err(PubkyClientError::RequestFailed {
+            message: "connection reset".into(),
+        }
+        .into()),
+    ]));
+    let handler = create_mock_handler(Ok(()), None);
+    let processor = catch_up_processor(homeserver, handler.clone(), source.clone(), 100);
+
+    processor.run().await?;
+
+    assert_eq!(handler.get_handle_count(), 1);
+    assert_eq!(user_cursor(&user_id, &hs_id).await?, Some(1));
+    assert_eq!(
+        get_catch_up_user_ids_by_homeserver(&hs_id).await?,
+        vec![user_id],
+        "the flag is restored after a failed final read"
+    );
+
+    Ok(())
+}
+
+/// In the hosted scope a flagged user is read like any other: the flag only
+/// matters to the primary homeserver's catch-up processor and its bulk guard.
+#[tokio_shared_rt::test(shared)]
+async fn hosted_processor_ignores_catch_up_flag() -> Result<(), DynError> {
+    setup().await?;
+
+    let (_hs_keypair, homeserver) = create_homeserver().await?;
+    let hs_id = homeserver.id.to_string();
+    let user_id = create_user_on_homeserver(&homeserver).await?;
+    set_user_homeserver_catch_up(&user_id, &hs_id, true).await?;
+
+    let source =
+        Arc::new(
+            MockKeyBasedEventSource::default().with_events(vec![vec![stream_event(
+                1,
+                &user_id,
+                "/pub/pubky.app/profile.json",
+            )?]]),
+        );
+    let handler = create_mock_handler(Ok(()), None);
+    let processor = processor(homeserver, handler.clone(), source.clone());
+
+    processor.run().await?;
+
+    assert_eq!(handler.get_handle_count(), 1);
+    assert_eq!(
+        get_catch_up_user_ids_by_homeserver(&hs_id).await?,
+        vec![user_id],
+        "the hosted scope does not touch the flag"
+    );
+
+    Ok(())
+}
+
 async fn create_homeserver() -> Result<(Keypair, Homeserver), DynError> {
     let keypair = Keypair::random();
     let homeserver_id = PubkyId::try_from(keypair.public_key().to_z32().as_str())?;
@@ -1088,6 +1253,29 @@ fn processor_with_shutdown(
     )
 }
 
+/// A processor in [`UserScope::CatchUp`]: reads only the homeserver's flagged users.
+fn catch_up_processor(
+    homeserver: Homeserver,
+    handler: Arc<dyn EventHandler>,
+    source: Arc<MockKeyBasedEventSource>,
+    limit: u16,
+) -> Arc<KeyBasedEventProcessor> {
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut processor = processor_with_options(
+        homeserver,
+        handler,
+        source,
+        limit,
+        shutdown_rx,
+        Arc::new(UserNotFoundBackoff::default()),
+        HsBlacklist::default(),
+    );
+    Arc::get_mut(&mut processor)
+        .expect("freshly built processor has one owner")
+        .user_scope = UserScope::CatchUp;
+    processor
+}
+
 fn processor_with_options(
     homeserver: Homeserver,
     handler: Arc<dyn EventHandler>,
@@ -1100,6 +1288,7 @@ fn processor_with_options(
     Arc::new(KeyBasedEventProcessor {
         homeserver_id: homeserver.id,
         limit,
+        user_scope: UserScope::Hosted,
         event_handler: handler,
         event_source: source,
         user_not_found_backoff,

@@ -159,10 +159,10 @@ mention relationship is not materialized.
 
 ## 4. User → HS resolution
 
-Driven by `UserHsResolverRunner`. For each user it resolves the currently
-published HS from PKDNS/DHT and persists/refreshes the
-`(:User)-[:HOSTED_BY]->(:Homeserver)` edge with a `resolved_at` timestamp.
-This is what tells the externally-hosted-user indexer
+Driven by `UserHsResolverRunner`. For each user it reads the currently
+published PKDNS record and keeps the `(:User)-[:HOSTED_BY]->(:Homeserver)` edge
+in step with it, stamping `resolved_at` on every check. This is what tells the
+externally-hosted-user indexer
 ([Section 3](#3-indexing-externally-hosted-users-key-based)) which users
 belong to which HS.
 
@@ -178,59 +178,113 @@ traffic. Higher → less traffic, slower to notice a user's HS change.
 
 ### `hs_resolver_ttl`
 
-> Minimum age before a user's HS mapping is considered stale and eligible for
-> re-resolution.
+> Minimum age before a user's HS mapping is re-checked.
 
 A user whose `HOSTED_BY.resolved_at` is newer than this TTL is **skipped** on a
 resolver run, preventing redundant PKDNS lookups.
 
 *Tuning:* lower → mappings stay fresher at the cost of far more PKDNS lookups.
 Higher → cheaper, but Nexus may keep pulling a user's events from an HS they have
-already left for up to ~`hs_resolver_ttl`.
+already left for up to ~`hs_resolver_ttl`. The lookup itself answers from the
+pkarr client's cache for a record's TTL (1 h for `_pubky`), so a change can take
+one to two TTLs to be seen.
 
-### Monitoring stale mappings
+### How the mapping changes
 
-When the resolver cannot reproduce a user's stored HS from PKDNS, it marks the
-`HOSTED_BY` edge `stale` and the watcher **stops indexing that user**. A
-resolution outage (DHT/relay unreachable, PKARR records not resolvable) therefore
-silently pauses indexing for every user the resolver visits until the mapping
-realigns. The resolver exports these metrics to catch this:
+Every PKDNS packet carries a timestamp authored by the key holder. The newest one
+Nexus has acted on is kept on the `User` node as `hs_record_ts`, the user's
+**record clock**. The edge follows the record forward in record time only:
+
+| Stored edge | PKDNS lookup | Result |
+| --- | --- | --- |
+| none | record names a HS | edge created, clock set |
+| none | no record, or a record naming no HS | nothing; retried with an in-memory backoff |
+| HS A | record names HS A | edge kept, `resolved_at` refreshed, clock advanced |
+| HS A | record names HS B, newer than the clock | **edge moved to HS B**, clock set; `catch_up` flagged when B is the primary HS |
+| HS A | record names HS B, not newer than the clock | ignored: edge kept, `resolved_at` refreshed |
+| HS A | record names no HS | edge kept, `resolved_at` refreshed, clock advanced |
+| HS A | no record found | edge kept, `resolved_at` refreshed |
+| any | lookup failed | nothing; retried on the next run |
+
+The edge is never removed by the resolver. A record naming no HS (no `_pubky`
+entry, or a target that is not a public key) and a missing record say nothing
+about where the user's data is: the SDK never publishes the former on purpose,
+and the latter is what a DHT or relay outage looks like on pubky 0.9.3. Neither
+can be dated, so neither changes the mapping. The timestamp rule is what makes
+following the record safe: a replayed or lagging old record (anyone can
+re-publish a captured packet, and a relay keeps serving its last one) is not
+newer than the clock and moves nothing.
+
+The one way for a user to stop being indexed is to publish a record naming a
+key that is no homeserver. That is a plain switch: the edge moves to that key,
+the user leaves their old HS's poll list, and the first poll of the "homeserver"
+fails to resolve and lands in the offline-HS backoff
+([Section 3](#3-indexing-externally-hosted-users-key-based)). Content already
+indexed stays. A later record naming a real HS resumes indexing there.
+
+### Switching to the primary HS: catch-up
+
+The primary HS is indexed in bulk through one global cursor. While a user's edge
+names another HS, every event they write on the primary (a copy of their data
+included) is fetched by the bulk processor, skipped as bound elsewhere, and
+passed for good. When the edge moves to the primary, those events have to be
+read some other way, so the switch flags the new edge `catch_up`:
+
+- The bulk processor skips the flagged user's events; the per-user reader covers
+  them, and skipping keeps a single in-order consumer per user.
+- The external-HS runner ([Section 3](#3-indexing-externally-hosted-users-key-based))
+  includes the primary HS, first and outside `monitored_homeservers_limit`, while
+  any of its users is flagged, and reads those users' history from the primary's
+  per-user `/events-stream` from their stored cursor, `key_based_events_limit`
+  events per user per run.
+- A read returning fewer events than the limit means the user is caught up. The
+  flag is cleared, then the stream is read once more from the stored cursor, so
+  an event the bulk processor skipped between the last read and the clear is
+  still picked up. Handlers are idempotent, and a replayed PUT fetches the
+  resource at processing time, so it cannot resurrect something deleted later.
+- When an edge leaves the primary (and the user was not catching up), the bulk
+  cursor is stored as the user's per-user cursor there. A later return replays
+  only the gap instead of the user's whole history on the primary.
+
+A switch between two external HSs needs none of this: the new HS is read per
+user from cursor 0 (or the cursor left from an earlier stay), and the per-user
+cursors are kept per `(user, HS)`.
+
+### Monitoring the resolver
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
-| `nexus.task.hs-resolver.resolutions` | counter, labels `outcome`, `mapping` | One per user the resolver handled. `outcome`: `resolved` (PKDNS returned a HS), `unresolved` (PKDNS returned none; on pubky 0.9.3 DHT and relay failures also surface this way), `error` (the lookup failed, pubky 0.10+, or the graph read/update failed). `mapping`: the stored mapping's state before the resolution, `unbound` / `active` / `stale`, or `unknown` when a graph read or write failed (a Neo4j problem, also visible via `neo4j.query.errors`; deliberately outside the `mapping="active"` onset ratio). |
-| `nexus.task.hs-resolver.marked_stale` | counter, label `reason` | Users whose mapping flipped from active to stale. `unresolved`: PKDNS returned no HS. `hs_changed`: PKDNS returned a different HS. Already-stale users are not counted again. |
+| `nexus.task.hs-resolver.resolutions` | counter, labels `outcome`, `mapping` | One per user the resolver handled. `outcome`: `resolved` (PKDNS returned a HS, applied or ignored as older), `unresolved` (no record, or a record naming no HS; on pubky 0.9.3 DHT and relay failures surface as a missing record), `error` (the lookup failed, pubky 0.10+, or the graph read/update failed). `mapping`: the stored mapping's state before the resolution, `unbound` / `active`, or `unknown` when a graph read or write failed (a Neo4j problem, also visible via `neo4j.query.errors`; deliberately outside the `mapping="active"` onset ratio). |
+| `nexus.task.hs-resolver.switched` | counter, label `target` | Users whose edge moved to another HS: `primary` (catch-up flagged) or `external`. |
+| `nexus.task.hs-resolver.ignored_older_record` | counter | Records naming another HS that were not newer than the user's clock. A steady rate for one user is a replayed record. |
+| `nexus.task.hs-resolver.no_homeserver_record` | counter | Records naming no HS for a bound user; the binding was kept. |
 | `nexus.task.hs-resolver.mapped_users` | gauge | Non-deleted users with a `HOSTED_BY` mapping. Recorded on the first run after startup, then refreshed after every run that processed users. |
-| `nexus.task.hs-resolver.stale_users` | gauge | Subset of `mapped_users` whose mapping is currently stale. |
+| `nexus.task.hs-resolver.catch_up_users` | gauge | Subset of `mapped_users` whose history on the primary HS is still being read per user. |
 | `nexus.task.hs-resolver.heartbeat_timestamp` | gauge, unit `s` | Unix time of the resolver's most recent progress: a user handled or a run finished. |
+| `watcher.catch_up.completed` | counter, label `hs_id` | Users handed back to the bulk stream after their catch-up. |
 
-Prometheus alerting rules for these metrics live in
-[`docker/otel/alerts.yaml`](../docker/otel/alerts.yaml), loaded by the local
-observability stack (metric names as translated by the Prometheus exporter;
-under SigNoz drop the `_total` / `_seconds` suffixes):
+Prometheus alerting rules for these metrics live in the external observability
+stack (metric names as translated by the Prometheus exporter; under SigNoz drop
+the `_total` / `_seconds` suffixes):
 
 - `NexusHsResolverUnresolvedRatio` — onset: most previously-active mappings the
-  resolver touched recently could not be resolved. Scoped to `mapping="active"`
-  because unbound users with no published record are re-resolved on every tick
-  and would otherwise dominate the ratio. It marks onset, not duration: when the
-  outage surfaces as `unresolved` (always on pubky 0.9.3), each active mapping
-  is flipped stale on its visit, so the alert clears once every active mapping
-  has come due (one `hs_resolver_ttl` or more into the outage), not when PKDNS
-  recovers.
-- `NexusHsResolverStaleRatio` — blast radius, the "still broken" signal: a
-  meaningful share of mapped users is not being indexed. Clears only as stale
-  users are re-resolved, up to `hs_resolver_ttl` after recovery.
+  resolver touched recently could not be resolved, so HS changes go unnoticed.
+  Scoped to `mapping="active"` because unbound users with no published record
+  are re-resolved on every tick and would otherwise dominate the ratio. It marks
+  onset, not duration: when the outage surfaces as `unresolved` (always on
+  pubky 0.9.3), each visit still refreshes `resolved_at`, so the alert clears
+  once every active mapping has come due (one `hs_resolver_ttl` or more into the
+  outage), not when PKDNS recovers. An outage pauses nothing: the mappings stand.
 - `NexusHsResolverSilent` — no resolver progress. Gauges keep exporting their
   last value while the process is alive, so only the heartbeat reveals a task
   that hangs or stops ticking; the `absent` half covers a dead process. The
   threshold assumes the default `hs_resolver_interval_ms`; scale it if you
   raise the interval.
 
-The two ratio alerts carry an absolute floor, so they need no retuning as the
-user base grows and stay quiet on tiny deployments.
-
-A burst of `marked_stale{reason="hs_changed"}` is usually a real migration, not
-an outage, and is worth a lower-severity notification.
+The ratio alert carries an absolute floor, so it needs no retuning as the user
+base grows and stays quiet on tiny deployments. The former
+`NexusHsResolverStaleRatio` rule has no metrics behind it any more and has to be
+removed.
 
 ---
 

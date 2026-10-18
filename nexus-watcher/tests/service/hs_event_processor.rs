@@ -61,9 +61,11 @@ async fn create_user_hosted_on(user_id: &str, hs_id: Option<&str>) {
         .expect("create user node");
 
     if let Some(hs_id) = hs_id {
-        exec_single_row(queries::put::set_user_homeserver(user_id, hs_id))
-            .await
-            .expect("link user to homeserver");
+        exec_single_row(queries::put::set_user_homeserver(
+            user_id, hs_id, None, false,
+        ))
+        .await
+        .expect("link user to homeserver");
     }
 }
 
@@ -303,23 +305,26 @@ async fn test_processes_event_when_user_hosted_on_same_homeserver() -> Result<()
 }
 
 // ============================================================================
-// HOSTED_BY guard: skip events when the mapping to this homeserver is stale
-// A stale edge means the user's published homeserver has diverged, so events
-// must be paused until the resolver realigns the mapping.
+// HOSTED_BY guard: skip events while the user is catching up on this homeserver
+// A `catch_up` edge means the user just switched here and their history on this
+// homeserver is being read per user; the bulk stream must leave their events to
+// that reader until it hands over.
 // ============================================================================
 
 #[tokio_shared_rt::test(shared)]
-async fn test_skips_event_when_user_mapping_to_this_homeserver_is_stale() -> Result<()> {
+async fn test_skips_event_while_user_is_catching_up_on_this_homeserver() -> Result<()> {
     setup().await?;
 
-    // User is bound to this processor's homeserver, but the mapping is stale.
+    // User is bound to this processor's homeserver with the catch-up flag set.
     let user_id = random_user_id();
     create_user_hosted_on(&user_id, Some(TEST_HS_ID)).await;
-    exec_single_row(queries::put::set_user_homeserver_stale(&user_id, true))
-        .await
-        .expect("mark user homeserver mapping stale");
+    exec_single_row(queries::put::set_user_homeserver_catch_up(
+        &user_id, TEST_HS_ID, true,
+    ))
+    .await
+    .expect("flag user homeserver mapping for catch-up");
 
-    let uri = post_uri_builder(user_id.clone(), "staleme".to_string());
+    let uri = post_uri_builder(user_id.clone(), "catchup".to_string());
 
     let store = new_in_memory_store();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -333,7 +338,7 @@ async fn test_skips_event_when_user_mapping_to_this_homeserver_is_stale() -> Res
     assert_eq!(
         handler.get_handle_count(),
         0,
-        "Event from a user with a stale mapping to this homeserver must be skipped"
+        "Event from a user catching up on this homeserver must be left to the per-user reader"
     );
 
     let _ = shutdown_tx.send(true);

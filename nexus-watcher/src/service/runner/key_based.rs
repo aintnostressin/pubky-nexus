@@ -3,16 +3,18 @@ use crate::events::retry::RetryScheduler;
 use crate::events::{DefaultEventHandler, EventHandler};
 use crate::service::indexer::{
     KeyBasedEventProcessor, KeyBasedEventSource, PubkyKeyBasedEventSource, TEventProcessor,
-    METER_NAME,
+    UserScope, METER_NAME,
 };
 use crate::service::runner::key_based_hs_backoff::HomeserverBackoff;
 use crate::service::stats::{ProcessedStats, ProcessorRunStatus, RunAllProcessorsStats};
+use crate::service::user_hs_resolver;
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
 use opentelemetry::global;
 use opentelemetry::metrics::{Gauge, Meter};
 use pubky_app_specs::PubkyId;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{watch::Receiver, Mutex};
 use tracing::{debug, info, warn};
@@ -75,8 +77,15 @@ pub struct KeyBasedEventProcessorRunner {
     pub event_source: Arc<dyn KeyBasedEventSource>,
     pub shutdown_rx: Receiver<bool>,
 
-    /// Primary homeserver ID, excluded from the external targets list
+    /// Primary homeserver ID. Excluded from the external targets list, except
+    /// for a per-user catch-up: a run includes it first, with
+    /// [`UserScope::CatchUp`], while any user bound to it is flagged `catch_up`.
     pub primary_homeserver: PubkyId,
+
+    /// Whether the current run includes the primary homeserver for a catch-up.
+    /// Set by `pre_run`, read by `poll_limit` so the catch-up never takes a slot
+    /// from an external homeserver.
+    pub primary_catch_up: AtomicBool,
 
     /// HS PKs that must never be indexed. Excluded from `pre_run` and re-checked
     /// by each [`KeyBasedEventProcessor`] this runner builds.
@@ -101,6 +110,7 @@ impl KeyBasedEventProcessorRunner {
             event_source: Arc::new(PubkyKeyBasedEventSource),
             shutdown_rx,
             primary_homeserver: config.homeserver.clone(),
+            primary_catch_up: AtomicBool::new(false),
             hs_blacklist: HsBlacklist::from_config(&config.stack),
             backoff: Mutex::new(HomeserverBackoff::new(
                 config.initial_backoff_secs,
@@ -135,10 +145,16 @@ impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
 
     async fn build(&self, hs_id: &str) -> Result<Arc<dyn TEventProcessor>, DynError> {
         let homeserver_id = PubkyId::try_from(hs_id)?;
+        let user_scope = if homeserver_id == self.primary_homeserver {
+            UserScope::CatchUp
+        } else {
+            UserScope::Hosted
+        };
 
         Ok(Arc::new(KeyBasedEventProcessor {
             homeserver_id,
             limit: self.limit,
+            user_scope,
             event_handler: self.event_handler.clone(),
             event_source: self.event_source.clone(),
             user_not_found_backoff: self.user_not_found_backoff.clone(),
@@ -148,12 +164,27 @@ impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
         }))
     }
 
+    /// The external homeservers by priority, preceded by the primary homeserver
+    /// when a user bound to it is still catching up (see [`UserScope::CatchUp`]).
     async fn pre_run(&self) -> Result<Vec<String>, DynError> {
-        self.hs_by_priority().await
+        let mut hs_ids = self.hs_by_priority().await?;
+
+        let primary_id: &str = self.primary_homeserver.as_ref();
+        let catch_up = !user_hs_resolver::get_catch_up_user_ids_by_homeserver(primary_id)
+            .await?
+            .is_empty();
+        self.primary_catch_up.store(catch_up, Ordering::Relaxed);
+        if catch_up {
+            hs_ids.insert(0, primary_id.to_string());
+        }
+
+        Ok(hs_ids)
     }
 
+    /// The configured external cap, plus one for the primary's catch-up when
+    /// `pre_run` included it.
     fn poll_limit(&self) -> usize {
-        self.monitored_hs_limit
+        self.monitored_hs_limit + usize::from(self.primary_catch_up.load(Ordering::Relaxed))
     }
 
     async fn backoff_hs_should_skip(&self, hs_id: &str) -> bool {
@@ -186,8 +217,17 @@ impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
         let count_skipped = stats.count_skipped();
 
         // Recorded on every run, including an empty one, so the saturation ratio
-        // always has a denominator in force.
-        EXTERNAL_HS_METRICS.record_run(self.monitored_hs_limit, stats.stats.len() - count_skipped);
+        // always has a denominator in force. The primary's catch-up run is not an
+        // external homeserver and does not count against the cap.
+        let indexed_external = stats
+            .stats
+            .iter()
+            .filter(|stat| {
+                stat.status != ProcessorRunStatus::Skipped
+                    && stat.hs_id != self.primary_homeserver.as_ref()
+            })
+            .count();
+        EXTERNAL_HS_METRICS.record_run(self.monitored_hs_limit, indexed_external);
 
         let had_issues = count_error + count_panic + count_timeout + count_failed_to_build > 0;
 

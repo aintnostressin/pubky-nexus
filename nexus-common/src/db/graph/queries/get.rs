@@ -675,8 +675,8 @@ pub fn get_homeserver_by_id(id: &str) -> Query {
 pub fn get_all_homeservers_with_active_users() -> Query {
     Query::new(
         "get_all_homeservers_with_active_users",
-        "MATCH (u:User)-[r:HOSTED_BY]->(hs:Homeserver)
-        WHERE NOT coalesce(u.deleted, false) AND NOT coalesce(r.stale, false)
+        "MATCH (u:User)-[:HOSTED_BY]->(hs:Homeserver)
+        WHERE NOT coalesce(u.deleted, false)
         WITH hs.id AS id,
              sum(coalesce(u.trust, 0.0)) AS hosted_trust,
              count(u) AS active_users
@@ -685,7 +685,7 @@ pub fn get_all_homeservers_with_active_users() -> Query {
     )
 }
 
-/// Retrieves user IDs whose homeserver mapping is stale
+/// Retrieves user IDs whose homeserver mapping is due for re-resolution
 /// (`resolved_at` is older than `ttl_ms`) or missing (no `HOSTED_BY` edge).
 pub fn get_users_needing_hs_resolution(ttl_ms: u64) -> Query {
     Query::new(
@@ -702,39 +702,54 @@ pub fn get_users_needing_hs_resolution(ttl_ms: u64) -> Query {
     .param("ttl_ms", ttl_ms as i64)
 }
 
-/// Retrieves the homeserver ID a user is currently hosted on, if any, along with
-/// whether that `HOSTED_BY` mapping is marked `stale`.
+/// Retrieves a user's homeserver binding: the homeserver ID (null when unbound),
+/// whether the edge is flagged `catch_up`, and the user's record clock
+/// `hs_record_ts` (null until a PKDNS record has been applied to the user).
+///
+/// Returns no row when the user does not exist.
 pub fn get_user_homeserver(user_id: &str) -> Query {
     Query::new(
         "get_user_homeserver",
-        "MATCH (u:User {id: $user_id})-[r:HOSTED_BY]->(hs:Homeserver)
-         RETURN hs.id AS homeserver_id, coalesce(r.stale, false) AS stale",
+        "MATCH (u:User {id: $user_id})
+         OPTIONAL MATCH (u)-[r:HOSTED_BY]->(hs:Homeserver)
+         RETURN hs.id AS homeserver_id,
+                coalesce(r.catch_up, false) AS catch_up,
+                u.hs_record_ts AS record_ts",
     )
     .param("user_id", user_id.to_string())
 }
 
 /// Counts users with a `HOSTED_BY` mapping, and how many of those mappings are
-/// marked `stale`. Deleted users are excluded from both counts.
+/// flagged `catch_up`. Deleted users are excluded from both counts.
 pub fn count_user_homeserver_mappings() -> Query {
     Query::new(
         "count_user_homeserver_mappings",
         "MATCH (u:User)-[r:HOSTED_BY]->(:Homeserver)
          WHERE NOT coalesce(u.deleted, false)
          RETURN count(r) AS mapped_users,
-                count(CASE WHEN r.stale = true THEN 1 END) AS stale_users",
+                count(CASE WHEN r.catch_up = true THEN 1 END) AS catch_up_users",
     )
 }
 
-/// Retrieves all user IDs actively hosted on a given homeserver.
-///
-/// Excludes users whose mapping is marked `stale` — i.e. whose published
-/// homeserver has diverged from the stored one — so the watcher stops
-/// indexing them until the mapping realigns.
+/// Retrieves the IDs of all non-deleted users hosted on a given homeserver.
 pub fn get_active_users_by_homeserver(hs_id: &str) -> Query {
     Query::new(
         "get_active_users_by_homeserver",
+        "MATCH (u:User)-[:HOSTED_BY]->(:Homeserver {id: $hs_id})
+         WHERE NOT coalesce(u.deleted, false)
+         RETURN collect(u.id) AS user_ids",
+    )
+    .param("hs_id", hs_id.to_string())
+}
+
+/// Retrieves the IDs of the non-deleted users hosted on a given homeserver whose
+/// binding is flagged `catch_up`: their history there still has to be read per
+/// user before the homeserver's bulk stream covers them.
+pub fn get_catch_up_users_by_homeserver(hs_id: &str) -> Query {
+    Query::new(
+        "get_catch_up_users_by_homeserver",
         "MATCH (u:User)-[r:HOSTED_BY]->(:Homeserver {id: $hs_id})
-         WHERE NOT coalesce(u.deleted, false) AND NOT coalesce(r.stale, false)
+         WHERE NOT coalesce(u.deleted, false) AND coalesce(r.catch_up, false)
          RETURN collect(u.id) AS user_ids",
     )
     .param("hs_id", hs_id.to_string())

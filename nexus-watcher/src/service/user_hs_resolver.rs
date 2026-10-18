@@ -1,17 +1,40 @@
 //! # User Homeserver Resolver
 //!
-//! Periodic task that resolves each user's homeserver and persists
-//! the `(:User)-[:HOSTED_BY]->(:Homeserver)` relationship in Neo4j.
+//! Periodic task that reads each user's PKDNS record and keeps the
+//! `(:User)-[:HOSTED_BY]->(:Homeserver)` relationship in Neo4j in step with it.
+//!
+//! The edge follows the record forward in record time only. Every PKDNS packet
+//! carries a timestamp authored by the key holder, and the newest one nexus has
+//! acted on is kept on the `User` node as `hs_record_ts`. A record newer than
+//! that clock naming another homeserver moves the edge; one that is not newer is
+//! ignored, so a replayed or lagging old record cannot drag a user back to a
+//! homeserver they left. A record naming no homeserver, or no record at all,
+//! says nothing about where the user's data is and leaves the edge alone. The
+//! one way for a user to stop being indexed is a record naming a key that is no
+//! homeserver: a plain switch to a homeserver that answers nothing.
+//!
+//! A switch to the primary homeserver flags the new edge `catch_up`: the primary
+//! is read in bulk through one global cursor, which has already passed the
+//! events this user wrote there while bound elsewhere, so they are read per user
+//! by the external loop before the bulk stream takes over. A switch away from
+//! the primary stores the bulk cursor as the user's per-user floor there, so a
+//! later return replays only the gap.
 
+use nexus_common::db::kv::RedisError;
 use nexus_common::db::{
     fetch_key_from_graph, fetch_row_from_graph, queries, GraphResult, PubkyClientResult,
     PubkyConnector,
 };
-use nexus_common::models::user::{set_user_homeserver, set_user_homeserver_stale};
+use nexus_common::models::homeserver::Homeserver;
+use nexus_common::models::user::{
+    refresh_user_homeserver, set_user_homeserver_from_record, UserHsCursor,
+};
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use opentelemetry::{global, KeyValue};
+use pubky::pkarr::dns::rdata::RData;
+use pubky::pkarr::SignedPacket;
 use pubky::PublicKey;
 use pubky_app_specs::PubkyId;
 use std::collections::{HashMap, HashSet};
@@ -23,17 +46,36 @@ use tracing::{debug, error, info, warn};
 
 static HS_RESOLVER_METRICS: LazyLock<HsResolverMetrics> = LazyLock::new(HsResolverMetrics::new);
 
+/// What a user's PKDNS record says about their homeserver.
+// `Missing` carries nothing and `Published` a `PubkyId`; one record is held at a
+// time, so the size difference costs nothing worth a `Box`.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PkdnsRecord {
+    /// No packet was found. On pubky 0.9.3 DHT and relay failures surface this
+    /// way too, so it carries no information about the user's homeserver.
+    Missing,
+    /// The user's packet.
+    Published {
+        /// The homeserver its `_pubky` record names, or `None` when it names
+        /// none: no `_pubky` entry, or a target that is not a public key.
+        homeserver: Option<PubkyId>,
+        /// The packet's timestamp in microseconds, authored by the key holder.
+        /// Orders records of one key against each other and nothing else.
+        timestamp: u64,
+    },
+}
+
 /// Resolves a user's currently published homeserver from PKDNS/DHT.
 ///
 /// Abstracted behind a trait so the resolver loop can be driven with a mock in
 /// tests instead of hitting the network.
 #[async_trait::async_trait]
 pub trait PkdnsHomeserverResolver: Send + Sync {
-    /// Returns the HS published for `user_pk`, if any is currently published.
-    async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<Option<PubkyId>>;
+    /// Looks up the PKDNS record of `user_pk`.
+    async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord>;
 }
 
-/// Production resolver backed by the shared [`PubkyConnector`].
 /// First wait before an unbound user is looked up again. Doubles per
 /// consecutive empty lookup, capped at the resolution TTL.
 const UNBOUND_RETRY_INITIAL: Duration = Duration::from_secs(60);
@@ -103,22 +145,46 @@ impl UnboundBackoff {
     }
 }
 
+/// Production resolver backed by the shared [`PubkyConnector`].
 pub struct PubkyConnectorResolver;
 
 #[async_trait::async_trait]
 impl PkdnsHomeserverResolver for PubkyConnectorResolver {
-    async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<Option<PubkyId>> {
+    async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
         let pubky = PubkyConnector::get()?;
-        match pubky.get_homeserver_of(user_pk).await {
-            Some(hs_pk) => Ok(Some(PubkyId::from(hs_pk))),
-            None => Ok(None),
-        }
+        // The lookup behind `Pubky::get_homeserver_of`, which folds a missing
+        // packet and a packet naming no homeserver into one `None`.
+        let record = match pubky.client().pkarr().resolve(user_pk).await {
+            Some(packet) => PkdnsRecord::Published {
+                homeserver: published_homeserver(&packet),
+                timestamp: packet.timestamp().as_u64(),
+            },
+            None => PkdnsRecord::Missing,
+        };
+        Ok(record)
     }
+}
+
+/// The homeserver a PKDNS record names: the target of its `_pubky` SVCB/HTTPS
+/// record, if that is a public key. Mirrors `Pubky::get_homeserver_of`, whose
+/// parsing the SDK does not export.
+fn published_homeserver(packet: &SignedPacket) -> Option<PubkyId> {
+    let target = packet
+        .resource_records("_pubky")
+        .find_map(|rr| match &rr.rdata {
+            RData::SVCB(svcb) => Some(svcb.target.to_string()),
+            RData::HTTPS(https) => Some(https.0.target.to_string()),
+            _ => None,
+        })?;
+    PublicKey::try_from_z32(&target).ok().map(PubkyId::from)
 }
 
 pub struct UserHsResolverRunner {
     resolver: Box<dyn PkdnsHomeserverResolver>,
     ttl_ms: u64,
+    /// The bulk-indexed homeserver. A switch to it flags the edge `catch_up`; a
+    /// switch away from it stores the bulk cursor as the user's floor there.
+    primary_homeserver: PubkyId,
     unbound_backoff: UnboundBackoff,
     shutdown_rx: Receiver<bool>,
 }
@@ -132,6 +198,7 @@ impl UserHsResolverRunner {
         Self {
             resolver,
             ttl_ms: config.hs_resolver_ttl,
+            primary_homeserver: config.homeserver.clone(),
             unbound_backoff: UnboundBackoff::default(),
             shutdown_rx,
         }
@@ -142,6 +209,7 @@ impl UserHsResolverRunner {
         run(
             self.resolver.as_ref(),
             self.ttl_ms,
+            &self.primary_homeserver,
             &self.unbound_backoff,
             &mut shutdown_rx,
         )
@@ -160,6 +228,7 @@ impl UserHsResolverRunner {
 pub async fn run(
     resolver: &dyn PkdnsHomeserverResolver,
     ttl_ms: u64,
+    primary_homeserver: &PubkyId,
     unbound_backoff: &UnboundBackoff,
     shutdown_rx: &mut Receiver<bool>,
 ) -> Result<(), DynError> {
@@ -218,7 +287,7 @@ pub async fn run(
                 shutting_down = true;
                 break;
             }
-            result = resolve_user(resolver, &user_pk) => {
+            result = resolve_user(resolver, primary_homeserver, &user_pk) => {
                 let user_id = user_pk.z32();
                 processed += 1;
                 let (outcome, mapping) = match result {
@@ -237,9 +306,7 @@ pub async fn run(
                             Resolution::LookupFailed { .. } => {}
                             _ => unbound_backoff.clear(&user_id),
                         }
-                        if let Some(reason) = resolution.newly_stale() {
-                            HS_RESOLVER_METRICS.marked_stale.add(1, &[reason.attribute()]);
-                        }
+                        HS_RESOLVER_METRICS.record_resolution(resolution);
                         let outcome = resolution.outcome();
                         if outcome == Outcome::Unresolved {
                             warn!(%user_id, "PKDNS lookup found no HS");
@@ -318,37 +385,14 @@ fn bisection_order_user_pks(unsorted_pks: Vec<PublicKey>) -> Vec<PublicKey> {
     bisection_result
 }
 
-/// Fetches user IDs whose homeserver mapping is stale or missing.
+/// Fetches user IDs whose homeserver mapping is due for re-resolution or missing.
 ///
-/// A mapping is considered stale when its `resolved_at` timestamp is older
-/// than `ttl_ms` milliseconds ago.
+/// A mapping is due when its `resolved_at` timestamp is older than `ttl_ms`
+/// milliseconds ago.
 async fn get_users_needing_resolution(ttl_ms: u64) -> GraphResult<Vec<String>> {
     let query = queries::get::get_users_needing_hs_resolution(ttl_ms);
     let maybe_user_ids = fetch_key_from_graph(query, "user_ids").await?;
     Ok(maybe_user_ids.unwrap_or_default())
-}
-
-/// Why a user's `HOSTED_BY` mapping was marked stale.
-///
-/// Exported as the `reason` attribute of the `marked_stale` counter so that a
-/// resolver outage (`unresolved`) can be told apart from users genuinely
-/// migrating to another homeserver (`hs_changed`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StaleReason {
-    /// PKDNS returned no homeserver for the user.
-    Unresolved,
-    /// PKDNS returned a homeserver different from the stored one.
-    HsChanged,
-}
-
-impl StaleReason {
-    fn attribute(self) -> KeyValue {
-        let reason = match self {
-            Self::Unresolved => "unresolved",
-            Self::HsChanged => "hs_changed",
-        };
-        KeyValue::new("reason", reason)
-    }
 }
 
 /// State of a user's stored `HOSTED_BY` mapping before a resolution.
@@ -360,17 +404,14 @@ impl StaleReason {
 enum MappingState {
     /// No `HOSTED_BY` edge yet.
     Unbound,
-    /// Bound and not stale.
+    /// Bound to a homeserver.
     Active,
-    /// Bound and already marked stale.
-    Stale,
 }
 
 impl MappingState {
-    fn of(stored: &Option<UserHomeserverMapping>) -> Self {
-        match stored {
+    fn of(stored: &StoredMapping) -> Self {
+        match stored.hs_id {
             None => Self::Unbound,
-            Some(mapping) if mapping.stale => Self::Stale,
             Some(_) => Self::Active,
         }
     }
@@ -382,7 +423,6 @@ fn mapping_attribute(mapping: Option<MappingState>) -> KeyValue {
     let mapping = match mapping {
         Some(MappingState::Unbound) => "unbound",
         Some(MappingState::Active) => "active",
-        Some(MappingState::Stale) => "stale",
         None => "unknown",
     };
     KeyValue::new("mapping", mapping)
@@ -394,7 +434,8 @@ fn mapping_attribute(mapping: Option<MappingState>) -> KeyValue {
 enum Outcome {
     /// PKDNS returned a homeserver.
     Resolved,
-    /// PKDNS returned none; on pubky 0.9.3 DHT and relay failures surface this way too.
+    /// PKDNS returned none: no record, or a record naming no homeserver. On
+    /// pubky 0.9.3 DHT and relay failures surface as a missing record.
     Unresolved,
     /// The lookup failed (pubky 0.10+ surfaces transport errors) or the graph read/write failed.
     Error,
@@ -416,17 +457,21 @@ impl Outcome {
 /// matches and a new case forces a labelling decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Resolution {
-    /// No edge and nothing published; graph untouched.
+    /// No edge, and no record or a record naming no homeserver; graph untouched.
     Unbound,
-    /// No edge before; bound to the published HS now.
+    /// No edge before; bound to the homeserver the record names.
     Bound,
-    /// Published HS matches the stored one; stale flag cleared.
-    Confirmed { was_stale: bool },
-    /// Published HS missing or different; stale flag set.
-    Diverged {
-        reason: StaleReason,
-        was_stale: bool,
-    },
+    /// The record names the stored homeserver; `resolved_at` refreshed.
+    Confirmed,
+    /// A record newer than the clock names another homeserver; edge moved there.
+    /// `catch_up` is set when the target is the primary homeserver.
+    Switched { catch_up: bool },
+    /// A record not newer than the clock names another homeserver; edge kept.
+    IgnoredOlder,
+    /// The record names no homeserver; edge kept, clock advanced.
+    NoHomeserver,
+    /// No record found; edge kept.
+    Kept,
     /// The lookup itself failed (pubky 0.10+ surfaces transport errors);
     /// graph untouched.
     LookupFailed { mapping: MappingState },
@@ -436,16 +481,10 @@ impl Resolution {
     /// `outcome` label: whether PKDNS returned a homeserver.
     fn outcome(self) -> Outcome {
         match self {
-            Self::Bound | Self::Confirmed { .. } => Outcome::Resolved,
-            Self::Diverged {
-                reason: StaleReason::HsChanged,
-                ..
-            } => Outcome::Resolved,
-            Self::Unbound
-            | Self::Diverged {
-                reason: StaleReason::Unresolved,
-                ..
-            } => Outcome::Unresolved,
+            Self::Bound | Self::Confirmed | Self::Switched { .. } | Self::IgnoredOlder => {
+                Outcome::Resolved
+            }
+            Self::Unbound | Self::NoHomeserver | Self::Kept => Outcome::Unresolved,
             Self::LookupFailed { .. } => Outcome::Error,
         }
     }
@@ -454,115 +493,229 @@ impl Resolution {
     fn mapping(self) -> MappingState {
         match self {
             Self::Unbound | Self::Bound => MappingState::Unbound,
-            Self::Confirmed { was_stale: true }
-            | Self::Diverged {
-                was_stale: true, ..
-            } => MappingState::Stale,
-            Self::Confirmed { was_stale: false }
-            | Self::Diverged {
-                was_stale: false, ..
-            } => MappingState::Active,
+            Self::Confirmed
+            | Self::Switched { .. }
+            | Self::IgnoredOlder
+            | Self::NoHomeserver
+            | Self::Kept => MappingState::Active,
             Self::LookupFailed { mapping } => mapping,
-        }
-    }
-
-    /// Set when the mapping flipped from active to stale in this resolution.
-    /// Users that were already stale do not count again, so a sustained stale
-    /// population does not mask a new wave of transitions.
-    fn newly_stale(self) -> Option<StaleReason> {
-        match self {
-            Self::Diverged {
-                reason,
-                was_stale: false,
-            } => Some(reason),
-            _ => None,
         }
     }
 }
 
-/// Resolves a single user's HS and persists the HOSTED_BY relationship.
+/// A user's stored mapping, as returned by [`get_user_homeserver`].
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StoredMapping {
+    /// The homeserver the user is bound to, if any.
+    hs_id: Option<String>,
+    /// Whether the binding is flagged for the per-user catch-up.
+    catch_up: bool,
+    /// The record clock: timestamp of the newest PKDNS record applied, if any.
+    record_ts: Option<i64>,
+}
+
+impl StoredMapping {
+    /// Whether a record with this timestamp is newer than the clock. A user
+    /// without a clock accepts any record.
+    fn record_is_newer(&self, timestamp: u64) -> bool {
+        self.record_ts
+            .is_none_or(|clock| record_ts_i64(timestamp) > clock)
+    }
+}
+
+/// The packet timestamp as stored in the graph.
+fn record_ts_i64(timestamp: u64) -> i64 {
+    i64::try_from(timestamp).unwrap_or(i64::MAX)
+}
+
+/// Resolves a single user's HS and updates the HOSTED_BY relationship to match.
+///
+/// The relationship only changes on a record newer than the user's clock that
+/// names another homeserver. A record naming the stored homeserver, a record
+/// naming none and a missing record keep it. A record not newer than the clock
+/// is ignored, whatever it names.
 ///
 /// A failed lookup is reported as a [`Resolution`] and leaves the graph
 /// untouched; only graph errors are returned as `Err`.
 async fn resolve_user(
     resolver: &dyn PkdnsHomeserverResolver,
+    primary_homeserver: &PubkyId,
     user_pk: &PublicKey,
 ) -> Result<Resolution, DynError> {
     let user_id = user_pk.z32();
 
     // Read the stored mapping first so a failed lookup can still be attributed
     // to the mapping state it would have affected.
-    let stored_mapping = get_user_homeserver(&user_id).await?;
+    let stored = get_user_homeserver(&user_id).await?;
 
-    let maybe_resolved_hs_id = match resolver.resolve_homeserver(user_pk).await {
-        Ok(resolved) => resolved,
+    let record = match resolver.resolve_homeserver(user_pk).await {
+        Ok(record) => record,
         Err(e) => {
             warn!(%user_id, error = %e, "PKDNS lookup failed");
             return Ok(Resolution::LookupFailed {
-                mapping: MappingState::of(&stored_mapping),
+                mapping: MappingState::of(&stored),
             });
         }
     };
 
-    let resolution = match (&stored_mapping, &maybe_resolved_hs_id) {
+    let resolution = match (stored.hs_id.as_deref(), record) {
         // Nothing published. The caller logs it and applies the unbound backoff.
-        (None, None) => Resolution::Unbound,
+        (
+            None,
+            PkdnsRecord::Missing
+            | PkdnsRecord::Published {
+                homeserver: None, ..
+            },
+        ) => Resolution::Unbound,
 
-        (None, Some(resolved_hs_id)) => {
-            set_user_homeserver(&user_id, resolved_hs_id).await?;
+        (
+            None,
+            PkdnsRecord::Published {
+                homeserver: Some(resolved_hs_id),
+                timestamp,
+            },
+        ) => {
+            set_user_homeserver_from_record(
+                &user_id,
+                &resolved_hs_id,
+                record_ts_i64(timestamp),
+                false,
+            )
+            .await?;
             debug!(%user_id, homeserver = %resolved_hs_id, "HS mapping created");
             Resolution::Bound
         }
 
-        // Already bound to a HS: toggle the stale flag instead of switching.
-        (Some(stored), Some(resolved_hs_id)) if resolved_hs_id.as_ref() == stored.hs_id => {
-            set_user_homeserver_stale(&user_id, false).await?;
-            debug!(%user_id, homeserver = %stored.hs_id, "HS mapping still active");
-            Resolution::Confirmed {
-                was_stale: stored.stale,
-            }
+        (
+            Some(stored_hs_id),
+            PkdnsRecord::Published {
+                homeserver: Some(resolved_hs_id),
+                timestamp,
+            },
+        ) if resolved_hs_id.as_ref() == stored_hs_id => {
+            refresh_user_homeserver(&user_id, Some(record_ts_i64(timestamp))).await?;
+            debug!(%user_id, homeserver = %stored_hs_id, "HS mapping confirmed");
+            Resolution::Confirmed
         }
 
-        // HS switching is not fully implemented, so the bound HS is never changed once set
-        (Some(stored), resolved) => {
-            set_user_homeserver_stale(&user_id, true).await?;
-            warn!(
-                %user_id,
-                stored_homeserver = %stored.hs_id,
-                "User homeserver changed or was removed; switching unsupported, mapping marked stale"
-            );
-            Resolution::Diverged {
-                reason: match resolved {
-                    None => StaleReason::Unresolved,
-                    Some(_) => StaleReason::HsChanged,
-                },
-                was_stale: stored.stale,
+        (
+            Some(stored_hs_id),
+            PkdnsRecord::Published {
+                homeserver: Some(resolved_hs_id),
+                timestamp,
+            },
+        ) => {
+            if !stored.record_is_newer(timestamp) {
+                // An old record, replayed or served by a lagging node: the user
+                // already published something newer, so it moves nothing.
+                refresh_user_homeserver(&user_id, None).await?;
+                warn!(
+                    %user_id,
+                    stored_homeserver = %stored_hs_id,
+                    homeserver = %resolved_hs_id,
+                    record_ts = timestamp,
+                    clock = ?stored.record_ts,
+                    "PKDNS record names another homeserver but is not newer than the applied one; ignored"
+                );
+                return Ok(Resolution::IgnoredOlder);
             }
+
+            let catch_up = resolved_hs_id.as_ref() == primary_homeserver.as_ref();
+            // Leaving the primary with the bulk stream covering the user: its cursor
+            // is the floor for a later return. Not while a catch-up is still on, when
+            // the bulk stream skipped the user and the per-user cursor is the truth.
+            if stored_hs_id == primary_homeserver.as_ref() && !stored.catch_up {
+                store_primary_cursor_floor(&user_id, primary_homeserver).await;
+            }
+            set_user_homeserver_from_record(
+                &user_id,
+                &resolved_hs_id,
+                record_ts_i64(timestamp),
+                catch_up,
+            )
+            .await?;
+            info!(
+                %user_id,
+                stored_homeserver = %stored_hs_id,
+                homeserver = %resolved_hs_id,
+                catch_up,
+                "User published another homeserver; HS mapping switched"
+            );
+            Resolution::Switched { catch_up }
+        }
+
+        // The record carries a time but no homeserver: it says nothing about
+        // where the data is, so the binding stands. The clock still advances,
+        // so an older record naming another homeserver cannot follow it.
+        (
+            Some(stored_hs_id),
+            PkdnsRecord::Published {
+                homeserver: None,
+                timestamp,
+            },
+        ) => {
+            refresh_user_homeserver(&user_id, Some(record_ts_i64(timestamp))).await?;
+            debug!(%user_id, homeserver = %stored_hs_id, "PKDNS record names no homeserver; HS mapping kept");
+            Resolution::NoHomeserver
+        }
+
+        // A missing record says nothing about the HS, so the stored one stands.
+        // `resolved_at` is still refreshed, deferring the next lookup by a TTL.
+        (Some(stored_hs_id), PkdnsRecord::Missing) => {
+            refresh_user_homeserver(&user_id, None).await?;
+            debug!(%user_id, homeserver = %stored_hs_id, "No PKDNS record found; HS mapping kept");
+            Resolution::Kept
         }
     };
 
     Ok(resolution)
 }
 
-/// A user's stored `HOSTED_BY` mapping, as returned by [`get_user_homeserver`].
-#[derive(Debug, PartialEq, Eq)]
-struct UserHomeserverMapping {
-    /// The homeserver ID bound to the user.
-    hs_id: String,
-    /// Whether the `HOSTED_BY` relationship is marked stale.
-    stale: bool,
+/// Stores the primary homeserver's bulk cursor as the user's per-user cursor
+/// there, when the user's edge leaves the primary.
+///
+/// Everything up to the bulk cursor was processed by the bulk stream while the
+/// user was bound there, so a later return to the primary catches up only the
+/// gap instead of replaying the user's whole history. Best effort: a missing or
+/// failing cursor costs a longer replay, never lost events, since the per-user
+/// cursor is only ever moved forward.
+async fn store_primary_cursor_floor(user_id: &str, primary_homeserver: &PubkyId) {
+    let cursor = match Homeserver::get_from_index(primary_homeserver.as_ref()).await {
+        Ok(Some(homeserver)) => homeserver.cursor,
+        Ok(None) => {
+            debug!(%user_id, "No bulk cursor stored for the primary homeserver; no floor set");
+            return;
+        }
+        Err(e) => {
+            warn!(%user_id, error = %e, "Failed to read the primary homeserver's cursor; no floor set");
+            return;
+        }
+    };
+    match UserHsCursor::write(user_id, primary_homeserver.as_ref(), cursor).await {
+        Ok(()) => {
+            debug!(%user_id, cursor, "Stored the primary's bulk cursor as the user's floor there")
+        }
+        Err(RedisError::InvalidInput(_)) => {
+            debug!(%user_id, cursor, "User's cursor on the primary is already past the bulk cursor")
+        }
+        Err(e) => {
+            warn!(%user_id, error = %e, "Failed to store the user's cursor floor on the primary")
+        }
+    }
 }
 
-/// Returns the user's stored homeserver mapping, if any.
-async fn get_user_homeserver(user_id: &str) -> GraphResult<Option<UserHomeserverMapping>> {
+/// Returns the user's stored mapping. A user with no `HOSTED_BY` edge, or no
+/// node at all, reads as unbound.
+async fn get_user_homeserver(user_id: &str) -> GraphResult<StoredMapping> {
     let query = queries::get::get_user_homeserver(user_id);
     let Some(row) = fetch_row_from_graph(query).await? else {
-        return Ok(None);
+        return Ok(StoredMapping::default());
     };
-    Ok(Some(UserHomeserverMapping {
+    Ok(StoredMapping {
         hs_id: row.get("homeserver_id")?,
-        stale: row.get("stale")?,
-    }))
+        catch_up: row.get("catch_up")?,
+        record_ts: row.get("record_ts")?,
+    })
 }
 
 /// Population counts over non-deleted users with a `HOSTED_BY` mapping.
@@ -570,11 +723,11 @@ async fn get_user_homeserver(user_id: &str) -> GraphResult<Option<UserHomeserver
 struct MappingCounts {
     /// Users bound to a homeserver.
     mapped: u64,
-    /// Subset of `mapped` whose mapping is marked stale.
-    stale: u64,
+    /// Subset of `mapped` whose binding is flagged `catch_up`.
+    catch_up: u64,
 }
 
-/// Counts users with a `HOSTED_BY` mapping and how many of them are stale.
+/// Counts users with a `HOSTED_BY` mapping and how many of them are catching up.
 async fn count_mappings() -> GraphResult<MappingCounts> {
     let query = queries::get::count_user_homeserver_mappings();
     let Some(row) = fetch_row_from_graph(query).await? else {
@@ -582,7 +735,7 @@ async fn count_mappings() -> GraphResult<MappingCounts> {
     };
     Ok(MappingCounts {
         mapped: row.get("mapped_users")?,
-        stale: row.get("stale_users")?,
+        catch_up: row.get("catch_up_users")?,
     })
 }
 
@@ -593,25 +746,38 @@ pub async fn get_user_ids_by_homeserver(hs_id: &str) -> GraphResult<Vec<String>>
     Ok(maybe_user_ids.unwrap_or_default())
 }
 
+/// Returns the IDs of the users hosted on a given homeserver whose binding is
+/// flagged `catch_up`.
+pub async fn get_catch_up_user_ids_by_homeserver(hs_id: &str) -> GraphResult<Vec<String>> {
+    let query = queries::get::get_catch_up_users_by_homeserver(hs_id);
+    let maybe_user_ids = fetch_key_from_graph(query, "user_ids").await?;
+    Ok(maybe_user_ids.unwrap_or_default())
+}
+
 struct HsResolverMetrics {
     run_total: Histogram<u64>,
     run_failed: Histogram<u64>,
     /// PKDNS resolutions, labelled by `outcome` in {resolved, unresolved, error}
-    /// and `mapping` in {unbound, active, stale, unknown}. Incremented per user
+    /// and `mapping` in {unbound, active, unknown}. Incremented per user
     /// rather than per run so a failing share is visible while a long run is
     /// still in progress. `mapping="unknown"` means a graph read or write failed;
     /// those are Neo4j incidents, visible via `neo4j.query.errors`, and are kept
     /// out of the `mapping="active"` onset ratio on purpose.
     resolutions: Counter<u64>,
-    /// Users whose `HOSTED_BY` mapping flipped from active to stale, labelled
-    /// by [`StaleReason`]. Only the transition is counted, so a sustained stale
-    /// population does not mask a new wave.
-    marked_stale: Counter<u64>,
-    /// Non-deleted users with a `HOSTED_BY` mapping; denominator for `stale_users`.
+    /// Users whose edge moved to another homeserver, labelled by `target` in
+    /// {primary, external}.
+    switched: Counter<u64>,
+    /// Records naming another homeserver that were not newer than the user's
+    /// clock: replays or lagging nodes, never applied.
+    ignored_older_record: Counter<u64>,
+    /// Records naming no homeserver for a bound user; the binding was kept.
+    no_homeserver_record: Counter<u64>,
+    /// Non-deleted users with a `HOSTED_BY` mapping.
     mapped_users: Gauge<u64>,
-    /// Subset of `mapped_users` whose mapping is currently stale. Refreshed
-    /// after every run that processed users, which are the runs that can change it.
-    stale_users: Gauge<u64>,
+    /// Subset of `mapped_users` flagged `catch_up`: their history on the primary
+    /// is still being read per user. Refreshed after every run that processed
+    /// users.
+    catch_up_users: Gauge<u64>,
     /// Whether the population gauges have been recorded since startup.
     gauges_populated: AtomicBool,
     /// Unix time of the last user handled or run finished. Stamped per user so
@@ -637,17 +803,25 @@ impl HsResolverMetrics {
                 .u64_counter("nexus.task.hs-resolver.resolutions")
                 .with_description("PKDNS homeserver resolutions, by outcome")
                 .build(),
-            marked_stale: meter
-                .u64_counter("nexus.task.hs-resolver.marked_stale")
-                .with_description("Users whose homeserver mapping transitioned to stale, by reason")
+            switched: meter
+                .u64_counter("nexus.task.hs-resolver.switched")
+                .with_description("Users whose homeserver mapping moved to another homeserver, by target")
+                .build(),
+            ignored_older_record: meter
+                .u64_counter("nexus.task.hs-resolver.ignored_older_record")
+                .with_description("PKDNS records naming another homeserver that were not newer than the applied one")
+                .build(),
+            no_homeserver_record: meter
+                .u64_counter("nexus.task.hs-resolver.no_homeserver_record")
+                .with_description("PKDNS records naming no homeserver for a bound user")
                 .build(),
             mapped_users: meter
                 .u64_gauge("nexus.task.hs-resolver.mapped_users")
                 .with_description("Users with a homeserver mapping")
                 .build(),
-            stale_users: meter
-                .u64_gauge("nexus.task.hs-resolver.stale_users")
-                .with_description("Users whose homeserver mapping is currently stale")
+            catch_up_users: meter
+                .u64_gauge("nexus.task.hs-resolver.catch_up_users")
+                .with_description("Users whose history on the primary homeserver is still being read per user")
                 .build(),
             heartbeat: meter
                 .u64_gauge("nexus.task.hs-resolver.heartbeat_timestamp")
@@ -658,9 +832,26 @@ impl HsResolverMetrics {
         }
     }
 
+    /// Counts the resolutions that changed or deliberately kept a mapping.
+    fn record_resolution(&self, resolution: Resolution) {
+        match resolution {
+            Resolution::Switched { catch_up } => {
+                let target = if catch_up { "primary" } else { "external" };
+                self.switched.add(1, &[KeyValue::new("target", target)]);
+            }
+            Resolution::IgnoredOlder => self.ignored_older_record.add(1, &[]),
+            Resolution::NoHomeserver => self.no_homeserver_record.add(1, &[]),
+            Resolution::Unbound
+            | Resolution::Bound
+            | Resolution::Confirmed
+            | Resolution::Kept
+            | Resolution::LookupFailed { .. } => {}
+        }
+    }
+
     fn record_mapping_counts(&self, counts: MappingCounts) {
         self.mapped_users.record(counts.mapped, &[]);
-        self.stale_users.record(counts.stale, &[]);
+        self.catch_up_users.record(counts.catch_up, &[]);
         self.gauges_populated.store(true, Ordering::Relaxed);
     }
 
@@ -683,27 +874,56 @@ mod tests {
     use super::*;
     use nexus_common::db::graph::Query;
     use nexus_common::db::{exec_single_row, PubkyClientError};
+    use nexus_common::models::user::{set_user_homeserver, set_user_homeserver_catch_up};
     use nexus_common::types::DynError;
     use nexus_common::utils::test_utils::{random_pk, random_pubky_id};
     use nexus_common::{StackConfig, StackManager};
+    use pubky::pkarr::dns::{rdata::SVCB, Name};
+    use pubky::pkarr::Keypair;
 
     async fn setup() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await
     }
 
-    /// Resolver stub returning a fixed PKDNS result, so `resolve_user` can be
+    /// Resolver stub returning a fixed PKDNS record, so `resolve_user` can be
     /// driven without touching the DHT.
     struct MockResolver {
-        result: Option<PubkyId>,
+        record: PkdnsRecord,
+    }
+
+    impl MockResolver {
+        /// A record naming `homeserver`, authored at `timestamp`.
+        fn naming(homeserver: &PubkyId, timestamp: u64) -> Self {
+            Self {
+                record: PkdnsRecord::Published {
+                    homeserver: Some(homeserver.clone()),
+                    timestamp,
+                },
+            }
+        }
+
+        /// A record with no homeserver in it, authored at `timestamp`.
+        fn naming_none(timestamp: u64) -> Self {
+            Self {
+                record: PkdnsRecord::Published {
+                    homeserver: None,
+                    timestamp,
+                },
+            }
+        }
+
+        /// No record found.
+        fn missing() -> Self {
+            Self {
+                record: PkdnsRecord::Missing,
+            }
+        }
     }
 
     #[async_trait::async_trait]
     impl PkdnsHomeserverResolver for MockResolver {
-        async fn resolve_homeserver(
-            &self,
-            _user_pk: &PublicKey,
-        ) -> PubkyClientResult<Option<PubkyId>> {
-            Ok(self.result.clone())
+        async fn resolve_homeserver(&self, _user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+            Ok(self.record.clone())
         }
     }
 
@@ -712,10 +932,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PkdnsHomeserverResolver for FailingResolver {
-        async fn resolve_homeserver(
-            &self,
-            _user_pk: &PublicKey,
-        ) -> PubkyClientResult<Option<PubkyId>> {
+        async fn resolve_homeserver(&self, _user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
             Err(PubkyClientError::RequestFailed {
                 message: "dht unreachable".into(),
             })
@@ -740,6 +957,30 @@ mod tests {
         exec_single_row(query).await
     }
 
+    /// Helper: push a user's `resolved_at` two hours into the past, so the user
+    /// is due for resolution under the 1-hour TTL the tests use.
+    async fn backdate_resolved_at(user_id: &str) -> GraphResult<()> {
+        let query = Query::new(
+            "backdate_hs_mapping",
+            "MATCH (u:User {id: $user_id})-[r:HOSTED_BY]->(:Homeserver)
+             SET r.resolved_at = timestamp() - 7200000",
+        )
+        .param("user_id", user_id.to_string());
+        exec_single_row(query).await
+    }
+
+    /// Helper: the stored mapping of a bound user, with the given clock, as the
+    /// test's starting point.
+    fn mapping(hs_id: &PubkyId, catch_up: bool, record_ts: Option<i64>) -> StoredMapping {
+        StoredMapping {
+            hs_id: Some(hs_id.to_string()),
+            catch_up,
+            record_ts,
+        }
+    }
+
+    const TTL_MS: u64 = 3_600_000;
+
     #[tokio_shared_rt::test(shared)]
     async fn test_set_user_homeserver_graph_query() -> Result<(), DynError> {
         setup().await?;
@@ -751,11 +992,11 @@ mod tests {
         create_test_user(user_id).await?;
 
         // Set initial homeserver
-        let query = queries::put::set_user_homeserver(user_id, hs_id_a);
+        let query = queries::put::set_user_homeserver(user_id, hs_id_a, Some(1), false);
         exec_single_row(query).await?;
 
         // Switch to a different homeserver
-        let query = queries::put::set_user_homeserver(user_id, hs_id_b);
+        let query = queries::put::set_user_homeserver(user_id, hs_id_b, Some(2), false);
         exec_single_row(query).await?;
 
         // Cleanup
@@ -774,16 +1015,88 @@ mod tests {
         create_test_user(user_id).await?;
 
         // Set homeserver for the first time
-        let query = queries::put::set_user_homeserver(user_id, hs_id);
+        let query = queries::put::set_user_homeserver(user_id, hs_id, None, false);
         exec_single_row(query).await?;
 
         // Set same homeserver again (should reuse HS, e.g. not create any orphan HS)
-        let query = queries::put::set_user_homeserver(user_id, hs_id);
+        let query = queries::put::set_user_homeserver(user_id, hs_id, None, false);
         exec_single_row(query).await?;
 
         // Cleanup
         cleanup_test_user(user_id).await?;
 
+        Ok(())
+    }
+
+    /// The record clock only moves forward, and a write without a record leaves it.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_record_clock_only_advances() -> Result<(), DynError> {
+        setup().await?;
+
+        let user_id = random_pk().z32();
+        let hs_id = random_pubky_id();
+        create_test_user(&user_id).await?;
+
+        set_user_homeserver_from_record(&user_id, &hs_id, 100, false).await?;
+        assert_eq!(get_user_homeserver(&user_id).await?.record_ts, Some(100));
+
+        set_user_homeserver_from_record(&user_id, &hs_id, 50, false).await?;
+        assert_eq!(
+            get_user_homeserver(&user_id).await?.record_ts,
+            Some(100),
+            "an older record must not rewind the clock"
+        );
+
+        refresh_user_homeserver(&user_id, Some(200)).await?;
+        assert_eq!(get_user_homeserver(&user_id).await?.record_ts, Some(200));
+
+        refresh_user_homeserver(&user_id, None).await?;
+        set_user_homeserver(&user_id, &hs_id).await?;
+        assert_eq!(
+            get_user_homeserver(&user_id).await?.record_ts,
+            Some(200),
+            "writes without a record leave the clock alone"
+        );
+
+        cleanup_test_user(&user_id).await?;
+        Ok(())
+    }
+
+    /// The catch-up flag is set by a switch that asks for it, survives a plain
+    /// refresh of the binding, and is cleared explicitly.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_catch_up_flag_lifecycle() -> Result<(), DynError> {
+        setup().await?;
+
+        let user_id = random_pk().z32();
+        let hs_a = random_pubky_id();
+        let hs_b = random_pubky_id();
+        create_test_user(&user_id).await?;
+
+        set_user_homeserver_from_record(&user_id, &hs_a, 1, false).await?;
+        assert!(!get_user_homeserver(&user_id).await?.catch_up);
+
+        set_user_homeserver_from_record(&user_id, &hs_b, 2, true).await?;
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            mapping(&hs_b, true, Some(2))
+        );
+        assert_eq!(
+            get_catch_up_user_ids_by_homeserver(&hs_b).await?,
+            vec![user_id.clone()]
+        );
+        assert!(get_catch_up_user_ids_by_homeserver(&hs_a).await?.is_empty());
+
+        // Confirming the binding does not end the catch-up.
+        set_user_homeserver_from_record(&user_id, &hs_b, 3, false).await?;
+        set_user_homeserver(&user_id, &hs_b).await?;
+        assert!(get_user_homeserver(&user_id).await?.catch_up);
+
+        set_user_homeserver_catch_up(&user_id, &hs_b, false).await?;
+        assert!(!get_user_homeserver(&user_id).await?.catch_up);
+        assert!(get_catch_up_user_ids_by_homeserver(&hs_b).await?.is_empty());
+
+        cleanup_test_user(&user_id).await?;
         Ok(())
     }
 
@@ -803,22 +1116,14 @@ mod tests {
         // Give user_fresh a recently resolved mapping
         set_user_homeserver(user_fresh, hs_id).await?;
 
-        // Give user_stale a mapping with an old resolved_at (1 hour ago)
-        let stale_query = Query::new(
-            "set_stale_hs",
-            "MATCH (u:User {id: $user_id})
-             MERGE (hs:Homeserver {id: $hs_id})
-             MERGE (u)-[r:HOSTED_BY]->(hs)
-             SET r.resolved_at = timestamp() - 7200000",
-        )
-        .param("user_id", user_stale)
-        .param("hs_id", hs_id);
-        exec_single_row(stale_query).await?;
+        // Give user_stale a mapping with an old resolved_at (2 hours ago)
+        set_user_homeserver(user_stale, hs_id).await?;
+        backdate_resolved_at(user_stale).await?;
 
         // user_no_hs has no HOSTED_BY at all
 
         // With a 1-hour TTL: user_fresh should be skipped, user_stale and user_no_hs returned
-        let mut needing = get_users_needing_resolution(3_600_000).await?;
+        let mut needing = get_users_needing_resolution(TTL_MS).await?;
         needing.sort();
 
         assert!(
@@ -827,7 +1132,7 @@ mod tests {
         );
         assert!(
             needing.contains(&user_stale.to_string()),
-            "Stale user should need resolution"
+            "User resolved long ago should need resolution"
         );
         assert!(
             needing.contains(&user_no_hs.to_string()),
@@ -887,31 +1192,34 @@ mod tests {
         setup().await?;
 
         let user_id = random_pk().z32();
-        let hs_id = random_pk().z32();
+        let hs_id = random_pubky_id();
+
+        // No node at all: unbound, no clock.
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            StoredMapping::default()
+        );
 
         create_test_user(&user_id).await?;
 
         // No HOSTED_BY edge yet
-        assert_eq!(get_user_homeserver(&user_id).await?, None);
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            StoredMapping::default()
+        );
 
-        // After assignment the current homeserver is returned and not stale
+        // Bound without a record: no clock, no catch-up
         set_user_homeserver(&user_id, &hs_id).await?;
         assert_eq!(
             get_user_homeserver(&user_id).await?,
-            Some(UserHomeserverMapping {
-                hs_id: hs_id.to_string(),
-                stale: false,
-            })
+            mapping(&hs_id, false, None)
         );
 
-        // Marking the mapping stale is reflected in the next lookup
-        set_user_homeserver_stale(&user_id, true).await?;
+        // Bound from a record: the clock holds its timestamp
+        set_user_homeserver_from_record(&user_id, &hs_id, 42, false).await?;
         assert_eq!(
             get_user_homeserver(&user_id).await?,
-            Some(UserHomeserverMapping {
-                hs_id: hs_id.to_string(),
-                stale: true,
-            })
+            mapping(&hs_id, false, Some(42))
         );
 
         cleanup_test_user(&user_id).await?;
@@ -919,7 +1227,7 @@ mod tests {
         Ok(())
     }
 
-    /// First-time resolution stores whatever the DHT resolves.
+    /// First-time resolution binds to whatever the record names and starts the clock.
     #[tokio_shared_rt::test(shared)]
     async fn test_resolve_user_first_time_sets_homeserver() -> Result<(), DynError> {
         setup().await?;
@@ -927,21 +1235,16 @@ mod tests {
         let user_pk = random_pk();
         let user_id = user_pk.z32();
         let hs_id = random_pubky_id();
+        let primary = random_pubky_id();
 
         create_test_user(&user_id).await?;
 
-        let resolver = MockResolver {
-            result: Some(hs_id.clone()),
-        };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
+        let outcome = resolve_user(&MockResolver::naming(&hs_id, 10), &primary, &user_pk).await?;
         assert_eq!(outcome, Resolution::Bound);
 
         assert_eq!(
             get_user_homeserver(&user_id).await?,
-            Some(UserHomeserverMapping {
-                hs_id: hs_id.to_string(),
-                stale: false,
-            })
+            mapping(&hs_id, false, Some(10))
         );
         assert!(get_user_ids_by_homeserver(&hs_id).await?.contains(&user_id));
 
@@ -950,23 +1253,52 @@ mod tests {
         Ok(())
     }
 
-    /// A user with no published homeserver and no stored mapping is left alone.
+    /// A first bind to the primary needs no catch-up: the bulk stream processes
+    /// unbound users, so nothing of this user's was skipped.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_resolve_user_first_time_on_primary_does_not_catch_up() -> Result<(), DynError> {
+        setup().await?;
+
+        let user_pk = random_pk();
+        let user_id = user_pk.z32();
+        let primary = random_pubky_id();
+
+        create_test_user(&user_id).await?;
+
+        let outcome = resolve_user(&MockResolver::naming(&primary, 10), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::Bound);
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            mapping(&primary, false, Some(10))
+        );
+
+        cleanup_test_user(&user_id).await?;
+        Ok(())
+    }
+
+    /// A user with no stored mapping and nothing published is left alone, whether
+    /// no record exists or the record names no homeserver.
     #[tokio_shared_rt::test(shared)]
     async fn test_resolve_user_first_time_no_homeserver_noop() -> Result<(), DynError> {
         setup().await?;
 
         let user_pk = random_pk();
         let user_id = user_pk.z32();
+        let primary = random_pubky_id();
 
         create_test_user(&user_id).await?;
 
-        let resolver = MockResolver { result: None };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
-        assert_eq!(outcome, Resolution::Unbound);
-
-        assert_eq!(get_user_homeserver(&user_id).await?, None);
+        for resolver in [MockResolver::missing(), MockResolver::naming_none(10)] {
+            let outcome = resolve_user(&resolver, &primary, &user_pk).await?;
+            assert_eq!(outcome, Resolution::Unbound);
+            assert_eq!(
+                get_user_homeserver(&user_id).await?,
+                StoredMapping::default(),
+                "nothing is written for an unbound user without a homeserver"
+            );
+        }
         assert!(
-            get_users_needing_resolution(3_600_000)
+            get_users_needing_resolution(TTL_MS)
                 .await?
                 .contains(&user_id),
             "users with no HS PKDNS mapping found should be retried on every resolver run"
@@ -977,8 +1309,6 @@ mod tests {
         Ok(())
     }
 
-    /// When the published homeserver changes, the binding is kept but marked
-    /// stale so the user stops being indexed; the new homeserver is never set.
     /// A user with no published homeserver is not looked up again on the next
     /// tick, while a user with a published one is unaffected.
     #[tokio_shared_rt::test(shared)]
@@ -994,10 +1324,11 @@ mod tests {
             calls: Mutex::new(HashMap::new()),
         };
         let backoff = UnboundBackoff::default();
+        let primary = random_pubky_id();
         let (_tx, mut rx) = tokio::sync::watch::channel(false);
 
-        run(&resolver, 3_600_000, &backoff, &mut rx).await?;
-        run(&resolver, 3_600_000, &backoff, &mut rx).await?;
+        run(&resolver, TTL_MS, &primary, &backoff, &mut rx).await?;
+        run(&resolver, TTL_MS, &primary, &backoff, &mut rx).await?;
 
         assert_eq!(
             resolver.calls_for(&user_pk),
@@ -1025,10 +1356,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PkdnsHomeserverResolver for CountingResolver {
-        async fn resolve_homeserver(
-            &self,
-            user_pk: &PublicKey,
-        ) -> PubkyClientResult<Option<PubkyId>> {
+        async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
             let user_id = user_pk.z32();
             *self
                 .calls
@@ -1037,7 +1365,7 @@ mod tests {
                 .entry(user_id.clone())
                 .or_default() += 1;
             if user_id == self.target {
-                Ok(None)
+                Ok(PkdnsRecord::Missing)
             } else {
                 Err(PubkyClientError::RequestFailed {
                     message: "not the user under test".into(),
@@ -1101,43 +1429,68 @@ mod tests {
         assert!(backoff.entries.lock().unwrap().is_empty());
     }
 
+    /// A record naming the stored homeserver confirms the binding, refreshes
+    /// `resolved_at` and starts or advances the clock.
     #[tokio_shared_rt::test(shared)]
-    async fn test_resolve_user_change_keeps_binding_and_marks_stale() -> Result<(), DynError> {
+    async fn test_resolve_user_confirmed_refreshes_binding() -> Result<(), DynError> {
+        setup().await?;
+
+        let user_pk = random_pk();
+        let user_id = user_pk.z32();
+        let stored_hs = random_pubky_id();
+        let primary = random_pubky_id();
+
+        create_test_user(&user_id).await?;
+        // Bound by the ingestor, without a record, long ago.
+        set_user_homeserver(&user_id, &stored_hs).await?;
+        backdate_resolved_at(&user_id).await?;
+
+        let outcome =
+            resolve_user(&MockResolver::naming(&stored_hs, 10), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::Confirmed);
+
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            mapping(&stored_hs, false, Some(10))
+        );
+        assert!(
+            !get_users_needing_resolution(TTL_MS)
+                .await?
+                .contains(&user_id),
+            "a confirmation refreshes resolved_at"
+        );
+
+        cleanup_test_user(&user_id).await?;
+
+        Ok(())
+    }
+
+    /// A record newer than the clock naming another homeserver moves the edge:
+    /// the user is read from the new homeserver and no longer from the old one.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_resolve_user_switches_on_newer_record() -> Result<(), DynError> {
         setup().await?;
 
         let user_pk = random_pk();
         let user_id = user_pk.z32();
         let stored_hs = random_pubky_id();
         let new_hs = random_pubky_id();
+        let primary = random_pubky_id();
 
         create_test_user(&user_id).await?;
-        set_user_homeserver(&user_id, &stored_hs).await?;
+        set_user_homeserver_from_record(&user_id, &stored_hs, 10, false).await?;
 
-        // DHT now points at a different homeserver
-        let resolver = MockResolver {
-            result: Some(new_hs.clone()),
-        };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
-        assert_eq!(
-            outcome,
-            Resolution::Diverged {
-                reason: StaleReason::HsChanged,
-                was_stale: false,
-            }
-        );
+        let outcome = resolve_user(&MockResolver::naming(&new_hs, 20), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::Switched { catch_up: false });
 
-        // Binding unchanged, and the user is indexed on neither homeserver
         assert_eq!(
             get_user_homeserver(&user_id).await?,
-            Some(UserHomeserverMapping {
-                hs_id: stored_hs.to_string(),
-                stale: true,
-            })
+            mapping(&new_hs, false, Some(20))
         );
         assert!(!get_user_ids_by_homeserver(&stored_hs)
             .await?
             .contains(&user_id));
-        assert!(!get_user_ids_by_homeserver(&new_hs)
+        assert!(get_user_ids_by_homeserver(&new_hs)
             .await?
             .contains(&user_id));
 
@@ -1146,37 +1499,43 @@ mod tests {
         Ok(())
     }
 
-    /// When the homeserver is unpublished, the binding is kept but marked stale.
+    /// A record naming another homeserver that is not newer than the clock is a
+    /// replay or a lagging answer: the binding stands, only `resolved_at` moves.
     #[tokio_shared_rt::test(shared)]
-    async fn test_resolve_user_unpublished_keeps_binding_and_marks_stale() -> Result<(), DynError> {
+    async fn test_resolve_user_ignores_record_not_newer_than_clock() -> Result<(), DynError> {
         setup().await?;
 
         let user_pk = random_pk();
         let user_id = user_pk.z32();
         let stored_hs = random_pubky_id();
+        let old_hs = random_pubky_id();
+        let primary = random_pubky_id();
 
         create_test_user(&user_id).await?;
-        set_user_homeserver(&user_id, &stored_hs).await?;
+        set_user_homeserver_from_record(&user_id, &stored_hs, 20, false).await?;
 
-        // DHT no longer publishes a homeserver
-        let resolver = MockResolver { result: None };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
-        assert_eq!(
-            outcome,
-            Resolution::Diverged {
-                reason: StaleReason::Unresolved,
-                was_stale: false,
-            }
-        );
-
-        assert_eq!(
-            get_user_homeserver(&user_id).await?,
-            Some(UserHomeserverMapping {
-                hs_id: stored_hs.to_string(),
-                stale: true,
-            })
-        );
-        assert!(!get_user_ids_by_homeserver(&stored_hs)
+        for timestamp in [20, 5] {
+            backdate_resolved_at(&user_id).await?;
+            let outcome = resolve_user(
+                &MockResolver::naming(&old_hs, timestamp),
+                &primary,
+                &user_pk,
+            )
+            .await?;
+            assert_eq!(outcome, Resolution::IgnoredOlder, "record at {timestamp}");
+            assert_eq!(
+                get_user_homeserver(&user_id).await?,
+                mapping(&stored_hs, false, Some(20)),
+                "the binding and the clock stand"
+            );
+            assert!(
+                !get_users_needing_resolution(TTL_MS)
+                    .await?
+                    .contains(&user_id),
+                "an ignored record still refreshes resolved_at"
+            );
+        }
+        assert!(!get_user_ids_by_homeserver(&old_hs)
             .await?
             .contains(&user_id));
 
@@ -1185,66 +1544,216 @@ mod tests {
         Ok(())
     }
 
-    /// When the DHT realigns with the stored homeserver, the stale flag clears
-    /// and the user is indexed again.
+    /// A user without a clock, bound by the ingestor, accepts the first record.
     #[tokio_shared_rt::test(shared)]
-    async fn test_resolve_user_realign_clears_stale() -> Result<(), DynError> {
+    async fn test_resolve_user_without_clock_accepts_any_record() -> Result<(), DynError> {
         setup().await?;
 
         let user_pk = random_pk();
         let user_id = user_pk.z32();
         let stored_hs = random_pubky_id();
+        let new_hs = random_pubky_id();
+        let primary = random_pubky_id();
 
         create_test_user(&user_id).await?;
         set_user_homeserver(&user_id, &stored_hs).await?;
-        // Start from a stale mapping
-        set_user_homeserver_stale(&user_id, true).await?;
-        assert!(!get_user_ids_by_homeserver(&stored_hs)
-            .await?
-            .contains(&user_id));
 
-        // DHT points back at the stored homeserver
-        let resolver = MockResolver {
-            result: Some(stored_hs.clone()),
-        };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
-        assert_eq!(outcome, Resolution::Confirmed { was_stale: true });
+        let outcome = resolve_user(&MockResolver::naming(&new_hs, 1), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::Switched { catch_up: false });
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            mapping(&new_hs, false, Some(1))
+        );
 
+        cleanup_test_user(&user_id).await?;
+        Ok(())
+    }
+
+    /// A switch to the primary homeserver flags the edge for the per-user
+    /// catch-up: the bulk stream has already passed this user's events there.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_resolve_user_switch_to_primary_flags_catch_up() -> Result<(), DynError> {
+        setup().await?;
+
+        let user_pk = random_pk();
+        let user_id = user_pk.z32();
+        let stored_hs = random_pubky_id();
+        let primary = random_pubky_id();
+
+        create_test_user(&user_id).await?;
+        set_user_homeserver_from_record(&user_id, &stored_hs, 10, false).await?;
+
+        let outcome = resolve_user(&MockResolver::naming(&primary, 20), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::Switched { catch_up: true });
+
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            mapping(&primary, true, Some(20))
+        );
+        assert_eq!(
+            get_catch_up_user_ids_by_homeserver(&primary).await?,
+            vec![user_id.clone()]
+        );
+
+        // Confirming the binding later keeps the catch-up on.
+        let outcome = resolve_user(&MockResolver::naming(&primary, 30), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::Confirmed);
+        assert!(get_user_homeserver(&user_id).await?.catch_up);
+
+        cleanup_test_user(&user_id).await?;
+
+        Ok(())
+    }
+
+    /// Leaving the primary with the bulk stream covering the user stores the bulk
+    /// cursor as the user's per-user floor there, so a return replays only the gap.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_resolve_user_leaving_primary_stores_cursor_floor() -> Result<(), DynError> {
+        setup().await?;
+
+        let user_pk = random_pk();
+        let user_id = user_pk.z32();
+        let primary = random_pubky_id();
+        let new_hs = random_pubky_id();
+
+        create_test_user(&user_id).await?;
+        set_user_homeserver_from_record(&user_id, &primary, 10, false).await?;
+        Homeserver {
+            id: primary.clone(),
+            cursor: 42,
+        }
+        .put_to_index()
+        .await?;
+
+        let outcome = resolve_user(&MockResolver::naming(&new_hs, 20), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::Switched { catch_up: false });
+
+        assert_eq!(
+            UserHsCursor::read(&[user_id.as_str()], primary.as_ref()).await?,
+            vec![42],
+            "the bulk cursor becomes the user's floor on the primary"
+        );
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            mapping(&new_hs, false, Some(20))
+        );
+
+        cleanup_test_user(&user_id).await?;
+
+        Ok(())
+    }
+
+    /// Leaving the primary while still catching up keeps the per-user cursor: the
+    /// bulk stream skipped this user, so its cursor says nothing about them.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_resolve_user_leaving_primary_mid_catch_up_keeps_user_cursor(
+    ) -> Result<(), DynError> {
+        setup().await?;
+
+        let user_pk = random_pk();
+        let user_id = user_pk.z32();
+        let primary = random_pubky_id();
+        let new_hs = random_pubky_id();
+
+        create_test_user(&user_id).await?;
+        set_user_homeserver_from_record(&user_id, &primary, 10, true).await?;
+        UserHsCursor::write(&user_id, primary.as_ref(), 7).await?;
+        Homeserver {
+            id: primary.clone(),
+            cursor: 42,
+        }
+        .put_to_index()
+        .await?;
+
+        let outcome = resolve_user(&MockResolver::naming(&new_hs, 20), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::Switched { catch_up: false });
+
+        assert_eq!(
+            UserHsCursor::read(&[user_id.as_str()], primary.as_ref()).await?,
+            vec![7],
+            "the catch-up's own cursor is the truth while the flag is on"
+        );
+
+        cleanup_test_user(&user_id).await?;
+
+        Ok(())
+    }
+
+    /// A record naming no homeserver keeps the binding but advances the clock, so
+    /// an older record naming another homeserver cannot follow it while a newer
+    /// one still can.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_resolve_user_no_homeserver_record_keeps_binding() -> Result<(), DynError> {
+        setup().await?;
+
+        let user_pk = random_pk();
+        let user_id = user_pk.z32();
+        let stored_hs = random_pubky_id();
+        let other_hs = random_pubky_id();
+        let primary = random_pubky_id();
+
+        create_test_user(&user_id).await?;
+        set_user_homeserver_from_record(&user_id, &stored_hs, 10, false).await?;
+        backdate_resolved_at(&user_id).await?;
+
+        let outcome = resolve_user(&MockResolver::naming_none(30), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::NoHomeserver);
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            mapping(&stored_hs, false, Some(30))
+        );
         assert!(get_user_ids_by_homeserver(&stored_hs)
             .await?
             .contains(&user_id));
+        assert!(
+            !get_users_needing_resolution(TTL_MS)
+                .await?
+                .contains(&user_id),
+            "resolved_at is refreshed"
+        );
+
+        let outcome =
+            resolve_user(&MockResolver::naming(&other_hs, 20), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::IgnoredOlder);
+
+        let outcome =
+            resolve_user(&MockResolver::naming(&other_hs, 40), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::Switched { catch_up: false });
 
         cleanup_test_user(&user_id).await?;
 
         Ok(())
     }
 
-    /// A user that is already stale is not counted as a new stale transition
-    /// when the published homeserver keeps diverging. This keeps the metric
-    /// sensitive to real peaks rather than a sustained stale population.
+    /// No record found keeps the binding and the clock, and only refreshes
+    /// `resolved_at`: an outage must not move anything.
     #[tokio_shared_rt::test(shared)]
-    async fn test_resolve_user_already_stale_not_counted_again() -> Result<(), DynError> {
+    async fn test_resolve_user_missing_record_keeps_binding() -> Result<(), DynError> {
         setup().await?;
 
         let user_pk = random_pk();
         let user_id = user_pk.z32();
         let stored_hs = random_pubky_id();
-        let new_hs = random_pubky_id();
+        let primary = random_pubky_id();
 
         create_test_user(&user_id).await?;
-        set_user_homeserver(&user_id, &stored_hs).await?;
-        set_user_homeserver_stale(&user_id, true).await?;
+        set_user_homeserver_from_record(&user_id, &stored_hs, 10, false).await?;
+        backdate_resolved_at(&user_id).await?;
 
-        let resolver = MockResolver {
-            result: Some(new_hs.clone()),
-        };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
+        let outcome = resolve_user(&MockResolver::missing(), &primary, &user_pk).await?;
+        assert_eq!(outcome, Resolution::Kept);
         assert_eq!(
-            outcome,
-            Resolution::Diverged {
-                reason: StaleReason::HsChanged,
-                was_stale: true,
-            }
+            get_user_homeserver(&user_id).await?,
+            mapping(&stored_hs, false, Some(10))
+        );
+        assert!(get_user_ids_by_homeserver(&stored_hs)
+            .await?
+            .contains(&user_id));
+        assert!(
+            !get_users_needing_resolution(TTL_MS)
+                .await?
+                .contains(&user_id),
+            "a missing record defers the next lookup by a TTL"
         );
 
         cleanup_test_user(&user_id).await?;
@@ -1261,20 +1770,13 @@ mod tests {
         let user_pk = random_pk();
         let user_id = user_pk.z32();
         let stored_hs = random_pubky_id();
+        let primary = random_pubky_id();
 
         create_test_user(&user_id).await?;
-        set_user_homeserver(&user_id, &stored_hs).await?;
+        set_user_homeserver_from_record(&user_id, &stored_hs, 10, false).await?;
+        backdate_resolved_at(&user_id).await?;
 
-        // Backdate the mapping (2 hours ago) so the user is due for resolution
-        let backdate_query = Query::new(
-            "backdate_hs_mapping",
-            "MATCH (u:User {id: $user_id})-[r:HOSTED_BY]->(:Homeserver)
-             SET r.resolved_at = timestamp() - 7200000",
-        )
-        .param("user_id", user_id.as_str());
-        exec_single_row(backdate_query).await?;
-
-        let outcome = resolve_user(&FailingResolver, &user_pk).await?;
+        let outcome = resolve_user(&FailingResolver, &primary, &user_pk).await?;
         assert_eq!(
             outcome,
             Resolution::LookupFailed {
@@ -1284,13 +1786,10 @@ mod tests {
 
         assert_eq!(
             get_user_homeserver(&user_id).await?,
-            Some(UserHomeserverMapping {
-                hs_id: stored_hs.to_string(),
-                stale: false,
-            })
+            mapping(&stored_hs, false, Some(10))
         );
         assert!(
-            get_users_needing_resolution(3_600_000)
+            get_users_needing_resolution(TTL_MS)
                 .await?
                 .contains(&user_id),
             "a failed lookup must not refresh resolved_at, or recovery waits a full TTL"
@@ -1301,26 +1800,25 @@ mod tests {
         Ok(())
     }
 
-    /// The mapping counts feeding the gauges include a freshly stale mapping.
+    /// The mapping counts feeding the gauges include a user catching up.
     ///
     /// Other tests (in this and other test binaries) create mappings and flip
-    /// stale flags concurrently, so only lower bounds on the global counts and
-    /// the stale <= mapped invariant are stable.
+    /// flags concurrently, so only lower bounds on the global counts and the
+    /// catch_up <= mapped invariant are stable.
     #[tokio_shared_rt::test(shared)]
     async fn test_count_mappings() -> Result<(), DynError> {
         setup().await?;
 
         let user_pk = random_pk();
         let user_id = user_pk.z32();
-        let stored_hs = random_pubky_id();
+        let primary = random_pubky_id();
 
         create_test_user(&user_id).await?;
-        set_user_homeserver(&user_id, &stored_hs).await?;
-        set_user_homeserver_stale(&user_id, true).await?;
+        set_user_homeserver_from_record(&user_id, &primary, 10, true).await?;
 
         let counts = count_mappings().await?;
-        assert!(counts.stale >= 1);
-        assert!(counts.mapped >= counts.stale);
+        assert!(counts.catch_up >= 1);
+        assert!(counts.mapped >= counts.catch_up);
 
         cleanup_test_user(&user_id).await?;
 
@@ -1330,57 +1828,40 @@ mod tests {
     /// Every variant maps to a bounded, intended label set.
     #[test]
     fn test_resolution_labels() {
-        use MappingState::{Active, Stale, Unbound};
-        use StaleReason::{HsChanged, Unresolved};
+        use MappingState::{Active, Unbound};
 
-        let diverged = |reason, was_stale| Resolution::Diverged { reason, was_stale };
         let cases = [
-            (Resolution::Unbound, Outcome::Unresolved, Unbound, None),
-            (Resolution::Bound, Outcome::Resolved, Unbound, None),
+            (Resolution::Unbound, Outcome::Unresolved, Unbound),
+            (Resolution::Bound, Outcome::Resolved, Unbound),
+            (Resolution::Confirmed, Outcome::Resolved, Active),
             (
-                Resolution::Confirmed { was_stale: false },
+                Resolution::Switched { catch_up: false },
                 Outcome::Resolved,
                 Active,
-                None,
             ),
             (
-                Resolution::Confirmed { was_stale: true },
-                Outcome::Resolved,
-                Stale,
-                None,
-            ),
-            (
-                diverged(Unresolved, false),
-                Outcome::Unresolved,
-                Active,
-                Some(Unresolved),
-            ),
-            (
-                diverged(HsChanged, false),
+                Resolution::Switched { catch_up: true },
                 Outcome::Resolved,
                 Active,
-                Some(HsChanged),
             ),
-            (diverged(Unresolved, true), Outcome::Unresolved, Stale, None),
-            (diverged(HsChanged, true), Outcome::Resolved, Stale, None),
+            (Resolution::IgnoredOlder, Outcome::Resolved, Active),
+            (Resolution::NoHomeserver, Outcome::Unresolved, Active),
+            (Resolution::Kept, Outcome::Unresolved, Active),
             (
                 Resolution::LookupFailed { mapping: Active },
                 Outcome::Error,
                 Active,
-                None,
             ),
             (
                 Resolution::LookupFailed { mapping: Unbound },
                 Outcome::Error,
                 Unbound,
-                None,
             ),
         ];
 
-        for (resolution, outcome, mapping, newly_stale) in cases {
+        for (resolution, outcome, mapping) in cases {
             assert_eq!(resolution.outcome(), outcome, "{resolution:?}");
             assert_eq!(resolution.mapping(), mapping, "{resolution:?}");
-            assert_eq!(resolution.newly_stale(), newly_stale, "{resolution:?}");
         }
     }
 
@@ -1394,9 +1875,67 @@ mod tests {
         let label = |mapping| mapping_attribute(mapping).value.to_string();
         assert_eq!(label(Some(MappingState::Unbound)), "unbound");
         assert_eq!(label(Some(MappingState::Active)), "active");
-        assert_eq!(label(Some(MappingState::Stale)), "stale");
         assert_eq!(label(None), "unknown");
         assert_eq!(mapping_attribute(None).key.as_str(), "mapping");
+    }
+
+    /// The `_pubky` target is read from HTTPS and SVCB records the way the SDK
+    /// reads it; a packet without one, or with a target that is no key, names none.
+    #[test]
+    fn test_published_homeserver_reads_the_pubky_target() {
+        let user = Keypair::random();
+        let homeserver = Keypair::random().public_key();
+        let homeserver_id = PubkyId::try_from(homeserver.to_z32().as_str()).expect("valid id");
+        let name = || Name::try_from("_pubky").expect("valid name");
+        fn svcb(target: &str) -> SVCB<'_> {
+            SVCB::new(0, target.try_into().expect("valid target"))
+        }
+
+        let https = SignedPacket::builder()
+            .https(name(), svcb(&homeserver.to_z32()), 3600)
+            .sign(&user)
+            .expect("signed");
+        assert_eq!(published_homeserver(&https), Some(homeserver_id.clone()));
+
+        let svcb_record = SignedPacket::builder()
+            .svcb(name(), svcb(&homeserver.to_z32()), 3600)
+            .sign(&user)
+            .expect("signed");
+        assert_eq!(published_homeserver(&svcb_record), Some(homeserver_id));
+
+        let other_name = SignedPacket::builder()
+            .https(
+                Name::try_from("_other").expect("valid name"),
+                svcb("example.com"),
+                3600,
+            )
+            .sign(&user)
+            .expect("signed");
+        assert_eq!(published_homeserver(&other_name), None);
+
+        let domain_target = SignedPacket::builder()
+            .https(name(), svcb("example.com"), 3600)
+            .sign(&user)
+            .expect("signed");
+        assert_eq!(published_homeserver(&domain_target), None);
+    }
+
+    #[test]
+    fn test_record_is_newer_than_clock() {
+        let no_clock = StoredMapping::default();
+        assert!(no_clock.record_is_newer(0));
+
+        let clock = StoredMapping {
+            record_ts: Some(10),
+            ..StoredMapping::default()
+        };
+        assert!(clock.record_is_newer(11));
+        assert!(!clock.record_is_newer(10));
+        assert!(!clock.record_is_newer(9));
+        assert!(
+            clock.record_is_newer(u64::MAX),
+            "saturates instead of wrapping"
+        );
     }
 
     #[test]

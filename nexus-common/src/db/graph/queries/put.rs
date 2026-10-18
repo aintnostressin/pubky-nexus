@@ -450,12 +450,26 @@ pub fn create_homeserver(homeserver_id: &str) -> Query {
     .param("id", homeserver_id)
 }
 
-/// Sets the `HOSTED_BY` relationship between a user and a homeserver.
+/// Binds a user to a homeserver, or refreshes an existing binding.
 ///
-/// If the user is already on the target homeserver, refreshes `resolved_at`.
-/// If the user is on a different homeserver, replaces the old relationship.
-/// MERGEs the target homeserver node if it doesn't exist yet.
-pub fn set_user_homeserver(user_id: &str, homeserver_id: &str) -> Query {
+/// An edge to a different homeserver is replaced (a switch) and the target
+/// `Homeserver` node is merged if missing. `resolved_at` is always refreshed.
+///
+/// `record_ts` is the timestamp of the PKDNS record the binding was read from,
+/// in microseconds, authored by the key holder. It advances the user's record
+/// clock `hs_record_ts` when newer, and is `None` when the caller has no record
+/// in hand, as the ingestor does.
+///
+/// `catch_up` flags the edge when the user's events on this homeserver still
+/// have to be read per user: a switch to the primary homeserver, whose bulk
+/// stream has already passed them. `false` leaves the flag as it is, so
+/// confirming a binding does not end a catch-up in progress.
+pub fn set_user_homeserver(
+    user_id: &str,
+    homeserver_id: &str,
+    record_ts: Option<i64>,
+    catch_up: bool,
+) -> Query {
     Query::new(
         "set_user_homeserver",
         "MATCH (u:User {id: $user_id})
@@ -470,25 +484,51 @@ pub fn set_user_homeserver(user_id: &str, homeserver_id: &str) -> Query {
          // Ensure target homeserver and relationship exist
          MERGE (hs:Homeserver {id: $hs_id})
          MERGE (u)-[r:HOSTED_BY]->(hs)
-         SET r.resolved_at = timestamp()",
+         SET r.resolved_at = timestamp(),
+             u.hs_record_ts = CASE
+                 WHEN $record_ts IS NOT NULL AND $record_ts > coalesce(u.hs_record_ts, -1)
+                 THEN $record_ts
+                 ELSE u.hs_record_ts
+             END
+         FOREACH (_ IN CASE WHEN $catch_up THEN [1] ELSE [] END | SET r.catch_up = true)",
     )
     .param("user_id", user_id.to_string())
     .param("hs_id", homeserver_id.to_string())
+    .param("record_ts", record_ts)
+    .param("catch_up", catch_up)
 }
 
-/// Toggles the `stale` flag on a user's existing `HOSTED_BY` relationship and
-/// refreshes `resolved_at`.
+/// Refreshes `resolved_at` on a user's existing binding without changing it, and
+/// advances the record clock `hs_record_ts` when `record_ts` is newer.
 ///
-/// Homeserver switching is not fully implemented, so the bound homeserver is
-/// never changed. Instead, when the published homeserver diverges (changed or
-/// removed) the mapping is marked stale to pause indexing; when it realigns the
-/// flag is cleared to resume.
-pub fn set_user_homeserver_stale(user_id: &str, stale: bool) -> Query {
+/// For lookups that give no reason to move the edge: no record found, a record
+/// naming no homeserver, or a record not newer than the one the edge was set from.
+pub fn refresh_user_homeserver(user_id: &str, record_ts: Option<i64>) -> Query {
     Query::new(
-        "set_user_homeserver_stale",
+        "refresh_user_homeserver",
         "MATCH (u:User {id: $user_id})-[r:HOSTED_BY]->(:Homeserver)
-         SET r.stale = $stale, r.resolved_at = timestamp()",
+         SET r.resolved_at = timestamp(),
+             u.hs_record_ts = CASE
+                 WHEN $record_ts IS NOT NULL AND $record_ts > coalesce(u.hs_record_ts, -1)
+                 THEN $record_ts
+                 ELSE u.hs_record_ts
+             END",
     )
     .param("user_id", user_id.to_string())
-    .param("stale", stale)
+    .param("record_ts", record_ts)
+}
+
+/// Sets or clears the `catch_up` flag on a user's binding to `homeserver_id`.
+///
+/// The catch-up reader clears it once it has read the user's history from the
+/// homeserver, and sets it back when the final read after clearing fails.
+pub fn set_user_homeserver_catch_up(user_id: &str, homeserver_id: &str, catch_up: bool) -> Query {
+    Query::new(
+        "set_user_homeserver_catch_up",
+        "MATCH (u:User {id: $user_id})-[r:HOSTED_BY]->(:Homeserver {id: $hs_id})
+         SET r.catch_up = $catch_up",
+    )
+    .param("user_id", user_id.to_string())
+    .param("hs_id", homeserver_id.to_string())
+    .param("catch_up", catch_up)
 }

@@ -1,6 +1,6 @@
 use crate::event_processor::utils::watcher::WatcherTest;
 use nexus_common::models::homeserver::Homeserver;
-use nexus_common::models::user::{set_user_homeserver, set_user_homeserver_stale};
+use nexus_common::models::user::set_user_homeserver;
 use nexus_common::types::DynError;
 use pubky::Keypair;
 use pubky_app_specs::{PubkyAppUser, PubkyId};
@@ -113,31 +113,37 @@ async fn test_get_all_active_homeservers() -> Result<(), DynError> {
     Ok(())
 }
 
-/// A homeserver whose only user has a stale mapping must drop off the active list.
+/// A homeserver whose only user switched to another homeserver drops off the active list.
 #[tokio_shared_rt::test(shared)]
-async fn test_stale_users_excluded_from_active_homeservers() -> Result<(), DynError> {
+async fn test_homeserver_left_by_its_only_user_drops_off_active_homeservers() -> Result<(), DynError>
+{
     let mut test = WatcherTest::setup(None).await?;
 
     let hs = create_orphan_hs().await?;
+    let other_hs = create_orphan_hs().await?;
     let kp = Keypair::random();
     let user_id = test
-        .create_user(&kp, &make_test_user("Watcher:ActiveHS:Stale"))
+        .create_user(&kp, &make_test_user("Watcher:ActiveHS:Left"))
         .await?;
     set_user_homeserver(&user_id, &hs).await?;
 
-    // With an active mapping the homeserver is listed.
+    // With a bound user the homeserver is listed.
     let hs_ids = Homeserver::get_all_active_from_graph().await?;
     assert!(
         hs_ids.contains(&hs.to_string()),
-        "HS with an active user should be listed"
+        "HS with a bound user should be listed"
     );
 
-    // Marking the only user stale drops the homeserver off the active list.
-    set_user_homeserver_stale(&user_id, true).await?;
+    // Moving the only user elsewhere drops the homeserver off the active list.
+    set_user_homeserver(&user_id, &other_hs).await?;
     let hs_ids = Homeserver::get_all_active_from_graph().await?;
     assert!(
         !hs_ids.contains(&hs.to_string()),
-        "HS with only stale users should be excluded"
+        "HS left by its only user should be excluded"
+    );
+    assert!(
+        hs_ids.contains(&other_hs.to_string()),
+        "the homeserver the user moved to should be listed"
     );
 
     test.cleanup_user(&kp).await?;
