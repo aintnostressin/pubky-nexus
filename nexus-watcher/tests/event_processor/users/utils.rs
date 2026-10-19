@@ -1,19 +1,8 @@
 use anyhow::Result;
 use nexus_common::{
-    db::{
-        exec_single_row, fetch_key_from_graph, fetch_row_from_graph, graph::Query, queries,
-        RedisOps,
-    },
-    models::user::{UserCounts, UserDetails, UserStream, USER_MOSTFOLLOWED_KEY_PARTS},
+    db::{exec_single_row, fetch_key_from_graph, fetch_row_from_graph, graph::Query, queries},
+    models::user::{UserCounts, UserDetails},
 };
-
-pub async fn check_member_most_followed(user_id: &str) -> Result<Option<isize>> {
-    let influencer_score =
-        UserStream::check_sorted_set_member(None, &USER_MOSTFOLLOWED_KEY_PARTS, &[user_id])
-            .await
-            .unwrap();
-    Ok(influencer_score)
-}
 
 pub async fn find_user_counts(user_id: &str) -> UserCounts {
     UserCounts::get_from_index(user_id)

@@ -232,6 +232,7 @@ cron = \"0 27 3,15 * * *\"\n";
             Arc::new(InfluencersCacheJob::new(Timeframe::Today)),
             Arc::new(InfluencersCacheJob::new(Timeframe::ThisWeek)),
             Arc::new(InfluencersCacheJob::new(Timeframe::ThisMonth)),
+            Arc::new(CountingJob::new("most-followed-cache")),
             Arc::new(CountingJob::new("trust-recompute")),
         ]);
 
@@ -241,6 +242,7 @@ cron = \"0 27 3,15 * * *\"\n";
 
         let mut by_name: std::collections::HashMap<&str, String> = jobs
             .iter()
+            .filter(|sj| sj.job.name().starts_with("influencers-cache"))
             .map(|sj| (sj.job.name(), sj.schedule.to_string()))
             .collect();
 
@@ -280,6 +282,7 @@ cron = \"0 47 3,15 * * *\"\n";
             Arc::new(HotTagsCacheJob::new(Timeframe::ThisWeek)),
             Arc::new(HotTagsCacheJob::new(Timeframe::ThisMonth)),
             Arc::new(HotTagsCacheJob::new(Timeframe::AllTime)),
+            Arc::new(CountingJob::new("most-followed-cache")),
             Arc::new(CountingJob::new("trust-recompute")),
         ]);
 
@@ -289,6 +292,7 @@ cron = \"0 47 3,15 * * *\"\n";
 
         let mut by_name: std::collections::HashMap<&str, String> = jobs
             .iter()
+            .filter(|sj| sj.job.name().starts_with("hot-tags-cache"))
             .map(|sj| (sj.job.name(), sj.schedule.to_string()))
             .collect();
 

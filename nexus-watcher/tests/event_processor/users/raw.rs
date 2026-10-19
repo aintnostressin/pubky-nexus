@@ -1,6 +1,5 @@
 use crate::{
-    event_processor::users::utils::{check_member_most_followed, find_user_details},
-    event_processor::utils::watcher::WatcherTest,
+    event_processor::users::utils::find_user_details, event_processor::utils::watcher::WatcherTest,
 };
 use anyhow::Result;
 use nexus_common::models::event::EventLine;
@@ -83,11 +82,6 @@ async fn test_homeserver_user_put_event() -> Result<()> {
 
     assert!(is_member.is_some());
     assert_eq!(is_member.unwrap(), 0);
-
-    // most_followed score: Sorted:Users:MostFollowed
-    let influencer_score = check_member_most_followed(&user_id).await.unwrap();
-    assert!(influencer_score.is_some());
-    assert_eq!(influencer_score.unwrap(), 0);
 
     // Cleanup
     test.cleanup_user(&user_kp).await?;
