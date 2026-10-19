@@ -200,6 +200,16 @@ slow_query_logging_threshold_ms = 100
 # TTL 24h.
 #cron = "0 47 3,15 * * *"    # at 03:47 and 15:47
 
+# The AllTime influencers ranking (`Sorted:Users:Influencers`), the default
+# `source=influencers` stream. It has no TTL and nothing else rescores it, so
+# this job is on by default: unscheduled, the ranking only changes after a
+# reindex or once its key is lost. Each run rebuilds the whole ranking from the
+# graph and swaps it in; a failed run leaves the previous one in place. A build
+# that predates this job refuses to start on this section, so comment it out
+# before rolling back.
+[jobs.influencers-cache-all-time]
+cron = "0 4/10 * * * *"    # every 10 minutes, at :04, :14, ... :54
+
 # Scheduling for the trust-rank recompute job. Set a cron for automatic
 # recomputes; omit it to leave the job on-demand only (`nexusd jobs run
 # trust-recompute` always works).

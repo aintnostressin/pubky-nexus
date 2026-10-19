@@ -127,7 +127,7 @@ impl JobRegistry {
 mod tests {
     use super::*;
     use crate::jobs::{test_support::CountingJob, HotTagsCacheJob, InfluencersCacheJob, JobError};
-    use nexus_common::types::{CacheTimeframe, Timeframe};
+    use nexus_common::types::Timeframe;
     use std::sync::Arc;
 
     /// Builds a [`DaemonConfig`] from the canonical default config with `extra`
@@ -225,9 +225,10 @@ cron = \"0 17 */3 * * *\"\n\
 cron = \"0 27 3,15 * * *\"\n";
         let config = default_config_with(extra).await;
         let registry = JobRegistry::new(vec![
-            Arc::new(InfluencersCacheJob::new(CacheTimeframe::Today)),
-            Arc::new(InfluencersCacheJob::new(CacheTimeframe::ThisWeek)),
-            Arc::new(InfluencersCacheJob::new(CacheTimeframe::ThisMonth)),
+            Arc::new(InfluencersCacheJob::new(Timeframe::Today)),
+            Arc::new(InfluencersCacheJob::new(Timeframe::ThisWeek)),
+            Arc::new(InfluencersCacheJob::new(Timeframe::ThisMonth)),
+            Arc::new(InfluencersCacheJob::new(Timeframe::AllTime)),
             Arc::new(CountingJob::new("trust-recompute")),
         ]);
 
@@ -242,8 +243,12 @@ cron = \"0 27 3,15 * * *\"\n";
 
         assert_eq!(
             by_name.len(),
-            3,
-            "each cache-backed timeframe must become its own scheduled job"
+            4,
+            "each timeframe must become its own scheduled job"
+        );
+        assert!(
+            by_name.remove("influencers-cache-all-time").is_some(),
+            "the shipped config schedules the all-time ranking"
         );
         assert_eq!(
             by_name.remove("influencers-cache-today").unwrap(),
@@ -276,6 +281,7 @@ cron = \"0 47 3,15 * * *\"\n";
             Arc::new(HotTagsCacheJob::new(Timeframe::ThisWeek)),
             Arc::new(HotTagsCacheJob::new(Timeframe::ThisMonth)),
             Arc::new(HotTagsCacheJob::new(Timeframe::AllTime)),
+            Arc::new(CountingJob::new("influencers-cache-all-time")),
             Arc::new(CountingJob::new("trust-recompute")),
         ]);
 
@@ -285,6 +291,7 @@ cron = \"0 47 3,15 * * *\"\n";
 
         let mut by_name: std::collections::HashMap<&str, String> = jobs
             .iter()
+            .filter(|sj| sj.job.name().starts_with("hot-tags-cache"))
             .map(|sj| (sj.job.name(), sj.schedule.to_string()))
             .collect();
 

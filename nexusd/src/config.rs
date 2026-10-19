@@ -140,10 +140,17 @@ mod tests {
         assert_eq!(c.stack.db.redis, "redis://127.0.0.1:6379");
         assert_eq!(c.stack.db.neo4j.uri, "bolt://localhost:7687");
 
-        // Influencer job is opt-in
+        // The ranged influencer caches are opt-in; the AllTime ranking has no other writer
+        let all_time_job = c
+            .jobs
+            .get("influencers-cache-all-time")
+            .expect("[jobs.influencers-cache-all-time] should be present");
+        assert_eq!(all_time_job.cron.as_deref(), Some("0 4/10 * * * *"));
         assert!(
-            !c.jobs.keys().any(|k| k.starts_with("influencers-cache")),
-            "influencer cache jobs must be opt-in; found {:#?}",
+            !c.jobs
+                .keys()
+                .any(|k| k.starts_with("influencers-cache") && k != "influencers-cache-all-time"),
+            "ranged influencer cache jobs must be opt-in; found {:#?}",
             c.jobs
         );
         // Hot-tags job is opt-in

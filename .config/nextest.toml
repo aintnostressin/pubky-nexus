@@ -1,6 +1,6 @@
 # Minimal nextest configuration.
 #
-# test_global_influencers_alltime_cache_recovery deletes and reseeds the shared
+# test_global_influencers_alltime_cache_recovery deletes and rebuilds the shared
 # Sorted:Users:Influencers Redis sorted set. nextest runs each test in its own
 # process, in parallel, against one shared Redis, so that test must never
 # interleave with the sibling tests that assert the exact member order of the
@@ -21,6 +21,12 @@ test-group = 'influencers-sorted-set'
 # they run alone, as cache_setup does below.
 [[profile.default.overrides]]
 filter = 'test(=user::views::test_social_graph_status) | test(/^models::post::trust_filter::tests::live::/)'
+threads-required = 'num-test-threads'
+
+# This test seeds a stale copy of the shared Sorted:Users:Influencers ranking and
+# rebuilds it, so no reader of that set may run while it does.
+[[profile.default.overrides]]
+filter = 'test(=models::user::influencers::tests::refresh_converges_a_stale_all_time_ranking)'
 threads-required = 'num-test-threads'
 
 # nexusd/tests/cache_setup/main.rs calls clear_redis(), which issues FLUSHDB

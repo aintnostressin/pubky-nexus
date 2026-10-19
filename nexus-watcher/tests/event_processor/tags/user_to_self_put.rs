@@ -1,6 +1,6 @@
 use super::utils::find_user_tag;
 use crate::event_processor::{
-    users::utils::{check_member_user_influencer, find_user_counts},
+    users::utils::{assert_no_influencer_score, find_user_counts},
     utils::watcher::{HomeserverHashIdPath, WatcherTest},
 };
 use anyhow::Result;
@@ -77,15 +77,8 @@ async fn test_homeserver_put_tag_user_self() -> Result<()> {
     assert_eq!(user_counts.tags, 1);
     assert_eq!(user_counts.unique_tags, 1);
 
-    // Check user pionner score: Sorted:Users:Influencers
-    let influencer_score = check_member_user_influencer(&user_id)
-        .await
-        .expect("Failed to check user influencer score");
-    assert!(
-        influencer_score.is_some(),
-        "Influencer score should be present"
-    );
-    assert_eq!(influencer_score.unwrap(), 0);
+    // Sorted:Users:Influencers is the all-time job's
+    assert_no_influencer_score(&user_id).await;
 
     // Cleanup user
     test.cleanup_user(&user_kp).await?;
