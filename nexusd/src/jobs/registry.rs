@@ -331,6 +331,7 @@ cron = \"0 47 3,15 * * *\"\n";
         let registry = JobRegistry::new(vec![
             all_time,
             Arc::new(InfluencersCacheJob::new(Timeframe::Today)),
+            Arc::new(CountingJob::new("most-followed-cache")),
             Arc::new(CountingJob::new("trust-recompute")),
         ]);
         let section = "[jobs.influencers-cache-all-time]\n";
@@ -346,6 +347,7 @@ cron = \"0 47 3,15 * * *\"\n";
                 .scheduled_jobs(&config)
                 .expect("the config should resolve")
                 .iter()
+                .filter(|sj| sj.job.name().starts_with("influencers-cache"))
                 .map(|sj| (sj.job.name(), sj.schedule.to_string()))
                 .collect();
             let expected: Vec<(&str, String)> = expected_cron
