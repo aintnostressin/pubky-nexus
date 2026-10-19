@@ -20,6 +20,10 @@ use crate::jobs::Job;
 /// an I/O window this short is unaffected by host suspend.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Every 10 minutes, at minutes no other job uses. The AllTime ranking has no TTL
+/// and no other writer, so its job runs on this unless the config says otherwise.
+const ALL_TIME_CRON: &str = "0 4/10 * * * *";
+
 /// The graph scan + cache write for one timeframe outran `REFRESH_TIMEOUT`.
 #[derive(Debug, thiserror::Error)]
 #[error("influencer cache refresh for {timeframe} timed out after {after:?}")]
@@ -31,7 +35,7 @@ pub struct RefreshTimedOut {
 /// Refresh the global influencer ranking for one timeframe on a schedule: the
 /// top-100 TTL cache of a ranged timeframe, or the whole `Sorted:Users:Influencers`
 /// ranking for `AllTime`. That ranking has no TTL and no other writer, so its job
-/// is the one that keeps it current.
+/// is the one that keeps it current, on [`ALL_TIME_CRON`] by default.
 pub struct InfluencersCacheJob(Timeframe);
 
 impl InfluencersCacheJob {
@@ -49,6 +53,10 @@ impl Job for InfluencersCacheJob {
             Timeframe::ThisMonth => "influencers-cache-this-month",
             Timeframe::AllTime => "influencers-cache-all-time",
         }
+    }
+
+    fn default_cron(&self) -> Option<&'static str> {
+        (self.0 == Timeframe::AllTime).then_some(ALL_TIME_CRON)
     }
 
     /// Errors propagate typed: the runner logs them once, as `JobError::Run`.

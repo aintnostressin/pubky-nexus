@@ -10,6 +10,7 @@ use super::{
     runner, scheduler, Job, JobError,
 };
 use crate::config::DaemonConfig;
+use nexus_common::JobConfig;
 
 /// A [`Job`] bound to its cron schedule, with the [`Schedule`] pre-parsed. `Arc`
 /// shares one instance between the registry and the scheduler.
@@ -104,8 +105,11 @@ impl JobRegistry {
 
         for job in &self.jobs {
             let name = job.name();
-            // An absent `[jobs.<name>]` section means the job is unscheduled.
-            let job_config = config.jobs.get(name).cloned().unwrap_or_default();
+            // An absent `[jobs.<name>]` section falls back to the job's own schedule,
+            // if it has one. A section without `cron` leaves the job unscheduled.
+            let job_config = config.jobs.get(name).cloned().unwrap_or_else(|| JobConfig {
+                cron: job.default_cron().map(String::from),
+            });
             // Tag the error with the section naming the malformed cron.
             let cron = job_cron(&job_config).map_err(|source| JobError::InvalidCron {
                 job: name.into(),
@@ -228,7 +232,6 @@ cron = \"0 27 3,15 * * *\"\n";
             Arc::new(InfluencersCacheJob::new(Timeframe::Today)),
             Arc::new(InfluencersCacheJob::new(Timeframe::ThisWeek)),
             Arc::new(InfluencersCacheJob::new(Timeframe::ThisMonth)),
-            Arc::new(InfluencersCacheJob::new(Timeframe::AllTime)),
             Arc::new(CountingJob::new("trust-recompute")),
         ]);
 
@@ -243,12 +246,8 @@ cron = \"0 27 3,15 * * *\"\n";
 
         assert_eq!(
             by_name.len(),
-            4,
-            "each timeframe must become its own scheduled job"
-        );
-        assert!(
-            by_name.remove("influencers-cache-all-time").is_some(),
-            "the shipped config schedules the all-time ranking"
+            3,
+            "each cache-backed timeframe must become its own scheduled job"
         );
         assert_eq!(
             by_name.remove("influencers-cache-today").unwrap(),
@@ -281,7 +280,6 @@ cron = \"0 47 3,15 * * *\"\n";
             Arc::new(HotTagsCacheJob::new(Timeframe::ThisWeek)),
             Arc::new(HotTagsCacheJob::new(Timeframe::ThisMonth)),
             Arc::new(HotTagsCacheJob::new(Timeframe::AllTime)),
-            Arc::new(CountingJob::new("influencers-cache-all-time")),
             Arc::new(CountingJob::new("trust-recompute")),
         ]);
 
@@ -291,7 +289,6 @@ cron = \"0 47 3,15 * * *\"\n";
 
         let mut by_name: std::collections::HashMap<&str, String> = jobs
             .iter()
-            .filter(|sj| sj.job.name().starts_with("hot-tags-cache"))
             .map(|sj| (sj.job.name(), sj.schedule.to_string()))
             .collect();
 
@@ -316,6 +313,43 @@ cron = \"0 47 3,15 * * *\"\n";
             by_name.remove("hot-tags-cache-all-time").unwrap(),
             "0 47 3,15 * * *"
         );
+    }
+
+    /// The AllTime ranking keeps its own schedule while its section is absent: a
+    /// section with a `cron` overrides it, and one without turns the job off. The
+    /// ranged caches have none, so they stay opt-in.
+    #[tokio::test]
+    async fn scheduled_jobs_fall_back_to_a_jobs_own_schedule() {
+        let all_time = Arc::new(InfluencersCacheJob::new(Timeframe::AllTime));
+        let own_schedule = all_time
+            .default_cron()
+            .expect("the AllTime job has its own schedule");
+        let registry = JobRegistry::new(vec![
+            all_time,
+            Arc::new(InfluencersCacheJob::new(Timeframe::Today)),
+            Arc::new(CountingJob::new("trust-recompute")),
+        ]);
+        let section = "[jobs.influencers-cache-all-time]\n";
+        let overridden = format!("{section}cron = \"0 0 * * * *\"\n");
+
+        for (extra, expected_cron) in [
+            ("", Some(own_schedule)),
+            (overridden.as_str(), Some("0 0 * * * *")),
+            (section, None),
+        ] {
+            let config = default_config_with(extra).await;
+            let scheduled: Vec<(&str, String)> = registry
+                .scheduled_jobs(&config)
+                .expect("the config should resolve")
+                .iter()
+                .map(|sj| (sj.job.name(), sj.schedule.to_string()))
+                .collect();
+            let expected: Vec<(&str, String)> = expected_cron
+                .map(|cron| ("influencers-cache-all-time", cron.to_string()))
+                .into_iter()
+                .collect();
+            assert_eq!(scheduled, expected, "with {extra:?} appended");
+        }
     }
 
     #[tokio::test]
