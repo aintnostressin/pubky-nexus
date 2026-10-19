@@ -6,14 +6,16 @@
 # interleave with the sibling tests that assert the exact member order of the
 # same sorted set. test_global_influencers_preview reads that set five times and asserts
 # each preview is a contiguous window of it, so a reseed landing mid-read breaks it too.
-# Put all four in a test group limited to one concurrent test.
+# test_global_influencers_rejects_skip_past_cache asserts an all-time page past 100 is
+# full, which a delete landing between the read's EXISTS and ZREVRANGEBYSCORE empties.
+# Put all five in a test group limited to one concurrent test.
 
 [test-groups]
 influencers-sorted-set = { max-threads = 1 }
 resource-tag-index = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'test(=stream::user::influencers::test_global_influencers) | test(=stream::user::influencers::test_global_influencers_skip_limit) | test(=stream::user::influencers::test_global_influencers_alltime_cache_recovery) | test(=stream::user::influencers::test_global_influencers_preview)'
+filter = 'test(=stream::user::influencers::test_global_influencers) | test(=stream::user::influencers::test_global_influencers_skip_limit) | test(=stream::user::influencers::test_global_influencers_alltime_cache_recovery) | test(=stream::user::influencers::test_global_influencers_preview) | test(=stream::user::influencers::test_global_influencers_rejects_skip_past_cache)'
 test-group = 'influencers-sorted-set'
 
 # These tests change the shared trust ranking (Sorted:Users:SocialGraph) and the
