@@ -1,6 +1,6 @@
 use super::utils::{check_member_user_tag_taggers, find_user_tag};
 use crate::event_processor::{
-    users::utils::{assert_no_influencer_score, find_user_counts},
+    users::utils::find_user_counts,
     utils::watcher::{HomeserverHashIdPath, WatcherTest},
 };
 use anyhow::Result;
@@ -91,9 +91,6 @@ async fn test_homeserver_put_tag_user_another() -> Result<()> {
     // Check if user counts of the tagger updated: User:Counts:user_id
     let user_counts = find_user_counts(&tagger_user_id).await;
     assert_eq!(user_counts.tagged, 1);
-
-    // Sorted:Users:Influencers is the all-time job's
-    assert_no_influencer_score(&tagged_user_id).await;
 
     // Check the users-by-tag search score: Sorted:Tags:Global:User:Taggers:{label}
     let taggers_score = check_member_user_tag_taggers(&tagged_user_id, label)

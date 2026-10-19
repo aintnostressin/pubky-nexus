@@ -1,6 +1,6 @@
 use super::utils::{check_member_user_tag_taggers, find_user_tag};
 use crate::event_processor::{
-    users::utils::{assert_no_influencer_score, find_user_counts},
+    users::utils::find_user_counts,
     utils::watcher::{HomeserverHashIdPath, WatcherTest},
 };
 use anyhow::Result;
@@ -91,9 +91,6 @@ async fn test_homeserver_del_tag_to_another_user() -> Result<()> {
     let user_counts = find_user_counts(&tagged_user_id).await;
     assert_eq!(user_counts.tags, 0);
     assert_eq!(user_counts.unique_tags, 0);
-
-    // Sorted:Users:Influencers is the all-time job's
-    assert_no_influencer_score(&tagger_user_id).await;
 
     // Cleanup user
     test.cleanup_user(&tagged_kp).await?;

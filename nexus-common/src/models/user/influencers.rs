@@ -155,11 +155,8 @@ impl Influencers {
     /// A transient empty or `None` graph result must not evict a good ranking, so the
     /// previous cache is preferred. The caller can retry on the next scheduled tick.
     async fn fetch_and_cache(timeframe: CacheTimeframe) -> ModelResult<()> {
-        let query = queries::get::get_global_influencers(
-            0,
-            GLOBAL_INFLUENCERS_CACHE_SIZE,
-            &timeframe.timeframe(),
-        );
+        let query =
+            queries::get::get_global_influencers(0, GLOBAL_INFLUENCERS_CACHE_SIZE, timeframe);
         let result = fetch_key_from_graph::<Influencers>(query, "influencers").await?;
         Influencers::write_or_preserve_cache(result, timeframe, GLOBAL_INFLUENCERS_PREFIX).await
     }

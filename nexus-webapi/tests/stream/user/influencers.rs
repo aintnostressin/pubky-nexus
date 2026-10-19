@@ -51,9 +51,9 @@ async fn test_global_influencers_alltime_cache_recovery() -> Result<()> {
 
     let sorted_set_key = "Sorted:Users:Influencers";
 
-    // Snapshot the live sorted set (members + scores) so it can be restored afterwards.
-    // The graph-derived fallback scores only approximate the counts-derived ones, and
-    // sibling tests assert on the exact original ordering.
+    // Snapshot the live sorted set (members + scores) so it can be restored afterwards:
+    // the rebuild reads the graph as it is now, so graph changes sibling tests made since
+    // `db mock` must not leak into the ranking the exact-order tests read.
     let snapshot: Vec<(String, f64)> = redis_conn.zrange_withscores(sorted_set_key, 0, -1).await?;
 
     // Simulate data loss of the live AllTime influencers sorted set
@@ -68,7 +68,7 @@ async fn test_global_influencers_alltime_cache_recovery() -> Result<()> {
     let reseeded_len: usize = redis_conn.zcard(sorted_set_key).await?;
 
     // Restore the original sorted set exactly (DEL then ZADD of the snapshot) before
-    // asserting, so any later test observes the original counts-derived scores.
+    // asserting, so any later test observes the ranking `db mock` built.
     let _: () = redis_conn.del(sorted_set_key).await?;
     if !snapshot.is_empty() {
         let items: Vec<(f64, &str)> = snapshot

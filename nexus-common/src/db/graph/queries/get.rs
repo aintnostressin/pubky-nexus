@@ -4,6 +4,7 @@ use crate::db::kv::SortOrder;
 use crate::models::post::{KindFilter, StreamSource};
 use crate::models::resource::stream::ResourceSorting;
 use crate::types::routes::HotTagsInputDTO;
+use crate::types::CacheTimeframe;
 use crate::types::DomainTrust;
 use crate::types::Pagination;
 use crate::types::StreamReach;
@@ -1329,8 +1330,8 @@ pub fn get_all_time_influencers(after_id: &str, limit: usize) -> Query {
 
 /// The top `limit` users after `skip` for a ranged timeframe, which only counts
 /// tags on posts. AllTime is ranked in full by [`get_all_time_influencers`].
-pub fn get_global_influencers(skip: usize, limit: usize, timeframe: &Timeframe) -> Query {
-    let (from, to) = timeframe.to_timestamp_range();
+pub fn get_global_influencers(skip: usize, limit: usize, timeframe: CacheTimeframe) -> Query {
+    let (from, to) = timeframe.timeframe().to_timestamp_range();
     Query::new(
         "get_global_influencers",
         "
