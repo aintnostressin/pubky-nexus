@@ -86,6 +86,7 @@ pub const NOTIFICATION_ROUTE: &str = concatcp!(USER_ROUTE, "/notifications");
 // -- BOOTSTRAP endpoints -
 pub const BOOTSTRAP_ROUTE: &str = "/bootstrap/{user_id}";
 pub const INGEST_USER_ROUTE: &str = "/ingest/{user_id}";
+pub const RECHECK_USER_ROUTE: &str = "/recheck/{user_id}";
 
 // -- RESOURCE endpoints --
 const RESOURCE_PREFIX: &str = "/resource";

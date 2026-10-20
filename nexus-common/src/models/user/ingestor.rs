@@ -1,12 +1,15 @@
+use std::future::Future;
 use std::sync::Arc;
 
 use pubky_social_specs::PubkyId;
 
-use super::{PkdnsHomeserverResolver, StoredRecord};
+use super::{PkdnsHomeserverResolver, PkdnsRecord, StoredRecord};
+use crate::db::PubkyClientResult;
 use crate::models::error::{ModelError, ModelResult};
 use crate::models::homeserver::HsBlacklist;
 use crate::models::user::{
-    set_user_homeserver_from_record, users_exist, UserDetails, UserHsCursor,
+    get_user_homeserver, set_user_homeserver_from_record, users_exist, HomeserverRecheck,
+    MappingUpdate, RecheckOutcome, StaleMapping, UserDetails, UserHsCursor,
 };
 use crate::StackConfig;
 
@@ -74,6 +77,26 @@ impl UserIngestor {
         &self,
         user_id: &PubkyId,
     ) -> ModelResult<Option<(String, StoredRecord)>> {
+        // A format-valid id need not be a curve point. That never changes, so it is not retryable.
+        let user_pk = user_id.to_public_key().map_err(|e| {
+            ModelError::InvalidInput(format!("{user_id} is not a valid public key: {e}"))
+        })?;
+        let record = self
+            .resolve_record_unless_blacklisted(user_id, self.resolver.resolve_own_record(&user_pk))
+            .await?;
+        let (Some(stored), Some(hs_pk)) = (record.stored(), record.homeserver()) else {
+            return Ok(None);
+        };
+        Ok(Some((hs_pk.to_string(), stored)))
+    }
+
+    /// `lookup`'s record for `user_id`, refused when the user's own key or the
+    /// homeserver the record names is blacklisted.
+    async fn resolve_record_unless_blacklisted(
+        &self,
+        user_id: &PubkyId,
+        lookup: impl Future<Output = PubkyClientResult<PkdnsRecord>>,
+    ) -> ModelResult<PkdnsRecord> {
         // `user_id` may itself be an HS PK (e.g. a file `src` of the form
         // `pubky://<hs_pk>/...` that addresses the HS directly). The resolver
         // returns no HS for an HS PK, so without this self-check a blacklisted HS
@@ -84,26 +107,17 @@ impl UserIngestor {
             });
         }
 
-        // A format-valid id need not be a curve point. That never changes, so it is not retryable.
-        let user_pk = user_id.to_public_key().map_err(|e| {
-            ModelError::InvalidInput(format!("{user_id} is not a valid public key: {e}"))
-        })?;
+        let record = lookup.await.map_err(ModelError::from_generic)?;
 
-        let record = self
-            .resolver
-            .resolve_own_record(&user_pk)
-            .await
-            .map_err(ModelError::from_generic)?;
-        let (Some(stored), Some(hs_pk)) = (record.stored(), record.homeserver()) else {
-            return Ok(None);
-        };
-
-        let hs_id = hs_pk.to_string();
-        if self.hs_blacklist.is_blacklisted(&hs_id) {
-            return Err(ModelError::HsBlacklisted { hs_id });
+        if let Some(hs_id) = record.homeserver() {
+            if self.hs_blacklist.is_blacklisted(hs_id.as_ref()) {
+                return Err(ModelError::HsBlacklisted {
+                    hs_id: hs_id.to_string(),
+                });
+            }
         }
 
-        Ok(Some((hs_id, stored)))
+        Ok(record)
     }
 
     /// Resolves and persists a previously-unknown user.
@@ -143,9 +157,53 @@ impl UserIngestor {
         set_user_homeserver_from_record(&user_id_str, &hs_id, &record).await?;
 
         // Seed the user's HS cursor floor (no-op if we're already tracking them).
-        UserHsCursor::init(user_id, &hs_id).await?;
+        UserHsCursor::init(user_id, hs_id.as_ref()).await?;
 
         Ok(())
+    }
+
+    /// Re-checks a known user's homeserver against the network now and follows
+    /// the record: a record naming another homeserver moves the mapping there,
+    /// a record naming none keeps it. The lookup is the resolver's fresh one
+    /// ([`PkdnsHomeserverResolver::resolve_own_record_fresh`]): the network's
+    /// newest packet, not a cache. This is the programmatic way to switch a
+    /// user's homeserver; the periodic resolver only follows records when its
+    /// stale mapping is disabled.
+    ///
+    /// Returns `None` for a user nexus does not know; ingest them instead.
+    ///
+    /// Returns [`ModelError::HsBlacklisted`] if the published HS is blacklisted.
+    #[tracing::instrument(name = "user.recheck", skip_all)]
+    pub async fn recheck_user(&self, user_id: &PubkyId) -> ModelResult<Option<HomeserverRecheck>> {
+        let user_id_str = user_id.to_string();
+        if UserDetails::get_by_id(&user_id_str).await?.is_none() {
+            tracing::debug!("Skipping recheck: {user_id_str} unknown");
+            return Ok(None);
+        }
+
+        // A format-valid id need not be a curve point. That never changes, so it is not retryable.
+        let user_pk = user_id.to_public_key().map_err(|e| {
+            ModelError::InvalidInput(format!("{user_id} is not a valid public key: {e}"))
+        })?;
+        let record = self
+            .resolve_record_unless_blacklisted(
+                user_id,
+                self.resolver.resolve_own_record_fresh(&user_pk),
+            )
+            .await
+            .inspect_err(|e| tracing::warn!("Aborting recheck of {user_id}: {e}"))?;
+
+        let stored = get_user_homeserver(&user_id_str).await?;
+        let update = MappingUpdate::decide(stored.as_ref(), &record, StaleMapping::Disabled);
+        update.apply(&user_id_str, &record).await?;
+        if let Some(hs_id) = update.bound_to() {
+            UserHsCursor::init(user_id, hs_id).await?;
+        }
+
+        Ok(Some(HomeserverRecheck {
+            homeserver: update.homeserver_after(stored.as_ref()),
+            outcome: RecheckOutcome::from(&update),
+        }))
     }
 }
 

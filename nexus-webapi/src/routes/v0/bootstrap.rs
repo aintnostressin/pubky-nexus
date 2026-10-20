@@ -1,16 +1,18 @@
 use crate::models::PubkyId;
 use crate::routes::v0::endpoints::BOOTSTRAP_ROUTE;
 use crate::routes::v0::endpoints::INGEST_USER_ROUTE;
+use crate::routes::v0::endpoints::RECHECK_USER_ROUTE;
 use crate::routes::v0::version::{versioned_handlers, ApiVersion};
 use crate::routes::AppState;
 use crate::routes::Path;
-use crate::Result;
+use crate::{Error, Result};
 
 use axum::extract::State;
 use axum::routing::put;
 use axum::Json;
 use axum::Router;
 use nexus_common::models::bootstrap::{Bootstrap, ViewType};
+use nexus_common::models::user::{HomeserverRecheck, RecheckOutcome};
 use tracing::debug;
 use utoipa::OpenApi;
 
@@ -68,9 +70,41 @@ pub async fn ingest_user_handler(
     Ok(())
 }
 
-/// The shared bootstrap route and schema; the payload route comes with the version's document.
+#[utoipa::path(
+    put,
+    path = RECHECK_USER_ROUTE,
+    description = "Re-check a known user's homeserver against the network now and follow the record: a record naming another homeserver moves the user there, so a user who migrated is indexed from the new homeserver without waiting for the periodic resolver. The client app should call it after a sign-in.",
+    tag = "Bootstrap",
+    params(
+        ("user_id" = PubkyId, Path, description = "User Pubky ID")
+    ),
+    responses(
+        (status = 200, description = "The user's homeserver after the check and what the check did", body = HomeserverRecheck),
+        (status = 400, description = "Invalid parameters"),
+        (status = 403, description = "User is hosted on a blacklisted HS"),
+        (status = 404, description = "User not known to Nexus; ingest first"),
+        (status = 429, description = "Rate limit exceeded", headers(("Retry-After" = u64, description = "Seconds until retry"))),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn recheck_user_handler(
+    State(app_state): State<AppState>,
+    Path(user_id): Path<PubkyId>,
+) -> Result<Json<HomeserverRecheck>> {
+    debug!("PUT {RECHECK_USER_ROUTE}, user_id:{user_id}");
+
+    match app_state.ingestor.recheck_user(&user_id).await? {
+        Some(recheck) => Ok(Json(recheck)),
+        None => Err(Error::user_not_found(user_id)),
+    }
+}
+
+/// The shared bootstrap routes and schemas; the payload route comes with the version's document.
 #[derive(OpenApi)]
-#[openapi(paths(ingest_user_handler), components(schemas(PubkyId)))]
+#[openapi(
+    paths(ingest_user_handler, recheck_user_handler),
+    components(schemas(PubkyId, HomeserverRecheck, RecheckOutcome))
+)]
 pub struct BootstrapApiDoc;
 
 /// The payload route for one version, in the version's shape.
@@ -79,5 +113,7 @@ pub fn expensive_routes<V: ApiVersion>() -> Router<AppState> {
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route(INGEST_USER_ROUTE, put(ingest_user_handler))
+    Router::new()
+        .route(INGEST_USER_ROUTE, put(ingest_user_handler))
+        .route(RECHECK_USER_ROUTE, put(recheck_user_handler))
 }
