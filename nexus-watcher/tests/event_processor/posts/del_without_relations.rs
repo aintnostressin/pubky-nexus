@@ -16,7 +16,7 @@ use pubky_app_specs::{
 
 use super::utils::{
     check_member_global_timeline_user_post, check_member_total_engagement_user_posts,
-    check_member_user_post_timeline,
+    check_member_user_post_timeline, find_post_counts,
 };
 
 #[tokio_shared_rt::test(shared)]
@@ -57,7 +57,9 @@ async fn test_delete_post_without_relationships() -> Result<()> {
     );
 
     // Attempt to find post counts; should not exist in INDEX + GRAPH
-    let post_counts_result = PostCounts::get_by_id(&user_id, &post_id).await.unwrap();
+    let post_counts_result = PostCounts::get_from_graph(&user_id, &post_id)
+        .await
+        .unwrap();
     assert!(
         post_counts_result.is_none(),
         "Post counts should not be found after deletion"
@@ -171,10 +173,7 @@ async fn test_delete_post_that_reposted() -> Result<()> {
     // GRAPH_OP + CACHE_OP: Assert relationship does not exist in the data layer
 
     // PARENT post counts should have reposts counts 0 once again
-    let post_counts_result = PostCounts::get_by_id(&user_id, &post_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let post_counts_result = find_post_counts(&user_id, &post_id).await;
     assert_eq!(
         post_counts_result.reposts, 0,
         "Original post reposts counts should be 0 after deletion of the repost"
@@ -188,7 +187,9 @@ async fn test_delete_post_that_reposted() -> Result<()> {
     );
 
     // Attempt to find REPOST counts; should not exist
-    let post_counts_result = PostCounts::get_by_id(&user_id, &repost_id).await.unwrap();
+    let post_counts_result = PostCounts::get_from_graph(&user_id, &repost_id)
+        .await
+        .unwrap();
     assert!(
         post_counts_result.is_none(),
         "Repost counts should not be found after deletion"
@@ -300,10 +301,7 @@ async fn test_delete_post_that_replied() -> Result<()> {
 
     // GRAPH_OP + CACHE_OP: Assert relationship does not exist in the data layer
     // PARENT post counts should have reposts counts 0 once again
-    let post_counts_result = PostCounts::get_by_id(&user_id, &post_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let post_counts_result = find_post_counts(&user_id, &post_id).await;
     assert_eq!(
         post_counts_result.replies, 0,
         "Original post reposts counts should be 0 after deletion of the repost"
@@ -317,7 +315,9 @@ async fn test_delete_post_that_replied() -> Result<()> {
     );
 
     // Attempt to find post REPLY counts; should not exist
-    let post_counts_result = PostCounts::get_by_id(&user_id, &reply_id).await.unwrap();
+    let post_counts_result = PostCounts::get_from_graph(&user_id, &reply_id)
+        .await
+        .unwrap();
     assert!(
         post_counts_result.is_none(),
         "Repost counts should not be found after deletion"

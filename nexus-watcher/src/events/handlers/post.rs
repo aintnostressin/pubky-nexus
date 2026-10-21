@@ -168,15 +168,11 @@ async fn sync_put_details(
     // SAVE TO INDEX - PHASE 1, update post counts
     let indexing_results = nexus_common::traced_join!(
         tracing::info_span!("index.write", phase = "post_counts");
-        // TODO: Use SCARD on a set for unique tag count to avoid race conditions in parallel processing
         async {
-            if PostCounts::get_from_index(&author_id, &post_id)
-                .await?
-                .is_none()
-            {
-                PostCounts::default()
-                    .put_to_index(&author_id, &post_id, is_reply)
-                    .await?
+            // Replies are tracked via POST_REPLIES sets, not global engagement.
+            if !is_reply {
+                PostStream::add_to_engagement_sorted_set(&PostCounts::default(), &author_id, &post_id)
+                    .await?;
             }
             Ok::<(), EventProcessorError>(())
         },
@@ -224,7 +220,6 @@ async fn sync_put_details(
 
         let indexing_results = nexus_common::traced_join!(
             tracing::info_span!("index.write", phase = "reply_parent");
-            PostCounts::invalidate(parent_post_key_parts),
             async {
                 // Replies must not enter POST_TOTAL_ENGAGEMENT — ZINCRBY
                 // would create the member if absent.
@@ -261,7 +256,6 @@ async fn sync_put_details(
         indexing_results.0?;
         indexing_results.1?;
         indexing_results.2?;
-        indexing_results.3?;
     }
 
     // PHASE 3: Process POST REPOSTS indexes
@@ -279,11 +273,8 @@ async fn sync_put_details(
             .try_to_uri_str()
             .map_err(EventProcessorError::generic)?;
 
-        let parent_post_key_parts: &[&str; 2] = &[&parent_author_id, &parent_post_id];
-
         let indexing_results = nexus_common::traced_join!(
             tracing::info_span!("index.write", phase = "repost_parent");
-            PostCounts::invalidate(parent_post_key_parts),
             async {
                 // Replies must not enter POST_TOTAL_ENGAGEMENT — ZINCRBY
                 // would create the member if absent.
@@ -313,7 +304,6 @@ async fn sync_put_details(
 
         indexing_results.0?;
         indexing_results.1?;
-        indexing_results.2?;
     }
 
     // PHASE 4: Add post related content
@@ -357,21 +347,6 @@ async fn recover_post_index_state(
                 "Post recovery: graph reported existing post but get_from_graph returned None",
             )
         })?;
-
-    // Invalidate the replies/reposts cache of any parent this post points at, so
-    // the next read recomputes those counts from the now-durable graph edges.
-    // Invalidate-only is sufficient and safe on missing keys. Run before the child
-    // reindex below so a failure there still leaves the parent caches refreshed.
-    if let Some(relationships) = PostRelationships::get_from_graph(author_id, post_id).await? {
-        for parent in [relationships.replied, relationships.reposted]
-            .into_iter()
-            .flatten()
-        {
-            if let Resource::Post(parent_post_id) = &parent.resource {
-                PostCounts::invalidate(&[&parent.user_id, parent_post_id]).await?;
-            }
-        }
-    }
 
     // Re-merge any MENTIONED graph edges that the original mention loop
     // didn't finish. Skips notifications (0 > N on retry).
@@ -696,8 +671,13 @@ pub async fn sync_del(
     // DELETE TO INDEX - PHASE 1, decrease post counts
     let indexing_results = nexus_common::traced_join!(
         tracing::info_span!("index.delete", phase = "post_counts");
-        // Idempotent: JSON DEL + ZREM from engagement sorted set.
-        PostCounts::delete(&author_id, &post_id, !is_reply),
+        // Idempotent ZREM; only root posts are in the engagement sorted set.
+        async {
+            if !is_reply {
+                PostStream::delete_from_engagement_sorted_set(&author_id, &post_id).await?;
+            }
+            Ok::<(), EventProcessorError>(())
+        },
         // Guarded: skip on retry to avoid double-decrement.
         async {
             if post_in_index {
@@ -722,9 +702,6 @@ pub async fn sync_del(
 
     // Use that index wrapper to delete a post reply
     let mut reply_parent_post_key_wrapper: Option<(String, String)> = None;
-    // Parent post-count caches to invalidate AFTER the graph delete. Invalidating
-    // before the node is gone lets a concurrent read recache the pre-delete count.
-    let mut parents_to_invalidate: Vec<[String; 2]> = Vec::new();
 
     if let Some(relationships) = post_relationships_opt {
         // PHASE 2: Process POST REPLIES indexes
@@ -745,8 +722,6 @@ pub async fn sync_del(
 
             reply_parent_post_key_wrapper =
                 Some((parent_user_id.to_string(), parent_post_id.clone()));
-            // Parent reply count changes; invalidated after the graph delete below.
-            parents_to_invalidate.push([parent_user_id.to_string(), parent_post_id.clone()]);
 
             let indexing_results = nexus_common::traced_join!(
                 tracing::info_span!("index.delete", phase = "reply_parent");
@@ -800,9 +775,6 @@ pub async fn sync_del(
                 .try_to_uri_str()
                 .map_err(EventProcessorError::generic)?;
 
-            // Parent repost count changes; invalidated after the graph delete below.
-            parents_to_invalidate.push([reposted_uri.user_id.to_string(), parent_post_id.clone()]);
-
             let indexing_results = nexus_common::traced_join!(
                 tracing::info_span!("index.delete", phase = "repost_parent");
                 async {
@@ -849,19 +821,9 @@ pub async fn sync_del(
     // PHASE 5: Graph deletion LAST — survives until all Redis cleanup completes,
     // so a partial failure leaves the graph node available for retry to re-enter
     // `post::del` -> `CreatedOrDeleted` -> `sync_del`.
-    // The COLLECTED edges go first, unconditionally: DETACH DELETE would drop
-    // them silently and the items' cached counts would keep this post, and on a
-    // retry the kind is no longer recoverable from the index.
-    sync_collected_edges(&author_id, &post_id, &[], None).await?;
     exec_single_row(queries::del::delete_post(&author_id, &post_id))
         .instrument(tracing::info_span!("graph.delete", phase = "post_graph"))
         .await?;
-
-    // Now that the graph reflects the deletion, invalidate the parent post-count
-    // caches so the next read recomputes the new count instead of the old one.
-    for parent in &parents_to_invalidate {
-        PostCounts::invalidate(&[&parent[0], &parent[1]]).await?;
-    }
 
     Ok(())
 }
