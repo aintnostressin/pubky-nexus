@@ -41,7 +41,7 @@ async fn test_post_del_recovers_after_partial_redis_cleanup() -> Result<()> {
 
     // Simulate the partial-failure state of the new graph-last sync_del:
     //   - Gate (PostRelationships) atomically removed
-    //   - PostCounts + PostDetails Redis entries removed
+    //   - PostDetails and the engagement entry removed
     //   - Graph node still present (graph delete is the LAST step)
     simulate_partial_del_cleanup_root(&user_id, &post_id).await?;
 
