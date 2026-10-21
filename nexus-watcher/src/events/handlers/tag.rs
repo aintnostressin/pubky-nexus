@@ -4,7 +4,7 @@ use nexus_common::db::kv::ScoreAction;
 use nexus_common::db::{fetch_row_from_graph, queries, OperationOutcome, RedisOps};
 use nexus_common::models::notification::Notification;
 use nexus_common::models::post::search::PostsByTagSearch;
-use nexus_common::models::post::{PostCounts, PostStream};
+use nexus_common::models::post::PostStream;
 use nexus_common::models::resource::tag::TagResource;
 use nexus_common::models::tag::post::TagPost;
 use nexus_common::models::tag::search::TagSearch;
@@ -174,20 +174,15 @@ async fn put_sync_post(
         OperationOutcome::Updated => {
             // Re-run idempotent ops to recover from partial failure (graph wrote, Redis didn't)
             let tag_label_slice = &[tag_label.to_string()];
-            let post_key_slice: &[&str] = &[&author_id, post_id];
             let idempotent_results = nexus_common::traced_join!(
                 tracing::info_span!("index.write", phase = "tag_post_retry");
                 TagPost::add_tagger_to_index(&author_id, Some(post_id), &tagger_user_id, tag_label),
                 PostsByTagSearch::put_to_index(&author_id, post_id, tag_label),
-                TagSearch::put_to_index(tag_label_slice),
-                // TAGGED edge already durable; invalidate-only so the next read
-                // recomputes tags/unique_tags from graph. Safe on missing key.
-                PostCounts::invalidate(post_key_slice)
+                TagSearch::put_to_index(tag_label_slice)
             );
             idempotent_results.0?;
             idempotent_results.1?;
             idempotent_results.2?;
-            idempotent_results.3?;
             Ok(())
         }
         OperationOutcome::MissingDependency => {
@@ -201,13 +196,10 @@ async fn put_sync_post(
         }
         OperationOutcome::CreatedOrDeleted => {
             // SAVE TO INDEXES
-            let post_key_slice: &[&str] = &[&author_id, post_id];
             let tag_label_slice = &[tag_label.to_string()];
 
             let indexing_results = nexus_common::traced_join!(
                 tracing::info_span!("index.write", phase = "tag_post");
-                // Invalidate the cached post counts.
-                PostCounts::invalidate(post_key_slice),
                 // Increment the label count to post
                 TagPost::update_index_score(
                     &author_id,
@@ -258,7 +250,6 @@ async fn put_sync_post(
             indexing_results.4?;
             indexing_results.5?;
             indexing_results.6?;
-            indexing_results.7?;
 
             Ok(())
         }
@@ -406,9 +397,6 @@ pub async fn del(tag_uri: &str) -> Result<(), EventProcessorError> {
     let app: Option<String> = row.get("app").unwrap_or(None);
 
     // 2. Redis cleanup (guarded by tagger_in_index where non-idempotent)
-    // Post-count cache to invalidate AFTER the graph edge is deleted (invalidating
-    // before it is gone lets a concurrent read recache the pre-delete tag count).
-    let mut post_counts_to_invalidate: Option<[String; 2]> = None;
     match (tagged_user_id, post_id, author_id, resource_id) {
         (Some(tagged_id), None, None, None) => {
             let tagger_in_index =
@@ -436,7 +424,6 @@ pub async fn del(tag_uri: &str) -> Result<(), EventProcessorError> {
                 tagger_in_index,
             )
             .await?;
-            post_counts_to_invalidate = Some([author_id, post_id]);
         }
         // Resource tags keep no Redis index to clean up
         (None, None, None, Some(_)) => {}
@@ -452,12 +439,6 @@ pub async fn del(tag_uri: &str) -> Result<(), EventProcessorError> {
         app.as_deref(),
     ))
     .await?;
-
-    // Now that the TAGGED edge is gone, invalidate the cached post counts so the
-    // next read recomputes the lower count instead of recaching the pre-delete one.
-    if let Some([author_id, post_id]) = post_counts_to_invalidate {
-        PostCounts::invalidate(&[&author_id, &post_id]).await?;
-    }
 
     Ok(())
 }

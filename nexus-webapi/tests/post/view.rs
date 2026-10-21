@@ -7,11 +7,16 @@ use crate::{
     utils::{
         get_request, invalid_get_request,
         recommended::{DELETED, TOMBSTONE_POST},
+        server::TestServiceServer,
     },
 };
 use anyhow::Result;
 use axum::http::StatusCode;
+use deadpool_redis::redis::AsyncCommands;
+use nexus_common::db::get_redis_conn;
+use nexus_common::models::post::{PostCounts, POST_COUNTS_TTL_SECS};
 use nexus_common::models::tag::TagDetails;
+use std::time::Duration;
 
 #[tokio_shared_rt::test(shared)]
 async fn test_get_post_view() -> Result<()> {
@@ -112,6 +117,50 @@ async fn test_get_post_counts() -> Result<()> {
     assert_eq!(body["replies"], 0);
     assert_eq!(body["reposts"], 0);
     assert_eq!(body["collections"], 0);
+
+    Ok(())
+}
+
+/// The watcher never refreshes cached counts, so a read trails a graph change
+/// until the entry cached by an earlier miss expires, at most
+/// `POST_COUNTS_TTL_SECS` later. The planted entry stands in for counts cached
+/// before such a change.
+#[tokio_shared_rt::test(shared)]
+async fn test_post_counts_cache_trails_graph_until_ttl() -> Result<()> {
+    TestServiceServer::get_test_server().await;
+    let path = format!("{ROOT_PATH}/{CAIRO_USER}/{POST_H}/counts");
+    let key = format!("Post:Counts:{CAIRO_USER}:{POST_H}");
+    let mut redis_conn = get_redis_conn().await?;
+
+    let _: () = redis_conn.del(&key).await?;
+    let fresh = get_request(&path).await?;
+    assert_eq!(fresh["tags"], 6, "a miss reads the graph");
+    let ttl: i64 = redis_conn.ttl(&key).await?;
+    assert!(
+        (1..=POST_COUNTS_TTL_SECS).contains(&ttl),
+        "a miss caches the counts for at most {POST_COUNTS_TTL_SECS}s, got {ttl}"
+    );
+
+    let stale = PostCounts {
+        tags: 99,
+        ..Default::default()
+    };
+    stale.cache_json(CAIRO_USER, POST_H).await?;
+    assert_eq!(
+        get_request(&path).await?["tags"],
+        99,
+        "a cached entry is served while it lives"
+    );
+    let view = get_request(&format!("{ROOT_PATH}/{CAIRO_USER}/{POST_H}")).await?;
+    assert_eq!(view["counts"]["tags"], 99, "the post view serves it too");
+
+    let _: bool = redis_conn.pexpire(&key, 1).await?;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(
+        get_request(&path).await?,
+        fresh,
+        "once the entry expires the next read recomputes from the graph"
+    );
 
     Ok(())
 }

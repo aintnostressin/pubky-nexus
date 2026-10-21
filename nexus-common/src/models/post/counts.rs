@@ -6,8 +6,8 @@ use utoipa::ToSchema;
 
 use super::PostStream;
 
-/// Backstop TTL for the read-through cache, in case an invalidation is ever missed.
-const POST_COUNTS_TTL_SECS: i64 = 600;
+/// Lifetime of the read-through cache: the most a read can trail the graph.
+pub const POST_COUNTS_TTL_SECS: i64 = 600;
 
 /// Represents total counts of relationships of a user.
 #[derive(Serialize, Deserialize, ToSchema, Default, Debug)]
@@ -66,66 +66,26 @@ impl PostCounts {
         Ok(None)
     }
 
-    pub async fn put_to_index(
-        &self,
-        author_id: &str,
-        post_id: &str,
-        is_reply: bool,
-    ) -> RedisResult<()> {
-        self.cache_json(author_id, post_id).await?;
-
-        // Skip the global engagement sorted set for replies. They're tracked
-        // via POST_REPLIES sets instead.
-        if !is_reply {
-            PostStream::add_to_engagement_sorted_set(self, author_id, post_id).await?;
-        }
-        Ok(())
-    }
-
-    /// JSON-only cache write (with TTL). Unlike `put_to_index` it never seeds the
-    /// engagement sorted set, so it is safe to call on every cache-miss read.
+    /// Read-through cache write. Nothing invalidates it, so a cached entry may
+    /// trail the graph by up to [`POST_COUNTS_TTL_SECS`].
     pub async fn cache_json(&self, author_id: &str, post_id: &str) -> RedisResult<()> {
         self.put_index_json(&[author_id, post_id], None, Some(POST_COUNTS_TTL_SECS))
             .await
     }
 
-    /// Invalidates the cached counts JSON so the next read recomputes from the
-    /// graph (read-your-writes). Does NOT touch the engagement sorted set.
-    pub async fn invalidate(index_key: &[&str]) -> RedisResult<()> {
-        Self::remove_from_index_multiple_json(&[index_key]).await
-    }
-
-    /// Same as [`Self::invalidate`] for many posts in one round trip.
-    pub async fn invalidate_many(index_keys: &[&[&str]]) -> RedisResult<()> {
-        // Redis rejects DEL with no keys.
-        if index_keys.is_empty() {
-            return Ok(());
-        }
-        Self::remove_from_index_multiple_json(index_keys).await
-    }
-
+    /// Re-seeds a root post's global engagement score from the graph. Replies
+    /// are tracked via POST_REPLIES sets instead.
     pub async fn reindex(author_id: &str, post_id: &str) -> ModelResult<()> {
         match Self::get_from_graph(author_id, post_id).await? {
-            Some((counts, is_reply)) => counts.put_to_index(author_id, post_id, is_reply).await?,
+            Some((counts, false)) => {
+                PostStream::add_to_engagement_sorted_set(&counts, author_id, post_id).await?
+            }
+            Some((_, true)) => {}
             None => tracing::error!(
                 "{}:{} Could not found post counts in the graph",
                 author_id,
                 post_id
             ),
-        }
-        Ok(())
-    }
-
-    pub async fn delete(
-        author_id: &str,
-        post_id: &str,
-        remove_from_feeds: bool,
-    ) -> RedisResult<()> {
-        // Delete user_details on Redis
-        Self::remove_from_index_multiple_json(&[&[author_id, post_id]]).await?;
-        // Delete the posts that does not have any relationship as might be replies and reposts. Just root posts
-        if remove_from_feeds {
-            PostStream::delete_from_engagement_sorted_set(author_id, post_id).await?;
         }
         Ok(())
     }

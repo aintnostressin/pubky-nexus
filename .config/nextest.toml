@@ -35,6 +35,12 @@ test-group = 'most-followed-sorted-set'
 filter = 'test(=user::views::test_social_graph_status) | test(/^models::post::trust_filter::tests::live::/)'
 threads-required = 'num-test-threads'
 
+# This test plants stale Post:Counts JSON for a mock post whose counts other API
+# tests assert, so it runs alone.
+[[profile.default.overrides]]
+filter = 'test(=post::view::test_post_counts_cache_trails_graph_until_ttl)'
+threads-required = 'num-test-threads'
+
 # The first test seeds a stale copy of the shared Sorted:Users:MostFollowed ranking
 # and rebuilds it, so no reader of that set may run while it does. The second reads
 # the ranking from the graph twice and compares the reads, so no test may write
