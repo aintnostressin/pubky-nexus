@@ -215,10 +215,13 @@ async fn handle_put_json<T: Serialize + Send + Sync>(
     let mut redis_conn = get_redis_conn().await?;
 
     let json_path = path.unwrap_or("$");
-    let _: () = redis_conn.json_set(key, json_path, value).await?;
+    // One MULTI/EXEC, so a dropped future never leaves the key without its TTL.
+    let mut pipe = redis::pipe();
+    pipe.atomic().json_set(key, json_path, value)?.ignore();
     if let Some(exp) = expiration {
-        let _: () = redis_conn.expire(key, exp).await?;
+        pipe.expire(key, exp).ignore();
     }
+    let _: () = pipe.query_async(&mut redis_conn).await?;
     Ok(())
 }
 
