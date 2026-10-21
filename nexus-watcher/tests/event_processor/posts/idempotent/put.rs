@@ -317,7 +317,7 @@ async fn test_post_put_recovers_reply_preserves_parent_sorted_sets() -> Result<(
     assert!(PostRelationships::get_from_index(&bob_id, &reply_id)
         .await?
         .is_some());
-    // Recovery reindexes counts without adding the reply to the engagement feed.
+    // Recovery re-seeds engagement for root posts only, so the reply stays out.
     assert!(
         check_member_total_engagement_user_posts(&[&bob_id, &reply_id])
             .await?
@@ -432,7 +432,7 @@ async fn test_post_put_recovers_repost_preserves_parent_state() -> Result<()> {
     // Retry: graph reports Updated, handler enters recovery path. Recovery
     // rebuilds PostDetails/PostRelationships from graph truth —
     // PostRelationships::reindex must read the REPOSTED edge back into the
-    // `reposted` field, and PostCounts::reindex must put the repost back in
+    // `reposted` field, and PostCounts::reindex_engagement must put the repost back in
     // the engagement sorted set (is_reply = false from graph).
     handlers::post::sync_put(
         repost.clone(),

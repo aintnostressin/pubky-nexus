@@ -75,7 +75,7 @@ impl PostCounts {
 
     /// Re-seeds a root post's global engagement score from the graph. Replies
     /// are tracked via POST_REPLIES sets instead.
-    pub async fn reindex(author_id: &str, post_id: &str) -> ModelResult<()> {
+    pub async fn reindex_engagement(author_id: &str, post_id: &str) -> ModelResult<()> {
         match Self::get_from_graph(author_id, post_id).await? {
             Some((counts, false)) => {
                 PostStream::add_to_engagement_sorted_set(&counts, author_id, post_id).await?
