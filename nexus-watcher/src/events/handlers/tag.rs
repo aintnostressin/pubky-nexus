@@ -593,8 +593,7 @@ async fn del_sync_post(
 
     // Tag-search cleanup runs AFTER the join so the SREM above and the concurrent
     // label-set ZINCRs have settled; otherwise `get_by_label` can see a phantom
-    // member and skip the TagSearch removal (flaky under load). The post-count
-    // cache is invalidated by the caller after the graph edge is deleted.
+    // member and skip the TagSearch removal (flaky under load).
     PostsByTagSearch::del_from_index(author_id, post_id, tag_label).await?;
     let posts_by_tag =
         PostsByTagSearch::get_by_label(tag_label, None, Pagination::default()).await?;
