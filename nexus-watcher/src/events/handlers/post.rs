@@ -327,16 +327,16 @@ async fn recover_post_index_state(
     sync_collected_edges(author_id, post_id, &items, Some(&post_details)).await?;
 
     // Reindex all Redis state from graph truth.
-    let (details_result, relationships_result, counts_result) = nexus_common::traced_join!(
+    let (details_result, relationships_result, engagement_result) = nexus_common::traced_join!(
         tracing::info_span!("index.write", phase = "post_recovery");
         post_details.put_to_index(author_id, reply, false),
         PostRelationships::reindex(author_id, post_id),
-        PostCounts::reindex(author_id, post_id)
+        PostCounts::reindex_engagement(author_id, post_id)
     );
 
     details_result?;
     relationships_result?;
-    counts_result?;
+    engagement_result?;
     Ok(())
 }
 
