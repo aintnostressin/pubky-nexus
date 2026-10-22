@@ -76,7 +76,7 @@ pub async fn reindex_user(user_id: &str) -> Result<(), DynError> {
 pub async fn reindex_post(author_id: &str, post_id: &str) -> Result<(), DynError> {
     tokio::try_join!(
         PostDetails::reindex(author_id, post_id),
-        PostCounts::reindex(author_id, post_id),
+        PostCounts::reindex_engagement(author_id, post_id),
         PostRelationships::reindex(author_id, post_id),
         TagPost::reindex(author_id, Some(post_id))
     )?;

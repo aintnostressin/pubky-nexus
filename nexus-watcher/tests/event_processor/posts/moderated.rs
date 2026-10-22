@@ -8,7 +8,6 @@ use crate::event_processor::{
 use anyhow::Result;
 use chrono::Utc;
 use nexus_common::models::notification::Notification;
-use nexus_common::models::post::PostCounts;
 use nexus_common::models::takedown::record_takedown;
 use nexus_common::types::Pagination;
 use nexus_common::utils::test_utils::default_ingestor_tests;
@@ -202,15 +201,6 @@ async fn test_moderated_bare_post_is_hard_deleted() -> Result<()> {
     assert!(
         find_post_details(&author_id, &post_id).await.is_err(),
         "bare moderated post should be fully deleted from the graph"
-    );
-
-    // The cached counts are gone as well
-    let post_counts = PostCounts::get_from_index(&author_id, &post_id)
-        .await
-        .unwrap();
-    assert!(
-        post_counts.is_none(),
-        "bare moderated post counts should be deleted from the index"
     );
 
     Ok(())

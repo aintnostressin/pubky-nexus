@@ -7,7 +7,7 @@ use crate::event_processor::users::utils::find_user_counts;
 use crate::event_processor::utils::watcher::WatcherTest;
 use anyhow::Result;
 use nexus_common::db::RedisOps;
-use nexus_common::models::post::{PostCounts, PostDetails, PostRelationships};
+use nexus_common::models::post::{PostDetails, PostRelationships};
 use nexus_common::utils::test_utils::default_ingestor_tests;
 use nexus_watcher::events::handlers;
 use pubky::Keypair;
@@ -44,7 +44,7 @@ async fn test_post_put_recovers_after_partial_redis_write() -> Result<()> {
     assert_eq!(find_user_counts(&user_id).await.posts, 1);
 
     // Simulate the partial-failure window: graph still has the post but Redis
-    // is missing PostDetails / PostRelationships / PostCounts AND all sorted-set
+    // is missing PostDetails / PostRelationships AND all sorted-set
     // memberships. UserCounts has already been incremented by the prior
     // (failed) attempt.
     simulate_partial_put_failure_root(&user_id, &post_id).await?;
@@ -60,7 +60,7 @@ async fn test_post_put_recovers_after_partial_redis_write() -> Result<()> {
     )
     .await?;
 
-    // PostDetails / PostRelationships / PostCounts and the three root-post
+    // PostDetails / PostRelationships and the three root-post
     // sorted-set memberships must all be back.
     assert_root_post_fully_indexed(&user_id, &post_id).await?;
 
@@ -102,9 +102,8 @@ async fn test_post_put_replay_after_full_success_is_noop() -> Result<()> {
     let details_before = PostDetails::get_from_index(&user_id, &post_id)
         .await?
         .expect("details after first put");
-    let counts_before = PostCounts::get_from_index(&user_id, &post_id)
-        .await?
-        .expect("counts after first put");
+    let post_key: &[&str] = &[&user_id, &post_id];
+    let engagement_before = check_member_total_engagement_user_posts(post_key).await?;
     assert_eq!(find_user_counts(&user_id).await.posts, 1);
 
     // Replay sync_put with identical content. Handler must hit the
@@ -136,13 +135,11 @@ async fn test_post_put_replay_after_full_success_is_noop() -> Result<()> {
         "indexed_at must not drift on replay"
     );
 
-    // PostCounts must be unchanged.
-    let counts_after = PostCounts::get_from_index(&user_id, &post_id)
-        .await?
-        .expect("counts after replay");
-    assert_eq!(counts_before.replies, counts_after.replies);
-    assert_eq!(counts_before.reposts, counts_after.reposts);
-    assert_eq!(counts_before.tags, counts_after.tags);
+    // The engagement score must be unchanged.
+    assert_eq!(
+        engagement_before,
+        check_member_total_engagement_user_posts(post_key).await?
+    );
 
     test.cleanup_user(&user_kp).await?;
     Ok(())
@@ -320,9 +317,12 @@ async fn test_post_put_recovers_reply_preserves_parent_sorted_sets() -> Result<(
     assert!(PostRelationships::get_from_index(&bob_id, &reply_id)
         .await?
         .is_some());
-    assert!(PostCounts::get_from_index(&bob_id, &reply_id)
-        .await?
-        .is_some());
+    // Recovery re-seeds engagement for root posts only, so the reply stays out.
+    assert!(
+        check_member_total_engagement_user_posts(&[&bob_id, &reply_id])
+            .await?
+            .is_none()
+    );
 
     // Parent's post-reply sorted set must contain Bob's reply again.
     assert!(
@@ -423,16 +423,16 @@ async fn test_post_put_recovers_repost_preserves_parent_state() -> Result<()> {
 
     // Simulate a partial-failure window on the repost's sync_put: wipe
     // everything the reposter's side wrote (PostDetails, PostRelationships,
-    // PostCounts, and the three root-post sorted-set memberships). Leave
+    // and the three root-post sorted-set memberships). Leave
     // Alice's parent state and Bob's UserCounts alone — the failed attempt
     // is assumed to have already incremented UserCounts.posts and updated
     // Alice's parent.
     simulate_partial_put_failure_root(&bob_id, &repost_id).await?;
 
     // Retry: graph reports Updated, handler enters recovery path. Recovery
-    // rebuilds PostDetails/PostRelationships/PostCounts from graph truth —
+    // rebuilds PostDetails/PostRelationships from graph truth —
     // PostRelationships::reindex must read the REPOSTED edge back into the
-    // `reposted` field, and PostCounts::reindex must put the repost back in
+    // `reposted` field, and PostCounts::reindex_engagement must put the repost back in
     // the engagement sorted set (is_reply = false from graph).
     handlers::post::sync_put(
         repost.clone(),

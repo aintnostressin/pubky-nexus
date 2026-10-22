@@ -1,7 +1,5 @@
 //! COLLECTED edges: a Collection's items are materialized as graph edges on
-//! every put, edit and delete, and each touched item's `collections` count is
-//! invalidated so the read-through recomputes it. Counts are read before each
-//! mutation so the cache is warm and a missed invalidation would show.
+//! every put, edit and delete, and each item's graph `collections` count follows.
 
 use super::utils::{
     collection_post_with_items, find_collections_of, find_post_counts, short_post, test_user,

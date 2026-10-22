@@ -33,8 +33,7 @@ impl Migration for CollectedEdgesBackfill1789344000 {
         // watcher wrote them. Only the keys are snapshotted; each envelope is
         // read from the graph right before its reconcile, and the reconcile is
         // a no-op if the content moved on, so a concurrent edit is never
-        // overwritten. Each sync also invalidates the items' cached counts and
-        // is idempotent, so a failed run is simply re-run.
+        // overwritten. Each sync is idempotent, so a failed run is simply re-run.
         let rows = fetch_all_rows_from_graph(queries::get::get_collection_posts()).await?;
 
         let started = Instant::now();
