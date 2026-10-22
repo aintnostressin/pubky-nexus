@@ -1,10 +1,18 @@
 use std::collections::HashSet;
 
+use crate::stream::post::kind::{link::POST_L1, EIXAMPLE};
 use crate::utils::get_request;
 use anyhow::Result;
+use deadpool_redis::redis::AsyncCommands;
+use nexus_common::db::get_redis_conn;
 use nexus_common::models::bootstrap::{Bootstrap, BOOTSTRAP_HOT_TAGS_LIMIT};
 use nexus_common::models::notification::Notification;
 use nexus_common::models::notification::NotificationBody;
+use nexus_common::models::post::PostCounts;
+use std::time::Duration;
+
+/// From `docker/test-graph/mocks/posts.cypher`: the one reply to `POST_L1`.
+const POST_L1_REPLY: &str = "SIJW1TGL5BKG9";
 
 #[tokio_shared_rt::test(shared)]
 async fn test_bootstrap_user() -> Result<()> {
@@ -83,6 +91,38 @@ async fn test_bootstrap_user() -> Result<()> {
         has_follow_notification,
         "Expected a Follow notification from {follower_id}"
     );
+
+    Ok(())
+}
+
+/// Bootstrap fetches a post's replies only when its counts show some, so a
+/// cached `replies: 0` hides the first replies until the entry expires.
+#[tokio_shared_rt::test(shared)]
+async fn test_bootstrap_cached_zero_replies_hides_first_replies() -> Result<()> {
+    crate::utils::server::TestServiceServer::get_test_server().await;
+    let path = "/v0/bootstrap/zdbg13k5gh4tfz9qz11quohrxetgqxs7awandu8h57147xddcuhy";
+    let has_reply = |body: &serde_json::Value| -> bool {
+        body["posts"]
+            .as_array()
+            .expect("bootstrap posts is an array")
+            .iter()
+            .any(|post| post["details"]["id"] == POST_L1_REPLY)
+    };
+
+    PostCounts::default().cache_json(EIXAMPLE, POST_L1).await?;
+    let body = get_request(path).await?;
+    assert!(
+        !has_reply(&body),
+        "a cached replies: 0 keeps the post's reply out of bootstrap"
+    );
+
+    let mut redis_conn = get_redis_conn().await?;
+    let _: bool = redis_conn
+        .pexpire(format!("Post:Counts:{EIXAMPLE}:{POST_L1}"), 1)
+        .await?;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let body = get_request(path).await?;
+    assert!(has_reply(&body), "once the entry expires the reply is back");
 
     Ok(())
 }
