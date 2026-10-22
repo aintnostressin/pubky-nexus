@@ -492,6 +492,37 @@ mod tests {
         Ok(())
     }
 
+    /// A write with a TTL lands in one MULTI/EXEC, so dropping it midway never
+    /// leaves the key without its expiry.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_put_with_expiration_is_never_visible_without_ttl() -> Result<(), DynError> {
+        StackManager::setup(&StackConfig::default()).await?;
+
+        let key = "expiring";
+        let full_key = format!("{TEST_PREFIX}:{key}");
+        del_multiple(TEST_PREFIX, &[key]).await?;
+        let mut conn = get_redis_conn().await?;
+
+        let payload = TestPayload { value: 7 };
+        let mut write = Box::pin(put(TEST_PREFIX, key, &payload, None, Some(600)));
+        for _ in 0..1000 {
+            if conn.exists::<_, bool>(&full_key).await? {
+                break;
+            }
+            if futures::poll!(write.as_mut()).is_ready() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        drop(write);
+
+        let ttl: i64 = conn.ttl(&full_key).await?;
+        assert!(ttl > 0, "the key must appear with its TTL, got {ttl}");
+
+        del_multiple(TEST_PREFIX, &[key]).await?;
+        Ok(())
+    }
+
     #[tokio_shared_rt::test(shared)]
     async fn test_get_missing_key_returns_none() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await?;
