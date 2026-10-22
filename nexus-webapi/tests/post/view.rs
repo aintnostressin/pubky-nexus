@@ -123,8 +123,8 @@ async fn test_get_post_counts() -> Result<()> {
 
 /// The watcher never refreshes cached counts, so a read trails a graph change
 /// until the entry cached by an earlier miss expires, at most
-/// `POST_COUNTS_TTL_SECS` later. The planted entry stands in for counts cached
-/// before such a change.
+/// `POST_COUNTS_TTL_SECS` later. The planted entries stand in for counts cached
+/// before such a change; a cached `tags: 0` hides the post's tag list too.
 #[tokio_shared_rt::test(shared)]
 async fn test_post_counts_cache_trails_graph_until_ttl() -> Result<()> {
     TestServiceServer::get_test_server().await;
@@ -153,6 +153,14 @@ async fn test_post_counts_cache_trails_graph_until_ttl() -> Result<()> {
     );
     let view = get_request(&format!("{ROOT_PATH}/{CAIRO_USER}/{POST_H}")).await?;
     assert_eq!(view["counts"]["tags"], 99, "the post view serves it too");
+
+    PostCounts::default().cache_json(CAIRO_USER, POST_H).await?;
+    let view = get_request(&format!("{ROOT_PATH}/{CAIRO_USER}/{POST_H}")).await?;
+    assert_eq!(
+        view["tags"],
+        serde_json::json!([]),
+        "a cached tags: 0 hides the tags the post has"
+    );
 
     let _: bool = redis_conn.pexpire(&key, 1).await?;
     tokio::time::sleep(Duration::from_millis(10)).await;

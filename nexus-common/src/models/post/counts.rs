@@ -67,7 +67,9 @@ impl PostCounts {
     }
 
     /// Read-through cache write. Nothing invalidates it, so a cached entry may
-    /// trail the graph by up to [`POST_COUNTS_TTL_SECS`].
+    /// trail the graph by up to [`POST_COUNTS_TTL_SECS`]. Until it expires, a
+    /// cached `tags: 0` also hides a post's first tags from its view, and a
+    /// cached `replies: 0` its first replies from bootstrap.
     pub async fn cache_json(&self, author_id: &str, post_id: &str) -> RedisResult<()> {
         self.put_index_json(&[author_id, post_id], None, Some(POST_COUNTS_TTL_SECS))
             .await
