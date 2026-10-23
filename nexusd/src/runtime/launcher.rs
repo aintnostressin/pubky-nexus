@@ -100,6 +100,38 @@ impl DaemonLauncher {
 
 /// The API's context. Its ingest-user endpoint ingests through the watcher's [UserIngestor].
 fn api_context(config: &DaemonConfig, config_dir: PathBuf) -> Result<ApiContext, DynError> {
-    let ingestor = UserIngestor::from_config(&config.stack, Arc::new(PubkyConnectorResolver));
-    ApiContextBuilder::new(config.api_config(), config_dir, Arc::new(ingestor)).try_build()
+    let ingestor = Arc::new(api_ingestor(config));
+    ApiContextBuilder::new(config.api_config(), config_dir, ingestor).try_build()
+}
+
+/// The API's [UserIngestor]: `[stack.net]`'s HS blacklist, with homeservers looked up through
+/// the shared connector.
+fn api_ingestor(config: &DaemonConfig) -> UserIngestor {
+    UserIngestor::from_config(&config.stack, Arc::new(PubkyConnectorResolver))
+}
+
+#[cfg(test)]
+mod tests {
+    use nexus_common::models::error::ModelError;
+    use pubky_app_specs::PubkyId;
+
+    use super::{api_ingestor, DaemonConfig};
+
+    /// The API's ingestor refuses the HSs `[stack.net]` blacklists.
+    #[tokio::test]
+    async fn test_api_ingestor_enforces_the_stack_blacklist() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = DaemonConfig::read_or_create_config_file(dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let hs = PubkyId::try_from("8um71us3fyw6h8wbcxb5ar3rwusy1a6u49956ikzojg3gcwd1dty").unwrap();
+        config.stack.net.external_hs_pk_blacklist = vec![hs.clone()];
+
+        // An HS key used as a user id meets the blacklist before any lookup: no network needed
+        let err = api_ingestor(&config)
+            .ensure_hs_not_blacklisted(&hs)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ModelError::HsBlacklisted { hs_id } if hs_id == hs.to_string()));
+    }
 }
