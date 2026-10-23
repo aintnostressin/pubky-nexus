@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
+use crate::utils::default_ingestor_tests;
 use anyhow::Result;
 use chrono::Utc;
 use nexus_common::db::{exec_single_row, queries, PubkyClientError};
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::models::user::{Epoch, UserDetails};
-use nexus_common::utils::test_utils::{default_ingestor_tests, random_pk, random_pubky_id};
+use nexus_common::utils::test_utils::{random_pk, random_pubky_id};
 use nexus_common::WatcherConfig;
 use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::retry::{IndexKey, InitialBackoff, RetryScheduler, RetryStore};

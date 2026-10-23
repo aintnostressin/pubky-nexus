@@ -3,6 +3,7 @@ use crate::service::utils::HS_IDS;
 use crate::service::utils::{
     create_mock_event_processors, setup, MockEventProcessorRunner, MockHomeserverClient,
 };
+use crate::utils::default_ingestor_tests;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -12,7 +13,7 @@ use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::traits::Collection;
 use nexus_common::models::user::{set_user_homeserver, Epoch, UserDetails};
 use nexus_common::types::DynError;
-use nexus_common::utils::test_utils::{default_ingestor_tests, random_pubky_id};
+use nexus_common::utils::test_utils::random_pubky_id;
 use nexus_watcher::events::retry::{InitialBackoff, RedisRetryStore, RetryScheduler, RetryStore};
 use nexus_watcher::events::{DefaultEventHandler, EventHandler};
 use nexus_watcher::service::runner::{HomeserverBackoff, UserNotFoundBackoff, UserResumePoints};

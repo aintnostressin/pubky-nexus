@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{path::PathBuf, time::Duration};
 
 use axum::{
@@ -8,7 +9,7 @@ use axum::{
 };
 use criterion::{criterion_group, criterion_main, Criterion};
 use http_body_util::BodyExt;
-use nexus_common::utils::test_utils::default_ingestor_tests;
+use nexus_common::utils::test_utils::NoIngestion;
 use nexus_webapi::media::test_utils::default_subprocess_tests;
 use nexus_webapi::media::MediaPermits;
 use nexus_webapi::{
@@ -51,7 +52,7 @@ impl AvatarBenchSetup {
             _temp_dir: temp_dir,
             app_state: AppState::new(
                 files_path,
-                default_ingestor_tests(),
+                Arc::new(NoIngestion),
                 MediaPermits::new(1),
                 default_subprocess_tests(),
             ),

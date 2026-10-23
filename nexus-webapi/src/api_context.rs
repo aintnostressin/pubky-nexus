@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nexus_common::models::user::{PubkyConnectorResolver, UserIngestor};
+use nexus_common::models::user::UserIngestion;
 use nexus_common::{types::DynError, ApiConfig};
 use pubky::pkarr::{self, Keypair};
 
@@ -10,21 +10,28 @@ pub struct ApiContext {
     pub(crate) api_config: ApiConfig,
     pub(crate) keypair: pkarr::Keypair,
     pub(crate) pkarr_client: pkarr::Client,
-    pub(crate) ingestor: Arc<UserIngestor>,
+    pub(crate) ingestor: Arc<dyn UserIngestion>,
 }
 
 pub struct ApiContextBuilder {
     api_config: ApiConfig,
     secret_dir: PathBuf,
+    ingestor: Arc<dyn UserIngestion>,
     pkarr_builder: Option<pkarr::ClientBuilder>,
 }
 
 impl ApiContextBuilder {
-    /// `secret_dir` holds the API's `secret` key file, which is created if missing
-    pub fn new(api_config: ApiConfig, secret_dir: PathBuf) -> Self {
+    /// `secret_dir` holds the API's `secret` key file, which is created if missing.
+    /// `ingestor` serves the ingest-user endpoint: nexusd passes the watcher's.
+    pub fn new(
+        api_config: ApiConfig,
+        secret_dir: PathBuf,
+        ingestor: Arc<dyn UserIngestion>,
+    ) -> Self {
         Self {
             api_config,
             secret_dir,
+            ingestor,
             pkarr_builder: None,
         }
     }
@@ -39,9 +46,6 @@ impl ApiContextBuilder {
         // Ensure the dir exists, so a missing secret file can be created in it
         std::fs::create_dir_all(self.secret_dir.clone())?;
 
-        let ingestor =
-            UserIngestor::from_config(&self.api_config.stack, Arc::new(PubkyConnectorResolver));
-
         let pkarr_builder = self.pkarr_builder.clone().unwrap_or_default();
         let pkarr_client = pkarr_builder.build()?;
 
@@ -51,7 +55,7 @@ impl ApiContextBuilder {
             api_config: self.api_config.clone(),
             keypair,
             pkarr_client,
-            ingestor: Arc::new(ingestor),
+            ingestor: self.ingestor.clone(),
         })
     }
 

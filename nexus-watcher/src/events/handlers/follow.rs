@@ -1,9 +1,9 @@
-use crate::events::EventProcessorError;
+use crate::events::{EventProcessorError, UserIngestor};
 
 use nexus_common::db::OperationOutcome;
 use nexus_common::models::follow::{Followers, Following, Friends, UserFollows};
 use nexus_common::models::notification::Notification;
-use nexus_common::models::user::UserIngestor;
+use nexus_common::models::user::UserIngestion;
 use pubky_app_specs::PubkyId;
 use tracing::debug;
 

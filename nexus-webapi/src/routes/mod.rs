@@ -9,7 +9,7 @@ use axum::http::request::Parts;
 use axum::http::{Request, StatusCode};
 use axum::Json as AxumJson;
 use axum::Router;
-use nexus_common::models::user::UserIngestor;
+use nexus_common::models::user::UserIngestion;
 use nexus_common::RateLimitConfig;
 use tokio::sync::watch::Receiver;
 use tower_http::compression::CompressionLayer;
@@ -81,7 +81,7 @@ where
 pub struct AppState {
     pub files_path: Arc<PathBuf>,
     /// Shared ingestor enforcing the HS blacklist on API-triggered ingestion.
-    pub ingestor: Arc<UserIngestor>,
+    pub ingestor: Arc<dyn UserIngestion>,
     /// Queues for a media permit before shedding. The default for routes whose only
     /// other answer is an error.
     pub queued_variant_controller: VariantController,
@@ -96,7 +96,7 @@ impl AppState {
     /// gate run `max_concurrency` subprocesses of its own.
     pub fn new(
         files_path: PathBuf,
-        ingestor: Arc<UserIngestor>,
+        ingestor: Arc<dyn UserIngestion>,
         permits: MediaPermits,
         subprocess: MediaSubprocess,
     ) -> Self {

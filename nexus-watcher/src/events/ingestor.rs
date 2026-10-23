@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use pubky_app_specs::{ParsedUri, PubkyId};
 
-use super::PkdnsHomeserverResolver;
-use crate::models::error::{ModelError, ModelResult};
-use crate::models::homeserver::HsBlacklist;
-use crate::models::traits::Collection;
-use crate::models::user::{set_user_homeserver, UserDetails, UserHsCursor};
-use crate::StackConfig;
+use nexus_common::models::error::{ModelError, ModelResult};
+use nexus_common::models::homeserver::HsBlacklist;
+use nexus_common::models::traits::Collection;
+use nexus_common::models::user::{
+    set_user_homeserver, PkdnsHomeserverResolver, UserDetails, UserHsCursor, UserIngestion,
+};
+use nexus_common::StackConfig;
 
 /// Ingests previously-unknown users unless their HS is blacklisted.
 #[derive(Clone)]
@@ -92,12 +93,15 @@ impl UserIngestor {
 
         Ok(Some(hs_id))
     }
+}
 
+#[async_trait::async_trait]
+impl UserIngestion for UserIngestor {
     /// Resolves and persists a previously-unknown user.
     ///
     /// Returns [`ModelError::HsBlacklisted`] if the user's resolved HS is blacklisted.
     #[tracing::instrument(name = "user.ingest", skip_all)]
-    pub async fn maybe_ingest_user(&self, user_id: &PubkyId) -> ModelResult<()> {
+    async fn maybe_ingest_user(&self, user_id: &PubkyId) -> ModelResult<()> {
         let user_id_str = user_id.to_string();
         if UserDetails::get_by_id(&user_id_str).await?.is_some() {
             tracing::debug!("Skipping ingestion: {user_id_str} already known");
@@ -139,8 +143,8 @@ mod tests {
     use pubky::PublicKey;
 
     use super::*;
-    use crate::db::PubkyClientResult;
-    use crate::utils::test_utils::random_pubky_id;
+    use nexus_common::db::PubkyClientResult;
+    use nexus_common::utils::test_utils::random_pubky_id;
 
     /// Resolves every user to one homeserver, without the network.
     struct FixedResolver(PubkyId);

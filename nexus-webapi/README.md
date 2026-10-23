@@ -46,15 +46,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Alternatively, if you prefer to load the configuration from a file:
+Alternatively, if you prefer to load the configuration from a file. The ingest-user endpoint
+ingests through the watcher's `UserIngestor`, built from the loaded config:
 
 ```rust
-use nexus_watcher::builder::NexusWatcher;
+use nexus_common::models::user::PubkyConnectorResolver;
+use nexus_watcher::events::UserIngestor;
+use nexus_webapi::NexusApi;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    NexusApi::start_from_path(PathBuf::from("path/to/config/folder")).await?;
+    let config_dir = PathBuf::from("path/to/config/folder");
+    NexusApi::start_from_path(
+        config_dir,
+        |config| {
+            let resolver = Arc::new(PubkyConnectorResolver);
+            Arc::new(UserIngestor::from_config(&config.stack, resolver))
+        },
+        None,
+    )
+    .await?;
     Ok(())
 }
 ```

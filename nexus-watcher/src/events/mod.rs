@@ -1,4 +1,3 @@
-use nexus_common::models::user::UserIngestor;
 pub mod event;
 
 pub use event::{Event, EventType, ParseResult};
@@ -26,9 +25,11 @@ static TAKEN_DOWN: LazyLock<Counter<u64>> = LazyLock::new(|| {
 });
 
 pub mod handlers;
+mod ingestor;
 mod moderation;
 pub mod retry;
 
+pub use ingestor::UserIngestor;
 pub use moderation::Moderation;
 
 /// Trait for handling events.

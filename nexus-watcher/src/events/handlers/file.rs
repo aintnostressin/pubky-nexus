@@ -1,8 +1,7 @@
-use crate::events::EventProcessorError;
+use crate::events::{EventProcessorError, UserIngestor};
 use crate::homeserver::HomeserverClient;
 
 use nexus_common::media::FileVariant;
-use nexus_common::models::user::UserIngestor;
 use nexus_common::models::{file::FileDetails, traits::Collection};
 use pubky::PubkyResource;
 use pubky_app_specs::{ParsedUri, PubkyAppBlob, PubkyAppFile, PubkyAppObject, PubkyId};

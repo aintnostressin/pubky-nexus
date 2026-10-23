@@ -3,9 +3,9 @@ use crate::event_processor::utils::watcher::WatcherTest;
 use anyhow::Result;
 use chrono::Utc;
 use nexus_common::models::error::ModelError;
-use nexus_common::models::user::{UserDetails, UserIngestor};
+use nexus_common::models::user::{UserDetails, UserIngestion};
 use nexus_common::utils::test_utils::random_pubky_id;
-use nexus_watcher::events::handlers;
+use nexus_watcher::events::{handlers, UserIngestor};
 use nexus_watcher::EventProcessorError;
 use pubky::Keypair;
 use pubky_app_specs::{

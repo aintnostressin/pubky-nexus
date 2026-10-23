@@ -2,12 +2,12 @@ use crate::event_processor::posts::utils::{
     find_post_details, pubky_id, short_post, short_repost, test_user,
 };
 use crate::event_processor::utils::watcher::{HomeserverHashIdPath, WatcherTest};
+use crate::utils::default_ingestor_tests;
 use anyhow::Result;
 use chrono::Utc;
 use nexus_common::models::notification::{Notification, NotificationBody, PostChangedSource};
 use nexus_common::models::post::{PostCounts, PostDetails, PostView};
 use nexus_common::types::Pagination;
-use nexus_common::utils::test_utils::default_ingestor_tests;
 use nexus_watcher::events::handlers;
 use pubky::Keypair;
 use pubky_app_specs::{

@@ -1,4 +1,5 @@
 use crate::event_processor::utils::default_moderation_tests;
+use crate::utils::default_ingestor_tests;
 use anyhow::{anyhow, Error, Result};
 use base32::{encode, Alphabet};
 use chrono::Utc;
@@ -8,7 +9,6 @@ use nexus_common::models::homeserver::Homeserver;
 use nexus_common::models::post::PostStream;
 use nexus_common::models::traits::Collection;
 use nexus_common::models::user::USER_SOCIAL_GRAPH_KEY_PARTS;
-use nexus_common::utils::test_utils::default_ingestor_tests;
 use nexus_common::WatcherConfig;
 use nexus_common::{StackConfig, StackManager};
 use nexus_watcher::errors::EventProcessorError;

@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::Result;
+use nexus_common::utils::test_utils::NoIngestion;
 use nexus_common::ApiConfig;
 use nexus_webapi::{api_context::ApiContextBuilder, NexusApi, NexusApiBuilder};
 use tempfile::TempDir;
@@ -70,11 +72,14 @@ impl TestServiceServer {
         let temp_secret_dir = TempDir::new()?;
         let temp_dir = TempDir::new()?;
 
-        let api_context =
-            ApiContextBuilder::new(test_api_config, temp_secret_dir.path().to_path_buf())
-                .pkarr_builder(testnet.pkarr_client_builder())
-                .try_build()
-                .expect("Failed to create ApiContext");
+        let api_context = ApiContextBuilder::new(
+            test_api_config,
+            temp_secret_dir.path().to_path_buf(),
+            Arc::new(NoIngestion),
+        )
+        .pkarr_builder(testnet.pkarr_client_builder())
+        .try_build()
+        .expect("Failed to create ApiContext");
         let nexus_builder = NexusApiBuilder::new(api_context)
             .files_path(temp_dir.path().to_path_buf())
             .enable_key_republisher(enable_key_republisher);

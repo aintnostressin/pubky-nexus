@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -7,7 +8,7 @@ use axum::http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_LENGTH, ORIGIN};
 use axum::http::{Method, Request, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
-use nexus_common::utils::test_utils::default_ingestor_tests;
+use nexus_common::utils::test_utils::NoIngestion;
 use nexus_common::RateLimitConfig;
 use nexus_webapi::media::test_utils::default_subprocess_tests;
 use nexus_webapi::media::MediaPermits;
@@ -24,7 +25,7 @@ async fn test_request_body_size_limit() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let state = AppState::new(
         temp_dir.path().to_path_buf(),
-        default_ingestor_tests(),
+        Arc::new(NoIngestion),
         MediaPermits::new(1),
         default_subprocess_tests(),
     );
@@ -63,7 +64,7 @@ async fn test_request_body_size_limit_without_content_length() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let state = AppState::new(
         temp_dir.path().to_path_buf(),
-        default_ingestor_tests(),
+        Arc::new(NoIngestion),
         MediaPermits::new(1),
         default_subprocess_tests(),
     );
@@ -104,7 +105,7 @@ async fn test_request_timeout_returns_408() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let state = AppState::new(
         temp_dir.path().to_path_buf(),
-        default_ingestor_tests(),
+        Arc::new(NoIngestion),
         MediaPermits::new(1),
         default_subprocess_tests(),
     );
@@ -144,7 +145,7 @@ async fn test_body_size_limit_response_has_cors_header() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let state = AppState::new(
         temp_dir.path().to_path_buf(),
-        default_ingestor_tests(),
+        Arc::new(NoIngestion),
         MediaPermits::new(1),
         default_subprocess_tests(),
     );
@@ -181,7 +182,7 @@ async fn test_request_timeout_response_has_cors_header() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let state = AppState::new(
         temp_dir.path().to_path_buf(),
-        default_ingestor_tests(),
+        Arc::new(NoIngestion),
         MediaPermits::new(1),
         default_subprocess_tests(),
     );

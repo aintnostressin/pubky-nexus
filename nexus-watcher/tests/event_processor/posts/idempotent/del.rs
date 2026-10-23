@@ -4,8 +4,8 @@ use crate::event_processor::posts::utils::{
 };
 use crate::event_processor::users::utils::find_user_counts;
 use crate::event_processor::utils::watcher::WatcherTest;
+use crate::utils::default_ingestor_tests;
 use anyhow::Result;
-use nexus_common::utils::test_utils::default_ingestor_tests;
 use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::handlers;
 use pubky::Keypair;
