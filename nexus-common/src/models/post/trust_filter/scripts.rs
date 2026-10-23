@@ -29,20 +29,21 @@ local function admitted(authors)
 end
 ";
 
-/// Adds the score/member pairs in `ARGV` to the shared set `KEYS[1]`, keeping
-/// only the members whose author is admitted. Returns how many it kept.
+/// Adds the score/member pairs in `ARGV[2..]` to the shared set `KEYS[1]`,
+/// keeping only the members whose author is admitted, or all of them when
+/// `ARGV[1]` is `1`. Returns how many it kept.
 pub(super) static ADD: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         &[
             HELPERS,
-            r"local authors = {}
-              for i = 2, #ARGV, 2 do authors[#authors + 1] = author_of(ARGV[i]) end
-              local ok = admitted(authors)
+            r"local always, authors = ARGV[1] == '1', {}
+              for i = 3, #ARGV, 2 do authors[#authors + 1] = author_of(ARGV[i]) end
+              local ok = always and {} or admitted(authors)
               local keep = {}
               for j = 1, #authors do
-                  if ok[j] then
-                      keep[#keep + 1] = ARGV[2 * j - 1]
+                  if always or ok[j] then
                       keep[#keep + 1] = ARGV[2 * j]
+                      keep[#keep + 1] = ARGV[2 * j + 1]
                   end
               end
               if #keep > 0 then redis.call('ZADD', KEYS[1], unpack(keep)) end
@@ -101,12 +102,15 @@ pub(super) fn gate_call(script: &'static Script, key: &str) -> ScriptInvocation<
     call
 }
 
-/// One [`ADD`] call writing `entries` to the shared set `key`.
+/// One [`ADD`] call writing `entries` to the shared set `key`, all of them
+/// when `always` is set.
 pub(super) fn add_call<'a>(
     key: &str,
+    always: bool,
     entries: impl IntoIterator<Item = (f64, &'a str)>,
 ) -> ScriptInvocation<'static> {
     let mut call = gate_call(&ADD, key);
+    call.arg(u8::from(always));
     for (score, member) in entries {
         call.arg(score).arg(member);
     }

@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use super::reconcile::{shared_entries, AuthorPost};
 use super::*;
 use crate::models::post::search::{TAG_GLOBAL_POST_ENGAGEMENT, TAG_GLOBAL_POST_TIMELINE};
-use crate::models::post::{POST_TIMELINE_KEY_PARTS, POST_TOTAL_ENGAGEMENT_KEY_PARTS};
+use crate::models::post::{
+    POST_REPLIES_PER_POST_KEY_PARTS, POST_TIMELINE_KEY_PARTS, POST_TOTAL_ENGAGEMENT_KEY_PARTS,
+};
 use crate::models::user::SocialGraphStatus;
 
 fn ranking_key() -> String {
@@ -26,21 +28,29 @@ fn tag_engagement_key(label: &str) -> String {
     sorted_key(&[&TAG_GLOBAL_POST_ENGAGEMENT[..], &[label]].concat())
 }
 
-/// Root posts go to the global sets, and every post to the sets of its labels.
+fn replies_key(author_id: &str, post_id: &str) -> String {
+    sorted_key(&[&POST_REPLIES_PER_POST_KEY_PARTS[..], &[author_id, post_id]].concat())
+}
+
+/// Root posts go to the global sets, replies to their parent's thread unless
+/// the thread's owner wrote them, and every post to the sets of its labels.
 #[test]
 fn shared_entries_cover_every_set_an_author_reaches() {
-    let post = |id: &str, indexed_at, is_reply, labels: &[&str], engagement| AuthorPost {
-        author: "alice".to_string(),
-        id: id.to_string(),
-        indexed_at,
-        is_reply,
-        labels: labels.iter().map(ToString::to_string).collect(),
-        engagement,
-        mentions: 1,
+    let post = |id: &str, indexed_at, parent: Option<(&str, &str)>, labels: &[&str], engagement| {
+        AuthorPost {
+            author: "alice".to_string(),
+            id: id.to_string(),
+            indexed_at,
+            parent: parent.map(|(a, p)| (a.to_string(), p.to_string())),
+            labels: labels.iter().map(ToString::to_string).collect(),
+            engagement,
+            mentions: 1,
+        }
     };
     let posts = [
-        post("root", 10, false, &["x", "y"], 5),
-        post("reply", 20, true, &["x"], 1),
+        post("root", 10, None, &["x", "y"], 5),
+        post("reply", 20, Some(("bob", "b1")), &["x"], 1),
+        post("own", 30, Some(("alice", "root")), &["z"], 0),
     ];
 
     let entries = shared_entries(&posts);
@@ -49,6 +59,7 @@ fn shared_entries_cover_every_set_an_author_reaches() {
     let expected = BTreeMap::from([
         (timeline_key(), vec![entry(10.0, "root")]),
         (engagement_key(), vec![entry(5.0, "root")]),
+        (replies_key("bob", "b1"), vec![entry(20.0, "reply")]),
         (
             tag_timeline_key("x"),
             vec![entry(10.0, "root"), entry(20.0, "reply")],
@@ -60,6 +71,8 @@ fn shared_entries_cover_every_set_an_author_reaches() {
         ),
         (tag_timeline_key("y"), vec![entry(10.0, "root")]),
         (tag_engagement_key("y"), vec![entry(6.0, "root")]),
+        (tag_timeline_key("z"), vec![entry(30.0, "own")]),
+        (tag_engagement_key("z"), vec![entry(1.0, "own")]),
     ]);
     assert_eq!(entries, expected);
 }
@@ -74,8 +87,8 @@ mod live {
     use super::super::reconcile::{shared_entries, write_pages, AuthorPost, Write};
     use super::super::*;
     use super::{
-        engagement_key, ranking_key, tag_engagement_key, tag_timeline_key, timeline_key,
-        TAG_GLOBAL_POST_ENGAGEMENT, TAG_GLOBAL_POST_TIMELINE,
+        engagement_key, ranking_key, replies_key, tag_engagement_key, tag_timeline_key,
+        timeline_key, TAG_GLOBAL_POST_ENGAGEMENT, TAG_GLOBAL_POST_TIMELINE,
     };
     use crate::db::kv::SortOrder;
     use crate::db::{fetch_all_rows_from_graph, queries};
@@ -111,6 +124,11 @@ mod live {
         let mut entries = vec![
             (timeline_key(), root.clone(), 1650000000006.0),
             (engagement_key(), root, 0.0),
+            (
+                replies_key(D2, "WOTPOSTTAGS01"),
+                reply.clone(),
+                1650000000013.0,
+            ),
         ];
         for label in [
             "wmtag1",
@@ -240,7 +258,8 @@ mod live {
         Ok(())
     }
 
-    /// The gate holds across the batches one call is split into.
+    /// The gate holds across the batches one call is split into, and
+    /// `add_always` skips it.
     #[tokio_shared_rt::test(shared)]
     async fn add_keeps_ranked_authors_only() -> TestResult {
         let (parts, key) = tag_set(TAG_GLOBAL_POST_TIMELINE, "test-filter-add");
@@ -256,10 +275,13 @@ mod live {
 
         add(&parts, &entries).await?;
         let gated = members(&key).await?;
+        add_always(&parts, &[(3.0, "test-filter-bob:p3")]).await?;
+        let forced = members(&key).await?;
 
         cleanup(&[&key]).await?;
         assert_eq!(gated.len(), 600);
         assert!(gated.iter().all(|(m, _)| m.starts_with(ALICE)));
+        assert!(forced.contains(&("test-filter-bob:p3".to_string(), 3.0)));
         Ok(())
     }
 
@@ -819,6 +841,230 @@ mod live {
             "shown with the switch off"
         );
         assert!(unapplied?.contains(&spammer_post), "shown without the copy");
+        Ok(())
+    }
+
+    /// The spammer's hidden reply to D2's post, and D2's own reply to it.
+    const SPAMMER_REPLY: &str =
+        "qdsygndnk45m9ru5jseg3uxk5xg4usj9hrcraqbzgigapzweaa9o:WOTPOSTMODF01";
+    const D2_REPLY: &str = "smf4xrqfhx7stnufkjzhbjyu3rbgb3gga64srqmzcyyoyzefse9y:WOTPOSTCYCLE1";
+
+    /// The keys of one page of the replies to D2's tagged post, as `viewer`
+    /// gets them.
+    async fn d2_thread(
+        viewer: Option<&str>,
+        order: SortOrder,
+        pagination: Pagination,
+    ) -> Result<Vec<String>, DynError> {
+        let source = StreamSource::PostReplies {
+            author_id: D2.to_string(),
+            post_id: "WOTPOSTTAGS01".to_string(),
+        };
+        let sorting = StreamSorting::Timeline;
+        let stream =
+            PostStream::get_post_keys(source, pagination, order, sorting, viewer, None, None)
+                .await?;
+        Ok(stream.map(|stream| stream.post_keys).unwrap_or_default())
+    }
+
+    /// The whole thread as `viewer` walks it, one reply per page.
+    async fn d2_thread_walk(viewer: Option<&str>) -> Result<Vec<String>, DynError> {
+        let mut keys = Vec::new();
+        for _ in 0..10 {
+            let pagination = Pagination {
+                skip: Some(keys.len()),
+                limit: Some(1),
+                ..Default::default()
+            };
+            let page = d2_thread(viewer, SortOrder::Descending, pagination).await?;
+            if page.len() > 1 {
+                return Err(format!("a page of {} keys for a limit of 1", page.len()).into());
+            }
+            if page.is_empty() {
+                return Ok(keys);
+            }
+            keys.extend(page);
+        }
+        Err("the walk never reached an empty page".into())
+    }
+
+    /// A thread hides the unranked spammer's reply from everyone but the post's
+    /// author and the spammer, while the post's author's own reply stays for
+    /// all. BOB, unranked with a reply elsewhere, gets their own replies merged
+    /// in, and none of the hidden ones.
+    #[tokio_shared_rt::test(shared)]
+    async fn threads_give_hidden_replies_back_to_the_owner_and_replier() -> TestResult {
+        let bob_replies = sorted_key(&[&POST_REPLIES_PER_USER_KEY_PARTS[..], &[BOB]].concat());
+        setup(&[&bob_replies]).await?;
+        let mut conn = get_redis_conn().await?;
+        let _: () = conn.zadd(&bob_replies, "elsewhere", 1.0).await?;
+        let both = vec![SPAMMER_REPLY.to_string(), D2_REPLY.to_string()];
+        let own_only = vec![D2_REPLY.to_string()];
+
+        let anonymous = d2_thread_walk(None).await;
+        let ranked = d2_thread_walk(Some(ENGAGED)).await;
+        let bob_merges = may_hide_replies_of(BOB).await;
+        let unranked = d2_thread_walk(Some(BOB)).await;
+        let owner = d2_thread_walk(Some(D2)).await;
+        let replier = d2_thread_walk(Some(SPAMMER)).await;
+        cleanup(&[&bob_replies]).await?;
+
+        assert_eq!(anonymous?, own_only, "no viewer");
+        assert_eq!(ranked?, own_only, "a ranked viewer");
+        assert!(bob_merges?, "BOB replied elsewhere, so their thread merges");
+        assert_eq!(
+            unranked?, own_only,
+            "an unranked replier with no reply there"
+        );
+        assert_eq!(owner?, both, "the post's author");
+        assert_eq!(replier?, both, "the replier");
+        Ok(())
+    }
+
+    /// A replier sees their own replies while either ranking leaves them out:
+    /// the live one ranked them before a reconcile showed their older replies,
+    /// or dropped them while the applied copy still has them and the gate turns
+    /// their new replies away. A viewer in both rankings gets no merge, nor does
+    /// one who never replied.
+    #[tokio_shared_rt::test(shared)]
+    async fn a_replier_sees_own_replies_while_either_ranking_leaves_them_out() -> TestResult {
+        setup(&[]).await?;
+        let mut conn = get_redis_conn().await?;
+        let own_reply = SPAMMER_REPLY.to_string();
+
+        rank(SPAMMER).await?;
+        let newly_ranked = d2_thread_walk(Some(SPAMMER)).await;
+        unrank(SPAMMER).await?;
+        let _: () = conn.zadd(applied_key(), SPAMMER, 0).await?;
+        let newly_dropped = d2_thread_walk(Some(SPAMMER)).await;
+        let ranked_viewer = may_hide_replies_of(ENGAGED).await;
+        let silent_viewer = may_hide_replies_of(BOB).await;
+        cleanup(&[]).await?;
+
+        assert!(newly_ranked?.contains(&own_reply), "ranked, not yet shown");
+        assert!(
+            newly_dropped?.contains(&own_reply),
+            "dropped, still in the copy"
+        );
+        assert!(!ranked_viewer?, "a viewer in both rankings");
+        assert!(!silent_viewer?, "an unranked viewer who never replied");
+        Ok(())
+    }
+
+    /// The post's author pages their thread from the graph as the sorted set
+    /// pages: `start` is the highest score kept and `end` the lowest, both
+    /// inclusive, whatever the order.
+    #[tokio_shared_rt::test(shared)]
+    async fn the_owners_thread_pages_like_the_sorted_set() -> TestResult {
+        setup(&[]).await?;
+        let window = |start, end| Pagination {
+            start,
+            end,
+            limit: Some(10),
+            ..Default::default()
+        };
+        let read = |order, pagination| d2_thread(Some(D2), order, pagination);
+
+        let ascending = read(SortOrder::Ascending, window(None, None)).await?;
+        let below = read(SortOrder::Descending, window(Some(1650000000008.0), None)).await?;
+        let above = read(SortOrder::Ascending, window(None, Some(1650000000013.0))).await?;
+
+        assert_eq!(ascending, [D2_REPLY, SPAMMER_REPLY]);
+        assert_eq!(below, [D2_REPLY]);
+        assert_eq!(above, [SPAMMER_REPLY]);
+        Ok(())
+    }
+
+    /// A ranked viewer's thread is the shared set, paged in Redis: `limit`, the
+    /// order, and `start` and `end` as the highest and lowest score kept. A stray
+    /// entry gives each window something to cut.
+    #[tokio_shared_rt::test(shared)]
+    async fn a_ranked_viewers_thread_pages_like_the_sorted_set() -> TestResult {
+        let key = replies_key(D2, "WOTPOSTTAGS01");
+        let stray = format!("{BOB}:stray");
+        setup(&[]).await?;
+        let mut conn = get_redis_conn().await?;
+        let _: () = conn.zadd(&key, &stray, 1650000000010.0).await?;
+        let page = |start, end, limit| Pagination {
+            start,
+            end,
+            limit: Some(limit),
+            ..Default::default()
+        };
+        let read = |order, pagination| d2_thread(Some(ENGAGED), order, pagination);
+
+        let newest = read(SortOrder::Descending, page(None, None, 1)).await;
+        let oldest = read(SortOrder::Ascending, page(None, None, 1)).await;
+        let below = read(SortOrder::Descending, page(Some(1650000000009.0), None, 10)).await;
+        let above = read(SortOrder::Descending, page(None, Some(1650000000009.0), 10)).await;
+        let _: () = conn.zrem(&key, &stray).await?;
+        cleanup(&[]).await?;
+
+        assert_eq!(newest?, std::slice::from_ref(&stray));
+        assert_eq!(oldest?, [D2_REPLY]);
+        assert_eq!(below?, [D2_REPLY]);
+        assert_eq!(above?, [stray]);
+        Ok(())
+    }
+
+    /// An unranked replier's merged thread pages like the sorted set too: the
+    /// shared set's D2_REPLY and the graph's SPAMMER_REPLY are each cut by the
+    /// window, `start` as the highest score kept and `end` the lowest, and with
+    /// a stray entry in the shared set the oldest first page still follows the
+    /// order in the shared read and the merge. The graph read's order is pinned
+    /// by the owner's test: the spammer has one reply in this thread.
+    #[tokio_shared_rt::test(shared)]
+    async fn a_repliers_merged_thread_pages_like_the_sorted_set() -> TestResult {
+        let key = replies_key(D2, "WOTPOSTTAGS01");
+        let stray = format!("{BOB}:stray");
+        setup(&[]).await?;
+        let mut conn = get_redis_conn().await?;
+        let page = |start, end, limit| Pagination {
+            start,
+            end,
+            limit: Some(limit),
+            ..Default::default()
+        };
+        let read = |order, pagination| d2_thread(Some(SPAMMER), order, pagination);
+
+        let below = read(SortOrder::Descending, page(Some(1650000000012.0), None, 10)).await;
+        let above = read(SortOrder::Descending, page(None, Some(1650000000009.0), 10)).await;
+        let _: () = conn.zadd(&key, &stray, 1650000000010.0).await?;
+        let oldest = read(SortOrder::Ascending, page(None, None, 1)).await;
+        let _: () = conn.zrem(&key, &stray).await?;
+        cleanup(&[]).await?;
+
+        assert_eq!(below?, [D2_REPLY], "the graph read cuts the replier's own");
+        assert_eq!(above?, [SPAMMER_REPLY], "the shared read cuts D2's");
+        assert_eq!(
+            oldest?,
+            [D2_REPLY],
+            "the shared read and the merge follow the order"
+        );
+        Ok(())
+    }
+
+    /// The post's author reads their thread from the graph only while posts may
+    /// be hidden: with the switch off and the sets shown again, it comes from
+    /// the shared set, here holding an entry the graph doesn't have.
+    #[tokio_shared_rt::test(shared)]
+    async fn the_owners_thread_reads_the_graph_only_while_posts_may_be_hidden() -> TestResult {
+        let key = replies_key(D2, "WOTPOSTTAGS01");
+        let stray = format!("{BOB}:stray");
+        setup(&[]).await?;
+        let mut conn = get_redis_conn().await?;
+        let _: () = conn.zadd(&key, &stray, 1650000000010.0).await?;
+
+        let filtered = d2_thread_walk(Some(D2)).await;
+        switch(false).await?;
+        let shown = reconcile().await;
+        let unfiltered = d2_thread_walk(Some(D2)).await;
+        let _: () = conn.zrem(&key, &stray).await?;
+        cleanup(&[]).await?;
+
+        shown?;
+        assert!(!filtered?.contains(&stray), "read from the graph");
+        assert!(unfiltered?.contains(&stray), "read from the shared set");
         Ok(())
     }
 }

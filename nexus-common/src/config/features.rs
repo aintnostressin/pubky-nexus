@@ -10,7 +10,8 @@ use crate::models::post::trust_filter;
 #[serde(default, deny_unknown_fields)]
 pub struct FeaturesConfig {
     /// Hide posts by authors outside the trust ranking from the streams every
-    /// viewer shares.
+    /// viewer shares, and their replies from other users' threads, where only
+    /// the thread's author and the replier still see them.
     pub hide_unranked_authors: bool,
 }
 

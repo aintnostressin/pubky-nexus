@@ -319,3 +319,48 @@ async fn test_tag_search_hides_unranked_authors() -> Result<()> {
     }
     Ok(())
 }
+
+/// A thread hides the replies of unranked authors from everyone but the post's
+/// author, who gets every reply, and the replier, who gets their own: the
+/// spammer's reply under D2's post goes, D2's own stays.
+#[tokio_shared_rt::test(shared)]
+async fn test_threads_hide_unranked_replies() -> Result<()> {
+    let thread = format!("source=post_replies&author_id={WOT_D2}&post_id=WOTPOSTTAGS01");
+    let own = format!("{WOT_D2}:WOTPOSTCYCLE1");
+    let spammers = format!("{SPAMMER}:WOTPOSTMODF01");
+    for viewer in other_viewers() {
+        let page = keys(&format!("{thread}{viewer}")).await?;
+        assert_eq!(
+            post_keys_in(&page),
+            std::slice::from_ref(&own),
+            "viewer: {viewer}"
+        );
+    }
+    for viewer in [WOT_D2, SPAMMER] {
+        let page = keys(&format!("{thread}&viewer_id={viewer}")).await?;
+        let both = [spammers.clone(), own.clone()];
+        assert_eq!(post_keys_in(&page), both, "viewer: {viewer}");
+    }
+    let page = posts(&format!("{thread}&viewer_id={WOT_D2}")).await?;
+    assert_eq!(ids_in(&page), ["WOTPOSTMODF01", "WOTPOSTCYCLE1"]);
+    Ok(())
+}
+
+/// A thread's repliers, as a users stream, are the ones the thread shows
+/// everyone: D2, not the spammer.
+#[tokio_shared_rt::test(shared)]
+async fn test_thread_repliers_leave_out_unranked_users() -> Result<()> {
+    let path = format!(
+        "/v0/stream/users/ids?source=post_replies&author_id={WOT_D2}&post_id=WOTPOSTTAGS01"
+    );
+    let response = get_request(&path).await?;
+    let ids: Vec<&str> = response
+        .as_array()
+        .expect("user id stream")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(ids.contains(&WOT_D2), "the post's author replied");
+    assert!(!ids.contains(&SPAMMER), "the spammer is hidden");
+    Ok(())
+}

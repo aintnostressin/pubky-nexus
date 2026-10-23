@@ -4,7 +4,9 @@ use super::trust_filter::{self, AuthorPost};
 use super::{collection_item_keys, Bookmark, PostCounts, PostDetails, PostView};
 use crate::db::kv::{RedisResult, ScoreAction, SortOrder};
 use crate::db::queries::get::TrustRule;
-use crate::db::{get_neo4j_graph, queries, GraphError, GraphResult, RedisOps};
+use crate::db::{
+    fetch_all_rows_from_graph, get_neo4j_graph, queries, GraphError, GraphResult, RedisOps,
+};
 use crate::models::error::ModelError;
 use crate::models::error::ModelResult;
 use crate::models::{
@@ -275,21 +277,25 @@ impl PostStream {
 
         // Decide whether to use index or fallback to graph query
         let use_index = Self::can_use_index(&sorting, &source, &tags, &kind);
-        // The trust filter hides an unranked author's posts from everyone, so
-        // their own ALL timeline gets them back.
-        let own_posts_viewer = match (&source, &sorting, &tags, viewer_id) {
-            (StreamSource::All, StreamSorting::Timeline, None, Some(viewer)) => {
-                trust_filter::may_hide_posts().await?.then_some(viewer)
-            }
-            _ => None,
-        };
-        let rule = Self::trust_rule(&source, use_index, own_posts_viewer).await?;
+        let hidden_posts_viewer =
+            match Self::hidden_posts_candidate(&source, &sorting, &tags, viewer_id) {
+                Some(viewer) => trust_filter::may_hide_posts().await?.then_some(viewer),
+                None => None,
+            };
+        let rule = Self::trust_rule(&source, use_index, hidden_posts_viewer).await?;
 
         let started = std::time::Instant::now();
         let result: ModelResult<PostKeyStream> = match use_index {
             true => {
-                Self::get_from_index(source, sorting, order, &tags, pagination, own_posts_viewer)
-                    .await
+                Self::get_from_index(
+                    source,
+                    sorting,
+                    order,
+                    &tags,
+                    pagination,
+                    hidden_posts_viewer,
+                )
+                .await
             }
             false => Self::get_from_graph(source, sorting, order, &tags, pagination, kind, rule)
                 .await
@@ -390,18 +396,15 @@ impl PostStream {
         order: SortOrder,
         pagination: Pagination,
     ) -> RedisResult<PostKeyStream> {
-        // Each set yields at most the whole window up to the page's end, so the
-        // merged list can be skipped and limited like one set.
-        let skip = pagination.skip.unwrap_or(0);
-        let window = pagination.limit.map(|limit| skip + limit);
+        let window = merge_window(&pagination);
         let own_key_parts = [&POST_PER_USER_KEY_PARTS[..], &[viewer_id]].concat();
         let read = |key_parts| {
             Self::try_from_index_sorted_set(
                 key_parts,
-                pagination.start,
-                pagination.end,
-                Some(0),
-                window,
+                window.start,
+                window.end,
+                window.skip,
+                window.limit,
                 order.clone(),
                 None,
             )
@@ -412,13 +415,92 @@ impl PostStream {
             .into_iter()
             .map(|(post_id, score)| (format!("{viewer_id}:{post_id}"), score));
         let entries = global.unwrap_or_default().into_iter().chain(own).collect();
+        Ok(merged_page(entries, &order, &pagination))
+    }
 
-        let page = merge_scored(entries, &order)
-            .into_iter()
-            .skip(skip)
-            .take(pagination.limit.unwrap_or(usize::MAX))
-            .collect();
-        Ok(PostKeyStream::from_scored_entries(page))
+    /// The thread under `author_id`'s post `post_id` as `viewer` gets it while
+    /// the filter may hide posts: every reply for the post's author, the shared
+    /// thread with their own hidden replies merged in for a viewer whose replies
+    /// it may hide, and the shared thread alone for anyone else.
+    async fn get_viewers_thread(
+        author_id: &str,
+        post_id: &str,
+        viewer: &str,
+        order: SortOrder,
+        pagination: Pagination,
+    ) -> ModelResult<PostKeyStream> {
+        let parent = (author_id, post_id);
+        if viewer == author_id {
+            let replies = Self::get_replies_from_graph(parent, None, &order, &pagination).await?;
+            return Ok(PostKeyStream::from_scored_entries(replies));
+        }
+        if trust_filter::may_hide_replies_of(viewer).await? {
+            return Self::get_merged_thread(parent, viewer, order, pagination).await;
+        }
+        let Pagination {
+            skip,
+            limit,
+            start,
+            end,
+        } = pagination;
+        Ok(Self::get_post_replies(author_id, post_id, order, start, end, skip, limit).await?)
+    }
+
+    /// The `parent` post's shared thread with `viewer`'s own replies to it
+    /// merged in, paged as one sorted set would page them.
+    async fn get_merged_thread(
+        parent: (&str, &str),
+        viewer: &str,
+        order: SortOrder,
+        pagination: Pagination,
+    ) -> ModelResult<PostKeyStream> {
+        let window = merge_window(&pagination);
+        let key_parts = [&POST_REPLIES_PER_POST_KEY_PARTS[..], &[parent.0, parent.1]].concat();
+        let shared = Self::try_from_index_sorted_set(
+            &key_parts,
+            window.start,
+            window.end,
+            window.skip,
+            window.limit,
+            order.clone(),
+            None,
+        )
+        .await?;
+        let own = Self::get_replies_from_graph(parent, Some(viewer), &order, &window).await?;
+        let entries = shared.unwrap_or_default().into_iter().chain(own).collect();
+        Ok(merged_page(entries, &order, &pagination))
+    }
+
+    /// The replies to the `parent` post read from the graph, only `replier_id`'s
+    /// when given, paged like the thread's sorted set.
+    async fn get_replies_from_graph(
+        parent: (&str, &str),
+        replier_id: Option<&str>,
+        order: &SortOrder,
+        pagination: &Pagination,
+    ) -> GraphResult<Vec<(String, f64)>> {
+        let query = queries::get::post_replies(parent, replier_id, order, pagination);
+        let rows = fetch_all_rows_from_graph(query).await?;
+        rows.iter()
+            .map(|row| Ok((row.get("key")?, row.get::<i64>("score")? as f64)))
+            .collect()
+    }
+
+    /// The viewer this stream gives their hidden posts back to, if the trust
+    /// filter hides any: it hides an unranked author's posts from everyone, so
+    /// their own ALL timeline gets them back, and a thread gives its post's
+    /// author every reply and anyone else their own.
+    fn hidden_posts_candidate<'a>(
+        source: &StreamSource,
+        sorting: &StreamSorting,
+        tags: &Option<Vec<String>>,
+        viewer_id: Option<&'a str>,
+    ) -> Option<&'a str> {
+        match (source, sorting, tags) {
+            (StreamSource::All, StreamSorting::Timeline, None)
+            | (StreamSource::PostReplies { .. }, _, None) => viewer_id,
+            _ => None,
+        }
     }
 
     // Determine if we have a quick access sorted set for this combination
@@ -460,7 +542,7 @@ impl PostStream {
         order: SortOrder,
         tags: &Option<Vec<String>>,
         pagination: Pagination,
-        own_posts_viewer: Option<&str>,
+        hidden_posts_viewer: Option<&str>,
     ) -> ModelResult<PostKeyStream> {
         let start = pagination.start;
         let end = pagination.end;
@@ -469,7 +551,7 @@ impl PostStream {
 
         let result = match (source, tags) {
             // Global post streams
-            (StreamSource::All, None) => match own_posts_viewer {
+            (StreamSource::All, None) => match hidden_posts_viewer {
                 Some(viewer) => Self::get_merged_timeline(viewer, order, pagination).await?,
                 None => {
                     Self::get_global_posts_keys(sorting, order, start, end, skip, limit).await?
@@ -484,9 +566,16 @@ impl PostStream {
                 Self::get_bookmarked_posts(&observer_id, order, start, end, skip, limit).await?
             }
             // Stream of replies to specific a post
-            (StreamSource::PostReplies { author_id, post_id }, None) => {
-                Self::get_post_replies(&author_id, &post_id, order, start, end, skip, limit).await?
-            }
+            (StreamSource::PostReplies { author_id, post_id }, None) => match hidden_posts_viewer {
+                Some(viewer) => {
+                    Self::get_viewers_thread(&author_id, &post_id, viewer, order, pagination)
+                        .await?
+                }
+                None => {
+                    Self::get_post_replies(&author_id, &post_id, order, start, end, skip, limit)
+                        .await?
+                }
+            },
             // Stream of parent post from a given author
             (StreamSource::Author { author_id }, None) => {
                 Self::get_author_posts(&author_id, order, start, end, skip, limit, false).await?
@@ -935,7 +1024,11 @@ impl PostStream {
         let key_parts = [&POST_REPLIES_PER_POST_KEY_PARTS[..], parent_post_key_parts].concat();
         let score = indexed_at as f64;
         let element = format!("{author_id}:{reply_id}");
-        Self::put_index_sorted_set(&key_parts, &[(score, element.as_str())], None, None).await
+        let entry = [(score, element.as_str())];
+        if gate_exempts_reply(author_id, parent_post_key_parts[0]) {
+            return trust_filter::add_always(&key_parts, &entry).await;
+        }
+        trust_filter::add(&key_parts, &entry).await
     }
 
     /// Adds the post response to a Redis sorted set using the `indexed_at` timestamp as the score.
@@ -1020,18 +1113,29 @@ impl PostStream {
     }
 
     /// The shared sets `post` belongs in, as joined key parts and score, as a full
-    /// reindex places it. Only a root post has any.
+    /// reindex places it. A reply its thread's owner wrote gets none: the thread
+    /// keeps it whatever the ranking.
     pub(crate) fn shared_set_entries(post: &AuthorPost) -> Vec<(String, f64)> {
-        if post.is_reply {
-            return Vec::new();
+        let indexed_at = post.indexed_at as f64;
+        match &post.parent {
+            Some((parent_author, _)) if gate_exempts_reply(&post.author, parent_author) => {
+                Vec::new()
+            }
+            Some((parent_author, parent_post)) => {
+                let key = [
+                    &POST_REPLIES_PER_POST_KEY_PARTS[..],
+                    &[parent_author, parent_post],
+                ];
+                vec![(key.concat().join(":"), indexed_at)]
+            }
+            None => vec![
+                (POST_TIMELINE_KEY_PARTS.join(":"), indexed_at),
+                (
+                    POST_TOTAL_ENGAGEMENT_KEY_PARTS.join(":"),
+                    post.engagement as f64,
+                ),
+            ],
         }
-        vec![
-            (POST_TIMELINE_KEY_PARTS.join(":"), post.indexed_at as f64),
-            (
-                POST_TOTAL_ENGAGEMENT_KEY_PARTS.join(":"),
-                post.engagement as f64,
-            ),
-        ]
     }
 
     pub async fn update_index_score(
@@ -1047,6 +1151,41 @@ impl PostStream {
         )
         .await
     }
+}
+
+/// Whether a reply skips the trust gate in its thread: the thread is its parent
+/// post's author's own, so their replies always stay. Only the immediate
+/// parent's author is exempt: the thread root's author answering deeper in the
+/// thread still goes through the gate. The reply write and the reconcile's
+/// thread entries both follow it.
+fn gate_exempts_reply(reply_author: &str, parent_author: &str) -> bool {
+    reply_author == parent_author
+}
+
+/// The window each source of a merged stream reads: every entry up to the
+/// page's end, so the merged list can be skipped and limited like one set.
+fn merge_window(pagination: &Pagination) -> Pagination {
+    Pagination {
+        skip: Some(0),
+        limit: pagination
+            .limit
+            .map(|limit| pagination.skip.unwrap_or(0) + limit),
+        ..*pagination
+    }
+}
+
+/// The page `pagination` asks for out of `entries` merged from several sources.
+fn merged_page(
+    entries: Vec<(String, f64)>,
+    order: &SortOrder,
+    pagination: &Pagination,
+) -> PostKeyStream {
+    let page = merge_scored(entries, order)
+        .into_iter()
+        .skip(pagination.skip.unwrap_or(0))
+        .take(pagination.limit.unwrap_or(usize::MAX))
+        .collect();
+    PostKeyStream::from_scored_entries(page)
 }
 
 /// Orders entries as one sorted set would: by score, ties by member, each
@@ -1124,6 +1263,39 @@ mod tests {
             assert_eq!(source.get_observer(), Some("observer"));
             assert_eq!(source, expected);
         }
+    }
+
+    /// Only the ALL timeline and threads give a viewer their hidden posts back:
+    /// the timeline without tags, and a thread whatever its sorting.
+    #[test]
+    fn test_hidden_posts_candidate_is_the_all_timeline_or_a_thread() {
+        let viewer = Some("viewer");
+        let tags = Some(vec!["tag".to_string()]);
+        let thread = StreamSource::PostReplies {
+            author_id: "author".to_string(),
+            post_id: "post".to_string(),
+        };
+        let author = StreamSource::Author {
+            author_id: "author".to_string(),
+        };
+        let candidate = |source, sorting, tags, viewer| {
+            PostStream::hidden_posts_candidate(source, &sorting, tags, viewer)
+        };
+        let all = &StreamSource::All;
+        let timeline = StreamSorting::Timeline;
+        let engagement = StreamSorting::TotalEngagement;
+
+        assert_eq!(candidate(all, timeline.clone(), &None, viewer), viewer);
+        assert_eq!(candidate(&thread, timeline.clone(), &None, viewer), viewer);
+        assert_eq!(
+            candidate(&thread, engagement.clone(), &None, viewer),
+            viewer
+        );
+        assert_eq!(candidate(all, engagement, &None, viewer), None);
+        assert_eq!(candidate(all, timeline.clone(), &tags, viewer), None);
+        assert_eq!(candidate(&thread, timeline.clone(), &tags, viewer), None);
+        assert_eq!(candidate(&author, timeline.clone(), &None, viewer), None);
+        assert_eq!(candidate(all, timeline, &None, None), None);
     }
 
     /// PostCollections is served from the graph only; no sorted set backs it.
