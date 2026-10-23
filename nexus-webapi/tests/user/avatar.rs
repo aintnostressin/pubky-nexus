@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{io::ErrorKind, path::PathBuf, time::Duration, time::Instant};
 
 use crate::utils::host_url;
@@ -6,7 +7,7 @@ use anyhow::Result;
 use axum::body::{to_bytes, Body};
 use axum::http::Request;
 use nexus_common::models::{traits::Collection, user::UserDetails};
-use nexus_common::utils::test_utils::default_ingestor_tests;
+use nexus_common::utils::test_utils::NoIngestion;
 use nexus_common::RateLimitConfig;
 use nexus_webapi::media::test_utils::default_subprocess_tests;
 use nexus_webapi::media::MediaPermits;
@@ -198,7 +199,7 @@ async fn test_user_avatar_degrades_to_main_when_at_capacity() -> Result<()> {
     // fallback that queues for it instead of failing fast.
     let state = AppState::new(
         files_dir.path().to_path_buf(),
-        default_ingestor_tests(),
+        Arc::new(NoIngestion),
         MediaPermits::new(0),
         default_subprocess_tests(),
     );
@@ -266,7 +267,7 @@ async fn test_user_avatar_serves_small_variant_when_gate_available() -> Result<(
     // An available permit lets variant generation proceed.
     let state = AppState::new(
         files_dir.path().to_path_buf(),
-        default_ingestor_tests(),
+        Arc::new(NoIngestion),
         MediaPermits::new(1),
         default_subprocess_tests(),
     );

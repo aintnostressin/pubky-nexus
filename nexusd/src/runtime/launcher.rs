@@ -1,8 +1,12 @@
+use std::sync::Arc;
 use std::{fmt::Debug, path::PathBuf};
 
+use nexus_common::models::user::PubkyConnectorResolver;
 use nexus_common::{types::DynError, utils::create_shutdown_rx};
+use nexus_watcher::events::UserIngestor;
 use nexus_watcher::NexusWatcherBuilder;
-use nexus_webapi::{api_context::ApiContextBuilder, NexusApiBuilder};
+use nexus_webapi::api_context::{ApiContext, ApiContextBuilder};
+use nexus_webapi::NexusApiBuilder;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::watch::Receiver, try_join};
 
@@ -35,8 +39,7 @@ impl DaemonLauncher {
         let config = DaemonConfig::read_or_create_config_file(config_dir.clone()).await?;
         let jobs = JobRegistry::catalog(&config.trust_rank).scheduled_jobs(&config)?;
 
-        let api_context = ApiContextBuilder::new(config.api_config(), config_dir).try_build()?;
-        let nexus_webapi_builder = NexusApiBuilder::new(api_context);
+        let nexus_webapi_builder = NexusApiBuilder::new(api_context(&config, config_dir)?);
 
         let nexus_watcher_builder = NexusWatcherBuilder(config.watcher_config());
 
@@ -67,9 +70,10 @@ impl DaemonLauncher {
         shutdown_rx: Option<Receiver<bool>>,
     ) -> Result<(), DynError> {
         let config = DaemonConfig::read_or_create_config_file(config_dir.clone()).await?;
-        let api_context = ApiContextBuilder::new(config.api_config(), config_dir).try_build()?;
 
-        NexusApiBuilder::new(api_context).start(shutdown_rx).await?;
+        NexusApiBuilder::new(api_context(&config, config_dir)?)
+            .start(shutdown_rx)
+            .await?;
         Ok(())
     }
 
@@ -92,4 +96,10 @@ impl DaemonLauncher {
             .start(shutdown_rx)
             .await
     }
+}
+
+/// The API's context. Its ingest-user endpoint ingests through the watcher's [UserIngestor].
+fn api_context(config: &DaemonConfig, config_dir: PathBuf) -> Result<ApiContext, DynError> {
+    let ingestor = UserIngestor::from_config(&config.stack, Arc::new(PubkyConnectorResolver));
+    ApiContextBuilder::new(config.api_config(), config_dir, Arc::new(ingestor)).try_build()
 }

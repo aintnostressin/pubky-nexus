@@ -2,12 +2,11 @@
 //!
 //! Shared helpers for unit and integration tests.
 
-use std::sync::Arc;
-
 use pubky::{Keypair, PublicKey};
 use pubky_app_specs::PubkyId;
 
-use crate::models::user::{PubkyConnectorResolver, UserIngestor};
+use crate::models::error::ModelResult;
+use crate::models::user::UserIngestion;
 
 /// Generates a random public key.
 pub fn random_pk() -> PublicKey {
@@ -19,7 +18,14 @@ pub fn random_pubky_id() -> PubkyId {
     PubkyId::from(random_pk())
 }
 
-/// Default user ingestor for tests: empty HS blacklist (ingest everything).
-pub fn default_ingestor_tests() -> Arc<UserIngestor> {
-    Arc::new(UserIngestor::new([], Arc::new(PubkyConnectorResolver)))
+/// Ingests nobody, for API tests: they don't ingest. The watcher implements ingestion and
+/// tests it.
+#[derive(Debug)]
+pub struct NoIngestion;
+
+#[async_trait::async_trait]
+impl UserIngestion for NoIngestion {
+    async fn maybe_ingest_user(&self, _user_id: &PubkyId) -> ModelResult<()> {
+        Ok(())
+    }
 }

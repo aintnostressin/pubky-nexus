@@ -5,13 +5,13 @@ use crate::event_processor::{
     utils::default_moderation_tests,
     utils::watcher::{generate_post_id, HomeserverHashIdPath, WatcherTest},
 };
+use crate::utils::default_ingestor_tests;
 use anyhow::Result;
 use chrono::Utc;
 use nexus_common::models::notification::Notification;
 use nexus_common::models::post::PostCounts;
 use nexus_common::models::takedown::record_takedown;
 use nexus_common::types::Pagination;
-use nexus_common::utils::test_utils::default_ingestor_tests;
 use nexus_watcher::events::remove_if_taken_down;
 use nexus_watcher::EventProcessorError;
 use pubky::ResourcePath;

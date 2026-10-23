@@ -1,4 +1,4 @@
-use crate::events::EventProcessorError;
+use crate::events::{EventProcessorError, UserIngestor};
 
 use nexus_common::db::kv::ScoreAction;
 use nexus_common::db::queries;
@@ -9,7 +9,7 @@ use nexus_common::models::post::{
     collection_item_keys, sync_collected_edges, PostCounts, PostDetails, PostRelationships,
     PostStream,
 };
-use nexus_common::models::user::UserIngestor;
+use nexus_common::models::user::UserIngestion;
 use pubky_app_specs::{
     ParsedUri, PubkyAppCollectionContent, PubkyAppPost, PubkyAppPostKind, PubkyId, Resource,
 };

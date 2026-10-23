@@ -1,4 +1,4 @@
-use crate::events::EventProcessorError;
+use crate::events::{EventProcessorError, UserIngestor};
 use chrono::Utc;
 use nexus_common::db::kv::ScoreAction;
 use nexus_common::db::{fetch_row_from_graph, queries, OperationOutcome, RedisOps};
@@ -10,7 +10,7 @@ use nexus_common::models::tag::post::TagPost;
 use nexus_common::models::tag::search::TagSearch;
 use nexus_common::models::tag::traits::{TagCollection, TaggersCollection};
 use nexus_common::models::tag::user::TagUser;
-use nexus_common::models::user::{UserIngestor, UsersByTagSearch};
+use nexus_common::models::user::{UserIngestion, UsersByTagSearch};
 use nexus_common::types::Pagination;
 use nexus_common::universal_tag::normalize::{
     classify_uri, normalize_uri, resource_id, UriCategory,

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{fs::File, io::Write};
 
 use crate::utils::server::TestServiceServer;
@@ -6,7 +7,7 @@ use anyhow::Result;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use nexus_common::models::{file::FileDetails, traits::Collection};
-use nexus_common::utils::test_utils::default_ingestor_tests;
+use nexus_common::utils::test_utils::NoIngestion;
 use nexus_common::RateLimitConfig;
 use nexus_webapi::media::test_utils::default_subprocess_tests;
 use nexus_webapi::media::MediaPermits;
@@ -136,7 +137,7 @@ async fn test_static_serving_at_capacity_returns_503() -> Result<()> {
     // Zero permits: a pool that can never grant one sheds with AtCapacity immediately.
     let state = AppState::new(
         files_dir.path().to_path_buf(),
-        default_ingestor_tests(),
+        Arc::new(NoIngestion),
         MediaPermits::new(0),
         default_subprocess_tests(),
     );
