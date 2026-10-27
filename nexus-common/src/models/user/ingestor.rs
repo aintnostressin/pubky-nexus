@@ -341,6 +341,40 @@ mod tests {
             "a record naming no homeserver marks the mapping stale"
         );
 
+        let recheck = UserIngestor::new([], Arc::new(NoRecordResolver))
+            .recheck_user(&user_id)
+            .await?;
+        assert_eq!(
+            recheck,
+            Some(HomeserverRecheck {
+                homeserver: Some(hs_b.to_string()),
+                outcome: RecheckOutcome::Kept,
+            })
+        );
+        let mapping = get_user_homeserver(user_id.as_ref()).await?.expect("bound");
+        assert_eq!(
+            (mapping.stale, mapping.record_ts),
+            (true, Some(25)),
+            "no record leaves a stale mapping stale"
+        );
+
+        let recheck = ingestor(vec![], Some(&hs_a), 5)
+            .recheck_user(&user_id)
+            .await?;
+        assert_eq!(
+            recheck,
+            Some(HomeserverRecheck {
+                homeserver: Some(hs_b.to_string()),
+                outcome: RecheckOutcome::Ignored,
+            })
+        );
+        let mapping = get_user_homeserver(user_id.as_ref()).await?.expect("bound");
+        assert_eq!(
+            (mapping.stale, mapping.record_ts),
+            (true, Some(25)),
+            "an older record leaves a stale mapping stale"
+        );
+
         let refused = ingestor(vec![hs_a.clone()], Some(&hs_a), 30)
             .recheck_user(&user_id)
             .await
