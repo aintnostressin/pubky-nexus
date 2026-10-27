@@ -1,12 +1,17 @@
+use std::future::Future;
 use std::sync::Arc;
 
 use pubky_app_specs::{ParsedUri, PubkyId};
 
-use super::{PkdnsHomeserverResolver, StoredRecord};
+use super::{PkdnsHomeserverResolver, PkdnsRecord};
+use crate::db::PubkyClientResult;
 use crate::models::error::{ModelError, ModelResult};
 use crate::models::homeserver::HsBlacklist;
 use crate::models::traits::Collection;
-use crate::models::user::{set_user_homeserver_from_record, UserDetails, UserHsCursor};
+use crate::models::user::{
+    get_user_homeserver, set_user_homeserver_from_record, HomeserverRecheck, MappingUpdate,
+    RecheckOutcome, StaleMapping, UserDetails, UserHsCursor,
+};
 use crate::StackConfig;
 
 /// Ingests previously-unknown users unless their HS is blacklisted.
@@ -66,18 +71,20 @@ impl UserIngestor {
         &self,
         user_id: &PubkyId,
     ) -> ModelResult<Option<String>> {
-        Ok(self
-            .resolve_unless_blacklisted(user_id)
-            .await?
-            .map(|(hs_id, _)| hs_id))
+        let user_pk = user_id.to_public_key();
+        let record = self
+            .resolve_unless_blacklisted(user_id, self.resolver.resolve_own_record(&user_pk))
+            .await?;
+        Ok(record.homeserver().map(|hs_id| hs_id.to_string()))
     }
 
-    /// The user's published HS and the record naming it, unless the user's own
-    /// key or that HS is blacklisted. `None` when the user publishes no HS.
+    /// `lookup`'s record for `user_id`, refused if the user's own key or the
+    /// HS the record names is blacklisted.
     async fn resolve_unless_blacklisted(
         &self,
         user_id: &PubkyId,
-    ) -> ModelResult<Option<(String, StoredRecord)>> {
+        lookup: impl Future<Output = PubkyClientResult<PkdnsRecord>>,
+    ) -> ModelResult<PkdnsRecord> {
         // `user_id` may itself be an HS PK (e.g. a file `src` of the form
         // `pubky://<hs_pk>/...` that addresses the HS directly). The resolver
         // returns no HS for an HS PK, so without this self-check a blacklisted HS
@@ -88,21 +95,16 @@ impl UserIngestor {
             });
         }
 
-        let record = self
-            .resolver
-            .resolve_own_record(&user_id.to_public_key())
-            .await
-            .map_err(ModelError::from_generic)?;
-        let (Some(stored), Some(hs_pk)) = (record.stored(), record.homeserver()) else {
-            return Ok(None);
-        };
-
-        let hs_id = hs_pk.to_string();
-        if self.hs_blacklist.is_blacklisted(&hs_id) {
-            return Err(ModelError::HsBlacklisted { hs_id });
+        let record = lookup.await.map_err(ModelError::from_generic)?;
+        if let Some(hs_id) = record.homeserver() {
+            if self.hs_blacklist.is_blacklisted(hs_id.as_ref()) {
+                return Err(ModelError::HsBlacklisted {
+                    hs_id: hs_id.to_string(),
+                });
+            }
         }
 
-        Ok(Some((hs_id, stored)))
+        Ok(record)
     }
 
     /// Resolves and persists a previously-unknown user.
@@ -116,15 +118,17 @@ impl UserIngestor {
             return Ok(());
         }
 
-        let resolved = self
-            .resolve_unless_blacklisted(user_id)
+        let user_pk = user_id.to_public_key();
+        let record = self
+            .resolve_unless_blacklisted(user_id, self.resolver.resolve_own_record(&user_pk))
             .await
             .inspect_err(|e| tracing::warn!("Aborting ingestion of {user_id}: {e}"))?;
 
-        let Some((hs_id, record)) = resolved else {
+        let (Some(record), Some(hs_pk)) = (record.stored(), record.homeserver()) else {
             tracing::warn!("Skipping ingestion: {user_id} has no published HS or is an HS PK");
             return Ok(());
         };
+        let hs_id = hs_pk.to_string();
 
         let user_details = UserDetails::from_pubky(user_id.clone());
 
@@ -144,6 +148,41 @@ impl UserIngestor {
 
         Ok(())
     }
+
+    /// Re-checks a known user's homeserver against the network, asking for the
+    /// newest record, and follows it: a record naming another homeserver moves
+    /// the mapping there, as the sweep does with stale mapping disabled, and a
+    /// record older than the one the mapping was applied from is ignored.
+    ///
+    /// Returns `None` for a user nexus does not know; ingest them instead.
+    ///
+    /// Returns [`ModelError::HsBlacklisted`] if the published HS is blacklisted.
+    #[tracing::instrument(name = "user.recheck", skip_all)]
+    pub async fn recheck_user(&self, user_id: &PubkyId) -> ModelResult<Option<HomeserverRecheck>> {
+        let user_id_str = user_id.to_string();
+        if UserDetails::get_by_id(&user_id_str).await?.is_none() {
+            tracing::debug!("Skipping recheck: {user_id_str} unknown");
+            return Ok(None);
+        }
+
+        let user_pk = user_id.to_public_key();
+        let record = self
+            .resolve_unless_blacklisted(user_id, self.resolver.resolve_record_fresh(&user_pk))
+            .await
+            .inspect_err(|e| tracing::warn!("Aborting recheck of {user_id}: {e}"))?;
+
+        let stored = get_user_homeserver(&user_id_str).await?;
+        let update = MappingUpdate::decide(stored.as_ref(), &record, StaleMapping::Disabled);
+        update.apply(&user_id_str, record.stored().as_ref()).await?;
+        if let Some(hs_id) = update.bound_to() {
+            UserHsCursor::init(user_id, hs_id).await?;
+        }
+
+        Ok(Some(HomeserverRecheck {
+            homeserver: update.homeserver_after(stored.as_ref()),
+            outcome: RecheckOutcome::from(&update),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -154,14 +193,16 @@ mod tests {
     use crate::db::{
         exec_single_row, fetch_row_from_graph, graph::Query, queries, PubkyClientResult,
     };
-    use crate::models::user::PkdnsRecord;
+    use crate::models::user::StoredRecord;
     use crate::utils::test_utils::{random_pubky_id, signed_packet_naming};
     use crate::{types::DynError, StackConfig, StackManager};
 
-    /// Answers every lookup with `keypair`'s own record naming one homeserver.
+    /// Answers every lookup with `keypair`'s own record naming one homeserver,
+    /// authored at `timestamp`.
     struct SigningResolver {
         keypair: Keypair,
         homeserver: PubkyId,
+        timestamp: u64,
     }
 
     #[async_trait::async_trait]
@@ -170,9 +211,85 @@ mod tests {
             Ok(PkdnsRecord::Published(signed_packet_naming(
                 &self.keypair,
                 Some(&self.homeserver),
-                7,
+                self.timestamp,
             )))
         }
+    }
+
+    /// A recheck follows the newest record: a record naming another homeserver
+    /// moves a known user there, with a cursor on the new homeserver; a record
+    /// older than the one applied is ignored; a blacklisted homeserver is
+    /// refused; an unknown user is not rechecked.
+    #[tokio_shared_rt::test(shared)]
+    async fn recheck_follows_the_newest_record() -> Result<(), DynError> {
+        StackManager::setup(&StackConfig::default()).await?;
+        let user = Keypair::random();
+        let user_id = PubkyId::from(user.public_key());
+        let (hs_a, hs_b) = (random_pubky_id(), random_pubky_id());
+        let ingestor = |blacklist: Vec<PubkyId>, homeserver: &PubkyId, timestamp| {
+            UserIngestor::new(
+                blacklist,
+                Arc::new(SigningResolver {
+                    keypair: user.clone(),
+                    homeserver: homeserver.clone(),
+                    timestamp,
+                }),
+            )
+        };
+
+        assert_eq!(
+            ingestor(vec![], &hs_a, 10).recheck_user(&user_id).await?,
+            None
+        );
+        ingestor(vec![], &hs_a, 10)
+            .maybe_ingest_user(&user_id)
+            .await?;
+
+        let recheck = ingestor(vec![], &hs_b, 20).recheck_user(&user_id).await?;
+        assert_eq!(
+            recheck,
+            Some(HomeserverRecheck {
+                homeserver: Some(hs_b.to_string()),
+                outcome: RecheckOutcome::Switched,
+            })
+        );
+        let mapping = get_user_homeserver(user_id.as_ref()).await?.expect("bound");
+        assert_eq!(
+            (mapping.hs_id.as_str(), mapping.stale, mapping.record_ts),
+            (hs_b.as_ref(), false, Some(20))
+        );
+        assert_eq!(
+            UserHsCursor::read(&[user_id.as_ref()], hs_b.as_ref()).await?,
+            vec![0],
+            "a cursor on the new homeserver"
+        );
+
+        let recheck = ingestor(vec![], &hs_a, 5).recheck_user(&user_id).await?;
+        assert_eq!(
+            recheck,
+            Some(HomeserverRecheck {
+                homeserver: Some(hs_b.to_string()),
+                outcome: RecheckOutcome::Ignored,
+            })
+        );
+
+        let refused = ingestor(vec![hs_a.clone()], &hs_a, 30)
+            .recheck_user(&user_id)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, ModelError::HsBlacklisted { hs_id } if hs_id == hs_a.to_string())
+        );
+        assert_eq!(
+            get_user_homeserver(user_id.as_ref())
+                .await?
+                .map(|m| m.hs_id),
+            Some(hs_b.to_string()),
+            "a refused recheck changes nothing"
+        );
+
+        exec_single_row(queries::del::delete_user(user_id.as_ref())).await?;
+        Ok(())
     }
 
     /// A newly seen user is bound from the record just resolved, which stays on
@@ -188,6 +305,7 @@ mod tests {
             Arc::new(SigningResolver {
                 keypair: user,
                 homeserver: homeserver.clone(),
+                timestamp: 7,
             }),
         );
 
@@ -231,6 +349,7 @@ mod tests {
             Arc::new(SigningResolver {
                 keypair: user.clone(),
                 homeserver: blacklisted.clone(),
+                timestamp: 1,
             }),
         );
         let err = refusing
@@ -246,6 +365,7 @@ mod tests {
             Arc::new(SigningResolver {
                 keypair: user,
                 homeserver: allowed.clone(),
+                timestamp: 1,
             }),
         );
         let hs_id = accepting.ensure_hs_not_blacklisted(&user_id).await.unwrap();
@@ -262,6 +382,7 @@ mod tests {
             Arc::new(SigningResolver {
                 keypair: Keypair::random(),
                 homeserver: random_pubky_id(),
+                timestamp: 1,
             }),
         );
 

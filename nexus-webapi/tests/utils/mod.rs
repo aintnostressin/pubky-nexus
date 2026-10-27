@@ -41,6 +41,23 @@ pub async fn post_request(endpoint: &str, data: Value) -> Result<Value, httpc_te
     Ok(body)
 }
 
+pub async fn invalid_put_request(
+    endpoint: &str,
+    data: Value,
+    error_code: StatusCode,
+) -> Result<Value, httpc_test::Error> {
+    let url = host_url().await;
+    let full_endpoint = format!("{url}{endpoint}");
+    let body = inner_make_request(
+        &full_endpoint,
+        Some(Method::PUT),
+        Some(data),
+        Some(error_code),
+    )
+    .await?;
+    Ok(body)
+}
+
 pub async fn invalid_post_request(
     endpoint: &str,
     data: Value,

@@ -99,6 +99,14 @@ pub trait PkdnsHomeserverResolver: Send + Sync {
     /// Looks up the PKDNS record of `user_pk`.
     async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord>;
 
+    /// Like [`Self::resolve_record`], but asks every DHT node and relay for the newest
+    /// record instead of trusting a cache, which is what a check made because something
+    /// changed has to do. A resolver without a cache has nothing fresher to answer with, so
+    /// by default it answers as [`Self::resolve_record`] does.
+    async fn resolve_record_fresh(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        self.resolve_record(user_pk).await
+    }
+
     /// Looks up the PKDNS record of `user_pk`, refusing a packet nexus cannot
     /// apply:
     /// - One signed by another key fails the lookup. pkarr 6.0.1 on mainline
@@ -144,6 +152,15 @@ pub async fn pkdns_record_of(pubky: &Pubky, user_pk: &PublicKey) -> PkdnsRecord 
     }
 }
 
+/// The newest PKDNS record of `user_pk` on the network, asked of every DHT node
+/// and relay, which also refreshes `pubky`'s pkarr cache with it.
+pub async fn pkdns_record_of_fresh(pubky: &Pubky, user_pk: &PublicKey) -> PkdnsRecord {
+    match pubky.client().pkarr().resolve_most_recent(user_pk).await {
+        Some(packet) => PkdnsRecord::Published(packet),
+        None => PkdnsRecord::Missing,
+    }
+}
+
 /// The homeserver a PKDNS record names: the target of its `_pubky` SVCB/HTTPS
 /// record, if that is a public key. Mirrors `Pubky::get_homeserver_of`, whose
 /// parsing the SDK does not export.
@@ -167,6 +184,11 @@ impl PkdnsHomeserverResolver for PubkyConnectorResolver {
     async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
         let pubky = PubkyConnector::get()?;
         Ok(pkdns_record_of(&pubky, user_pk).await)
+    }
+
+    async fn resolve_record_fresh(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        let pubky = PubkyConnector::get()?;
+        Ok(pkdns_record_of_fresh(&pubky, user_pk).await)
     }
 }
 

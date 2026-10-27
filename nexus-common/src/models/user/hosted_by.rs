@@ -8,7 +8,9 @@
 //! applied again, so a policy that follows records can act on a record the
 //! other policy only marked stale.
 
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
+use utoipa::ToSchema;
 
 use crate::db::{exec_single_row, fetch_row_from_graph, queries, GraphResult};
 use crate::models::user::{PkdnsRecord, StoredRecord};
@@ -232,6 +234,48 @@ pub async fn set_user_homeserver_stale(
         user_id, stale, record,
     ))
     .await
+}
+
+/// The result of re-checking a user's homeserver against the network.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct HomeserverRecheck {
+    /// The homeserver the user is bound to after the check, if any.
+    pub homeserver: Option<String>,
+    pub outcome: RecheckOutcome,
+}
+
+/// What a recheck did to the user's mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RecheckOutcome {
+    /// Nothing is published and the user has no mapping.
+    Unbound,
+    /// The user had no mapping and is now bound to the published homeserver.
+    Bound,
+    /// The published homeserver is the one the user was bound to.
+    Confirmed,
+    /// The mapping moved to the published homeserver.
+    Switched,
+    /// Nothing is published; the mapping was kept.
+    Kept,
+    /// The record found is older than the one the mapping was applied from;
+    /// the mapping was kept.
+    Ignored,
+}
+
+/// A recheck follows the record ([`StaleMapping::Disabled`]), so it never
+/// marks a mapping stale; should one arrive anyway, it reads as kept.
+impl From<&MappingUpdate> for RecheckOutcome {
+    fn from(update: &MappingUpdate) -> Self {
+        match update {
+            MappingUpdate::Unbound => Self::Unbound,
+            MappingUpdate::Bound { .. } => Self::Bound,
+            MappingUpdate::Confirmed { .. } => Self::Confirmed,
+            MappingUpdate::Switched { .. } => Self::Switched,
+            MappingUpdate::Kept { .. } | MappingUpdate::MarkedStale { .. } => Self::Kept,
+            MappingUpdate::IgnoredOlder { .. } => Self::Ignored,
+        }
+    }
 }
 
 #[cfg(test)]
