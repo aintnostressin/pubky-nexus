@@ -155,9 +155,8 @@ async fn sync_put_details(
         sync_collected_edges(&author_id, &post_id, &items, Some(&post_details)).await?;
     }
 
-    // SAVE TO INDEX - PHASE 1, update post counts
+    // SAVE TO INDEX - PHASE 1, seed the root post's engagement score
     // Replies are tracked via POST_REPLIES sets, not global engagement.
-    // TODO: Use SCARD on a set for unique tag count to avoid race conditions in parallel processing
     if !is_reply {
         PostStream::add_to_engagement_sorted_set(&PostCounts::default(), &author_id, &post_id)
             .instrument(tracing::info_span!("index.write", phase = "post_counts"))
@@ -637,7 +636,7 @@ pub async fn sync_del(
     let is_reply =
         matches!(&post_relationships_opt, Some(relationship) if relationship.replied.is_some());
 
-    // DELETE TO INDEX - PHASE 1, decrease post counts
+    // DELETE TO INDEX - PHASE 1, remove the root post's engagement entry
     // Idempotent ZREM; only root posts are in the engagement sorted set.
     if !is_reply {
         PostStream::delete_from_engagement_sorted_set(&author_id, &post_id)
