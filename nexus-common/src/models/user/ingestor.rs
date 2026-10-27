@@ -192,8 +192,9 @@ mod tests {
 
     use super::*;
     use crate::db::{
-        exec_single_row, fetch_row_from_graph, graph::Query, queries, PubkyClientResult,
+        exec_single_row, fetch_row_from_graph, graph::Query, queries, PubkyClientResult, RedisOps,
     };
+    use crate::models::user::user_hs_cursor_key;
     use crate::utils::test_utils::{random_pubky_id, signed_packet_naming};
     use crate::{types::DynError, StackConfig, StackManager};
 
@@ -287,9 +288,14 @@ mod tests {
             (hs_b.as_ref(), false, Some(20))
         );
         assert_eq!(
-            UserHsCursor::read(&[user_id.as_ref()], hs_b.as_ref()).await?,
-            vec![0],
-            "a cursor on the new homeserver"
+            UserDetails::check_sorted_set_member(
+                None,
+                &user_hs_cursor_key(user_id.as_ref()),
+                &[hs_b.as_ref()]
+            )
+            .await?,
+            Some(0),
+            "a cursor seeded on the new homeserver"
         );
 
         let recheck = ingestor(vec![], Some(&hs_a), 5)
