@@ -98,11 +98,11 @@ pub async fn recheck_user_handler(
 pub struct BootstrapApiDoc;
 
 pub fn expensive_routes() -> Router<AppState> {
-    Router::new().route(BOOTSTRAP_ROUTE, get(bootstrap_handler))
+    Router::new()
+        .route(BOOTSTRAP_ROUTE, get(bootstrap_handler))
+        .route(RECHECK_USER_ROUTE, put(recheck_user_handler))
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route(INGEST_USER_ROUTE, put(ingest_user_handler))
-        .route(RECHECK_USER_ROUTE, put(recheck_user_handler))
+    Router::new().route(INGEST_USER_ROUTE, put(ingest_user_handler))
 }
