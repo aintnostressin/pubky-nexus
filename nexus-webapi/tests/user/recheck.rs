@@ -11,7 +11,13 @@ async fn test_recheck_unknown_user_is_not_found() -> Result<()> {
     let user_id = random_pubky_id();
     let url_path = RECHECK_USER_ROUTE.replace("{user_id}", user_id.as_ref());
 
-    invalid_put_request(&url_path, Value::Null, StatusCode::NOT_FOUND).await?;
+    let body = invalid_put_request(&url_path, Value::Null, StatusCode::NOT_FOUND).await?;
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("User not found")),
+        "the handler's payload, not an unrouted 404: {body}"
+    );
 
     Ok(())
 }
