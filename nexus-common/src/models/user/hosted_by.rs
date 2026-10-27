@@ -453,6 +453,48 @@ mod tests {
         );
     }
 
+    /// The API's outcome strings are part of its contract; pin them per update.
+    #[test]
+    fn recheck_outcome_strings_follow_the_update() {
+        use MappingUpdate::*;
+
+        let cases = [
+            (Unbound, "unbound"),
+            (Bound { to: "b".into() }, "bound"),
+            (Confirmed { was_stale: true }, "confirmed"),
+            (
+                MarkedStale {
+                    reason: StaleReason::Unresolved,
+                    was_stale: false,
+                },
+                "unpublished",
+            ),
+            (
+                Switched {
+                    from: "a".into(),
+                    to: "b".into(),
+                    was_stale: false,
+                },
+                "switched",
+            ),
+            (NoRecord { was_stale: true }, "kept"),
+            (
+                IgnoredOlder {
+                    was_stale: false,
+                    names_homeserver: true,
+                },
+                "ignored",
+            ),
+        ];
+        for (update, expected) in cases {
+            assert_eq!(
+                serde_json::to_value(RecheckOutcome::from(&update)).expect("serialises"),
+                serde_json::json!(expected),
+                "{update:?}"
+            );
+        }
+    }
+
     /// After an update the user is bound to the homeserver it bound, or to
     /// the stored one when it kept it, or to none.
     #[test]
