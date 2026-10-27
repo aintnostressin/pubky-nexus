@@ -152,7 +152,7 @@ impl UserIngestor {
 
     /// Re-checks a known user's homeserver against the network, asking for the
     /// newest record, and follows it: a record naming another homeserver moves
-    /// the mapping there, as the sweep does with stale mapping disabled, and a
+    /// the mapping there, as `StaleMapping::Disabled` does, and a
     /// record older than the one the mapping was applied from is ignored.
     ///
     /// Returns `None` for a user nexus does not know; ingest them instead.
