@@ -231,6 +231,24 @@ mod tests {
         }
     }
 
+    /// Answers the cache-first lookup with one record and the fresh one with
+    /// another, as a pkarr cache behind the network does.
+    struct TwoAnswersResolver {
+        cached: PkdnsRecord,
+        fresh: PkdnsRecord,
+    }
+
+    #[async_trait::async_trait]
+    impl PkdnsHomeserverResolver for TwoAnswersResolver {
+        async fn resolve_record(&self, _: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+            Ok(self.cached.clone())
+        }
+
+        async fn resolve_record_fresh(&self, _: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+            Ok(self.fresh.clone())
+        }
+    }
+
     /// Finds no record for anyone.
     struct NoRecordResolver;
 
@@ -433,6 +451,44 @@ mod tests {
         assert_eq!(
             PkdnsRecord::Published(packet).homeserver(),
             Some(homeserver)
+        );
+
+        exec_single_row(queries::del::delete_user(user_id.as_ref())).await?;
+        Ok(())
+    }
+
+    /// A recheck asks the network for the newest record, not the cache: the
+    /// cached record still names the old homeserver, the fresh one the new.
+    #[tokio_shared_rt::test(shared)]
+    async fn recheck_asks_for_the_newest_record() -> Result<(), DynError> {
+        StackManager::setup(&StackConfig::default()).await?;
+        let user = Keypair::random();
+        let user_id = PubkyId::from(user.public_key());
+        let (hs_a, hs_b) = (random_pubky_id(), random_pubky_id());
+        UserIngestor::new(
+            [],
+            Arc::new(SigningResolver {
+                keypair: Keypair::random(),
+                homeserver: Some(hs_a.clone()),
+                timestamp: 10,
+            }),
+        )
+        .maybe_ingest_user(&user_id)
+        .await?;
+
+        let resolver = TwoAnswersResolver {
+            cached: PkdnsRecord::Published(signed_packet_naming(&user, Some(&hs_a), 10)),
+            fresh: PkdnsRecord::Published(signed_packet_naming(&user, Some(&hs_b), 20)),
+        };
+        let recheck = UserIngestor::new([], Arc::new(resolver))
+            .recheck_user(&user_id)
+            .await?;
+        assert_eq!(
+            recheck,
+            Some(HomeserverRecheck {
+                homeserver: Some(hs_b.to_string()),
+                outcome: RecheckOutcome::Switched,
+            })
         );
 
         exec_single_row(queries::del::delete_user(user_id.as_ref())).await?;
