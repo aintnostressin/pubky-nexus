@@ -1,10 +1,31 @@
 //! A user's `HOSTED_BY` binding and how a resolved `_pubky` record is applied
 //! to it: decided by [`MappingUpdate::decide`], written by [`MappingUpdate::apply`].
+//! Shared by the watcher's periodic sweep and the API's recheck.
+//!
+//! The record a mapping was last applied from is kept on the edge, and a
+//! record older than it is a replay or a lagging answer: it changes nothing,
+//! whatever it names and whatever the policy. The same record seen again is
+//! applied again, so a policy that follows records can act on a record the
+//! other policy only marked stale.
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::db::{exec_single_row, fetch_row_from_graph, queries, GraphResult};
 use crate::models::user::{PkdnsRecord, StoredRecord};
+
+/// What happens to a bound user whose record no longer names the stored
+/// homeserver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StaleMapping {
+    /// Keep the mapping and mark it `stale`: the user is indexed nowhere until
+    /// the record names the stored homeserver again. The default.
+    #[default]
+    Enabled,
+    /// Follow the record: a record naming another homeserver moves the mapping
+    /// there, a record naming none keeps it. A stale flag left from before is
+    /// cleared either way.
+    Disabled,
+}
 
 /// Why a mapping was marked stale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +41,8 @@ pub enum StaleReason {
 pub struct HomeserverMapping {
     pub hs_id: String,
     pub stale: bool,
+    /// The timestamp of the record the mapping was last applied from, if any.
+    pub record_ts: Option<i64>,
 }
 
 /// What a resolved record does to the stored mapping.
@@ -32,16 +55,36 @@ pub enum MappingUpdate {
     /// The published homeserver is the stored one; the stale flag is cleared.
     Confirmed { was_stale: bool },
     /// The published homeserver is missing or another one; the mapping is kept
-    /// and marked stale.
+    /// and marked stale ([`StaleMapping::Enabled`]).
     MarkedStale {
         reason: StaleReason,
         was_stale: bool,
     },
+    /// The mapping moved to the published homeserver ([`StaleMapping::Disabled`]).
+    Switched {
+        from: String,
+        to: String,
+        was_stale: bool,
+    },
+    /// Nothing published; the mapping is kept and the stale flag cleared
+    /// ([`StaleMapping::Disabled`]).
+    Kept { was_stale: bool },
+    /// The record is older than the one the mapping was applied from; the
+    /// mapping, its flag and its record stand.
+    IgnoredOlder {
+        was_stale: bool,
+        /// Whether the ignored record named a homeserver.
+        names_homeserver: bool,
+    },
 }
 
 impl MappingUpdate {
-    /// What the record does to the stored mapping.
-    pub fn decide(stored: Option<&HomeserverMapping>, record: &PkdnsRecord) -> Self {
+    /// What the record does to the stored mapping under `stale_mapping`.
+    pub fn decide(
+        stored: Option<&HomeserverMapping>,
+        record: &PkdnsRecord,
+        stale_mapping: StaleMapping,
+    ) -> Self {
         let resolved = record.homeserver();
         let Some(stored) = stored else {
             return match resolved {
@@ -52,21 +95,36 @@ impl MappingUpdate {
             };
         };
         let was_stale = stored.stale;
-        match resolved {
-            Some(hs_id) if hs_id.as_ref() == stored.hs_id => Self::Confirmed { was_stale },
-            resolved => Self::MarkedStale {
+        if let (Some(clock), Some(timestamp)) = (stored.record_ts, record.timestamp()) {
+            if timestamp < clock {
+                return Self::IgnoredOlder {
+                    was_stale,
+                    names_homeserver: resolved.is_some(),
+                };
+            }
+        }
+        match (resolved, stale_mapping) {
+            (Some(hs_id), _) if hs_id.as_ref() == stored.hs_id => Self::Confirmed { was_stale },
+            (resolved, StaleMapping::Enabled) => Self::MarkedStale {
                 reason: match resolved {
                     None => StaleReason::Unresolved,
                     Some(_) => StaleReason::HsChanged,
                 },
                 was_stale,
             },
+            (Some(hs_id), StaleMapping::Disabled) => Self::Switched {
+                from: stored.hs_id.clone(),
+                to: hs_id.to_string(),
+                was_stale,
+            },
+            (None, StaleMapping::Disabled) => Self::Kept { was_stale },
         }
     }
 
     /// Writes the update to `user_id`'s mapping, keeping `record`, the record
-    /// it was decided from, on the edge when there is one. The user node must
-    /// exist. Every variant but [`Self::Unbound`] refreshes `resolved_at`.
+    /// it was decided from, on the edge when the update applied it. The user
+    /// node must exist. Every variant but [`Self::Unbound`] refreshes
+    /// `resolved_at`.
     pub async fn apply(&self, user_id: &str, record: Option<&StoredRecord>) -> GraphResult<()> {
         match self {
             Self::Unbound => Ok(()),
@@ -79,9 +137,46 @@ impl MappingUpdate {
                 set_user_homeserver_stale(user_id, false, record).await
             }
             Self::MarkedStale { reason, .. } => {
-                warn!(%user_id, ?reason, "User homeserver changed or was removed; switching unsupported, mapping marked stale");
+                warn!(%user_id, ?reason, "User homeserver changed or was removed; switching disabled, mapping marked stale");
                 set_user_homeserver_stale(user_id, true, record).await
             }
+            Self::Switched { from, to, .. } => {
+                info!(%user_id, %from, %to, "User published another homeserver; HS mapping switched");
+                exec_single_row(queries::put::set_user_homeserver(user_id, to, record)).await
+            }
+            Self::Kept { .. } => {
+                debug!(%user_id, "PKDNS returned no homeserver; HS mapping kept");
+                set_user_homeserver_stale(user_id, false, record).await
+            }
+            Self::IgnoredOlder { was_stale, .. } => {
+                warn!(%user_id, "PKDNS record is older than the one applied; ignored");
+                set_user_homeserver_stale(user_id, *was_stale, None).await
+            }
+        }
+    }
+
+    /// The homeserver the user is bound to once the update is applied to
+    /// `stored`, if any.
+    pub fn homeserver_after(&self, stored: Option<&HomeserverMapping>) -> Option<String> {
+        match self {
+            Self::Bound { to } | Self::Switched { to, .. } => Some(to.clone()),
+            Self::Unbound => None,
+            Self::Confirmed { .. }
+            | Self::MarkedStale { .. }
+            | Self::Kept { .. }
+            | Self::IgnoredOlder { .. } => stored.map(|mapping| mapping.hs_id.clone()),
+        }
+    }
+
+    /// The homeserver the update binds the user to, when it binds one.
+    pub fn bound_to(&self) -> Option<&str> {
+        match self {
+            Self::Bound { to } | Self::Switched { to, .. } => Some(to),
+            Self::Unbound
+            | Self::Confirmed { .. }
+            | Self::MarkedStale { .. }
+            | Self::Kept { .. }
+            | Self::IgnoredOlder { .. } => None,
         }
     }
 }
@@ -95,6 +190,7 @@ pub async fn get_user_homeserver(user_id: &str) -> GraphResult<Option<Homeserver
     Ok(Some(HomeserverMapping {
         hs_id: row.get("homeserver_id")?,
         stale: row.get("stale")?,
+        record_ts: row.get("record_ts")?,
     }))
 }
 
@@ -144,59 +240,232 @@ mod tests {
     use crate::utils::test_utils::{random_pubky_id, signed_packet_naming};
     use pubky::Keypair;
 
-    /// Every combination of stored mapping and record maps to one update.
+    /// Every combination of stored mapping, record and policy maps to one
+    /// update, and the policy only matters when the record and the stored
+    /// mapping disagree.
     #[test]
     fn decide_covers_every_case() {
         use MappingUpdate::*;
+        use StaleMapping::{Disabled, Enabled};
         use StaleReason::{HsChanged, Unresolved};
 
         let (a, b) = (random_pubky_id(), random_pubky_id());
         let user = Keypair::random();
-        let naming = |hs| PkdnsRecord::Published(signed_packet_naming(&user, Some(hs), 1));
-        let naming_none = || PkdnsRecord::Published(signed_packet_naming(&user, None, 1));
+        let naming = |hs| PkdnsRecord::Published(signed_packet_naming(&user, Some(hs), 10));
+        let naming_none = || PkdnsRecord::Published(signed_packet_naming(&user, None, 10));
         let on_a = |stale| HomeserverMapping {
             hs_id: a.to_string(),
             stale,
+            record_ts: None,
         };
         let marked_stale = |reason, was_stale| MarkedStale { reason, was_stale };
+        let switched = |was_stale| Switched {
+            from: a.to_string(),
+            to: b.to_string(),
+            was_stale,
+        };
         let cases = [
-            (None, PkdnsRecord::Missing, Unbound),
-            (None, naming_none(), Unbound),
-            (None, naming(&a), Bound { to: a.to_string() }),
+            (None, PkdnsRecord::Missing, Enabled, Unbound),
+            (None, naming_none(), Disabled, Unbound),
+            (None, naming(&a), Enabled, Bound { to: a.to_string() }),
+            (None, naming(&a), Disabled, Bound { to: a.to_string() }),
             (
                 Some(on_a(false)),
                 naming(&a),
+                Enabled,
                 Confirmed { was_stale: false },
             ),
-            (Some(on_a(true)), naming(&a), Confirmed { was_stale: true }),
+            (
+                Some(on_a(true)),
+                naming(&a),
+                Disabled,
+                Confirmed { was_stale: true },
+            ),
             (
                 Some(on_a(false)),
                 naming(&b),
+                Enabled,
                 marked_stale(HsChanged, false),
             ),
-            (Some(on_a(true)), naming(&b), marked_stale(HsChanged, true)),
             (
-                Some(on_a(false)),
+                Some(on_a(true)),
                 naming_none(),
-                marked_stale(Unresolved, false),
+                Enabled,
+                marked_stale(Unresolved, true),
             ),
             (
                 Some(on_a(false)),
                 PkdnsRecord::Missing,
+                Enabled,
                 marked_stale(Unresolved, false),
+            ),
+            (Some(on_a(false)), naming(&b), Disabled, switched(false)),
+            (Some(on_a(true)), naming(&b), Disabled, switched(true)),
+            (
+                Some(on_a(false)),
+                naming_none(),
+                Disabled,
+                Kept { was_stale: false },
             ),
             (
                 Some(on_a(true)),
                 PkdnsRecord::Missing,
-                marked_stale(Unresolved, true),
+                Disabled,
+                Kept { was_stale: true },
             ),
         ];
-        for (stored, record, expected) in cases {
+        for (stored, record, policy, expected) in cases {
             assert_eq!(
-                MappingUpdate::decide(stored.as_ref(), &record),
+                MappingUpdate::decide(stored.as_ref(), &record, policy),
                 expected,
-                "stored {stored:?}, record names {:?}",
+                "stored {stored:?}, record names {:?}, {policy:?}",
                 record.homeserver()
+            );
+        }
+    }
+
+    /// A record older than the one the mapping was applied from is ignored
+    /// under both policies, whatever it names; the same record again, or a
+    /// newer one, is applied. A mapping without a clock takes any record.
+    #[test]
+    fn decide_ignores_records_older_than_the_applied_one() {
+        use MappingUpdate::*;
+        use StaleMapping::{Disabled, Enabled};
+
+        let (a, b) = (random_pubky_id(), random_pubky_id());
+        let user = Keypair::random();
+        let naming =
+            |hs: Option<&_>, ts| PkdnsRecord::Published(signed_packet_naming(&user, hs, ts));
+        let on_a = |stale, record_ts| HomeserverMapping {
+            hs_id: a.to_string(),
+            stale,
+            record_ts,
+        };
+        let ignored = |was_stale, names_homeserver| IgnoredOlder {
+            was_stale,
+            names_homeserver,
+        };
+
+        for policy in [Enabled, Disabled] {
+            assert_eq!(
+                MappingUpdate::decide(Some(&on_a(false, Some(20))), &naming(Some(&b), 10), policy),
+                ignored(false, true),
+                "{policy:?}: an older record naming another homeserver"
+            );
+            assert_eq!(
+                MappingUpdate::decide(Some(&on_a(true, Some(20))), &naming(Some(&a), 10), policy),
+                ignored(true, true),
+                "{policy:?}: an older record naming the stored homeserver does not clear the flag"
+            );
+            assert_eq!(
+                MappingUpdate::decide(Some(&on_a(false, Some(20))), &naming(None, 10), policy),
+                ignored(false, false),
+                "{policy:?}: an older record naming none"
+            );
+            assert_eq!(
+                MappingUpdate::decide(Some(&on_a(false, Some(20))), &naming(Some(&a), 20), policy),
+                Confirmed { was_stale: false },
+                "{policy:?}: the applied record again"
+            );
+            assert_eq!(
+                MappingUpdate::decide(Some(&on_a(false, None)), &naming(Some(&a), 1), policy),
+                Confirmed { was_stale: false },
+                "{policy:?}: no clock takes any record"
+            );
+        }
+        assert_eq!(
+            MappingUpdate::decide(Some(&on_a(true, Some(20))), &naming(Some(&b), 20), Disabled),
+            Switched {
+                from: a.to_string(),
+                to: b.to_string(),
+                was_stale: true,
+            },
+            "a record the other policy only marked stale is followed"
+        );
+        assert_eq!(
+            MappingUpdate::decide(
+                Some(&on_a(false, Some(20))),
+                &naming(Some(&b), 30),
+                Disabled
+            ),
+            Switched {
+                from: a.to_string(),
+                to: b.to_string(),
+                was_stale: false,
+            },
+            "a newer record naming another homeserver"
+        );
+        assert_eq!(
+            MappingUpdate::decide(
+                Some(&on_a(false, Some(20))),
+                &PkdnsRecord::Missing,
+                Disabled
+            ),
+            Kept { was_stale: false },
+            "a missing record cannot be dated"
+        );
+    }
+
+    /// After an update the user is bound to the homeserver it bound, or to
+    /// the stored one when it kept it, or to none.
+    #[test]
+    fn homeserver_after_follows_the_update() {
+        use MappingUpdate::*;
+
+        let (a, b) = (random_pubky_id(), random_pubky_id());
+        let on_a = Some(HomeserverMapping {
+            hs_id: a.to_string(),
+            stale: false,
+            record_ts: Some(1),
+        });
+        let cases = [
+            (Unbound, None, None),
+            (Bound { to: b.to_string() }, None, Some(b.to_string())),
+            (
+                Confirmed { was_stale: false },
+                on_a.clone(),
+                Some(a.to_string()),
+            ),
+            (
+                MarkedStale {
+                    reason: StaleReason::Unresolved,
+                    was_stale: true,
+                },
+                on_a.clone(),
+                Some(a.to_string()),
+            ),
+            (
+                Switched {
+                    from: a.to_string(),
+                    to: b.to_string(),
+                    was_stale: false,
+                },
+                on_a.clone(),
+                Some(b.to_string()),
+            ),
+            (Kept { was_stale: true }, on_a.clone(), Some(a.to_string())),
+            (
+                IgnoredOlder {
+                    was_stale: false,
+                    names_homeserver: true,
+                },
+                on_a.clone(),
+                Some(a.to_string()),
+            ),
+        ];
+        for (update, stored, expected) in cases {
+            assert_eq!(
+                update.homeserver_after(stored.as_ref()),
+                expected,
+                "{update:?}"
+            );
+            assert_eq!(
+                update.bound_to().map(str::to_string),
+                match update {
+                    Bound { .. } | Switched { .. } => expected.clone(),
+                    _ => None,
+                },
+                "{update:?}"
             );
         }
     }
