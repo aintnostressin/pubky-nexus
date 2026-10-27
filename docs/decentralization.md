@@ -199,6 +199,22 @@ resolver run, preventing redundant PKDNS lookups.
 Higher → cheaper, but Nexus may keep pulling a user's events from an HS they have
 already left for up to ~`hs_resolver_ttl`.
 
+### Following records
+
+`StaleMapping` decides what the sweep does with a bound user whose record no
+longer names the stored homeserver. The default, `Enabled`, keeps today's
+behaviour: the mapping is marked `stale` and the user is indexed nowhere until
+the record names the stored homeserver again. `Disabled` follows the record: a
+record naming another homeserver moves the mapping there, a record naming none
+keeps it, and a stale flag left from before is cleared either way. The sweep has
+no configuration knob for it yet (`UserHsResolverRunner::with_stale_mapping`).
+
+Under both policies a record older than the one the mapping was applied from,
+by its timestamp against the edge's `record_ts`, is ignored: it is a replay or
+a lagging node's answer and changes nothing, whatever it names. The same record
+seen again is applied again, so a caller that follows records can act on a
+record the sweep only marked stale.
+
 ### Monitoring stale mappings
 
 When the resolver cannot reproduce a user's stored HS from PKDNS, it marks the
@@ -211,6 +227,8 @@ realigns. The resolver exports these metrics to catch this:
 | --- | --- | --- |
 | `nexus.task.hs-resolver.resolutions` | counter, labels `outcome`, `mapping` | One per user the resolver handled. `outcome`: `resolved` (PKDNS returned a HS), `unresolved` (PKDNS returned none; on pubky 0.9.3 DHT and relay failures also surface this way), `error` (the lookup failed, pubky 0.10+, or the graph read/update failed). `mapping`: the stored mapping's state before the resolution, `unbound` / `active` / `stale`, or `unknown` when a graph read or write failed (a Neo4j problem, also visible via `neo4j.query.errors`; deliberately outside the `mapping="active"` onset ratio). |
 | `nexus.task.hs-resolver.marked_stale` | counter, label `reason` | Users whose mapping flipped from active to stale. `unresolved`: PKDNS returned no HS. `hs_changed`: PKDNS returned a different HS. Already-stale users are not counted again. |
+| `nexus.task.hs-resolver.switched` | counter | Users whose mapping moved to the homeserver their record names (`StaleMapping::Disabled`). |
+| `nexus.task.hs-resolver.ignored_older_record` | counter | PKDNS records older than the one the mapping was applied from: replays or lagging answers, never applied. A steady trickle is normal on a DHT; a burst points at a node or relay serving old packets. |
 | `nexus.task.hs-resolver.mapped_users` | gauge | Non-deleted users with a `HOSTED_BY` mapping. Recorded on the first run after startup, then refreshed after every run that processed users. |
 | `nexus.task.hs-resolver.stale_users` | gauge | Subset of `mapped_users` whose mapping is currently stale. |
 | `nexus.task.hs-resolver.heartbeat_timestamp` | gauge, unit `s` | Unix time of the resolver's most recent progress: a user handled or a run finished. |
