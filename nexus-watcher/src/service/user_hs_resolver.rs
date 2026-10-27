@@ -471,20 +471,21 @@ async fn resolve_user(
 ) -> Result<Resolution, DynError> {
     let user_id = user_pk.z32();
 
-    // Read the mapping before the lookup, so a failed lookup can be attributed
-    // to the mapping state it would have affected.
-    let stored = get_user_homeserver(&user_id).await?;
-
     let record = match resolver.resolve_record(user_pk).await {
         Ok(record) => record,
         Err(e) => {
             warn!(%user_id, error = %e, "PKDNS lookup failed");
+            // Attributed to the mapping state it would have affected.
+            let stored = get_user_homeserver(&user_id).await?;
             return Ok(Resolution::LookupFailed {
                 mapping: MappingState::of(&stored),
             });
         }
     };
 
+    // Read after the lookup, which can take seconds: a recheck may have moved
+    // the mapping meanwhile, and the decision is made against what is there now.
+    let stored = get_user_homeserver(&user_id).await?;
     let update = MappingUpdate::decide(stored.as_ref(), &record, StaleMapping::Enabled);
     update.apply(&user_id, record.stored().as_ref()).await?;
     Ok(Resolution::Applied(update))
