@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use super::{Influencers, UserDetails, UserSearch, UserView};
+use super::{Influencers, StarterPackRank, UserDetails, UserSearch, UserView};
 
 use crate::db::graph::keyset_scan;
 use crate::db::kv::{sets, RedisError, RedisResult, SortOrder};
@@ -11,6 +11,7 @@ use crate::models::follow::{Followers, Following, Friends, UserFollows};
 use crate::models::post::{PostStream, POST_REPLIES_PER_POST_KEY_PARTS};
 use crate::types::{StreamReach, Timeframe, WotDepth};
 
+use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, PoisonError};
 use tracing::debug;
@@ -24,9 +25,11 @@ const MOST_FOLLOWED_PAGE_SIZE: usize = 500;
 static REBUILD_ON_MISS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub const USER_INFLUENCERS_KEY_PARTS: [&str; 2] = ["Users", "Influencers"];
 pub const CACHE_USER_RECOMMENDED_KEY_PARTS: [&str; 3] = ["Cache", "Users", "Recommended"];
-/// Keeps the per-label overfetch inside the graph query's own row cap, so a page is never
-/// silently short. A pack is an onboarding list, so paging this far is already meaningless.
+/// A pack is an onboarding list, so paging past this is meaningless.
 pub const STARTER_PACK_MAX_SKIP: usize = 100;
+/// Follows read to exclude from a pack, the cap `Friends` reads with. Without a limit, a follow
+/// set already in Redis is read only one short page deep.
+const STARTER_PACK_FOLLOWS_READ: usize = 10_000;
 // TTL, 12HR
 pub const CACHE_USER_RECOMMENDED_TTL: i64 = 12 * 60 * 60;
 
@@ -234,23 +237,30 @@ impl UserStream {
         skip: usize,
         limit: usize,
     ) -> ModelResult<Option<Vec<String>>> {
-        // Overfetch per label: without slack, an overlapping label's own people are never
-        // fetched. STARTER_PACK_MAX_SKIP keeps the result inside the query's own row cap.
-        let per_label = skip
-            .saturating_add(limit)
-            .saturating_mul(labels.len().max(1));
-        let query = queries::get::starter_pack_users(labels, user_id, since, per_label);
-
-        let mut by_label: HashMap<String, Vec<String>> = HashMap::new();
-        for row in fetch_all_rows_from_graph(query).await? {
-            by_label.insert(row.get("label")?, row.get("candidates")?);
-        }
-
-        // Labels come back in arbitrary order and an empty one is absent, so never zip.
-        // Taking each entry also collapses a repeated label.
-        let ranked = labels
+        // A repeated label must not buy a second turn in the round-robin.
+        let mut seen = HashSet::new();
+        let labels: Vec<&str> = labels
             .iter()
-            .filter_map(|label| by_label.remove(label))
+            .map(String::as_str)
+            .filter(|label| seen.insert(*label))
+            .collect();
+
+        let (ranks, excluded) = tokio::try_join!(
+            try_join_all(labels.into_iter().map(StarterPackRank::get_or_compute)),
+            Self::starter_pack_exclusions(user_id),
+        )?;
+
+        // A cached ranking depends on its label only, so activity and the subject apply here.
+        let ranked = ranks
+            .into_iter()
+            .map(|rank| {
+                rank.candidates
+                    .into_iter()
+                    .filter(|c| c.last_post_at.is_some_and(|at| at >= since))
+                    .map(|c| c.id)
+                    .filter(|id| !excluded.contains(id))
+                    .collect()
+            })
             .collect();
 
         let user_ids: Vec<String> = interleave_unique(ranked)
@@ -260,6 +270,21 @@ impl UserStream {
             .collect();
 
         Ok((!user_ids.is_empty()).then_some(user_ids))
+    }
+
+    /// The subject and everyone they follow. An id that is not indexed yet follows no one.
+    async fn starter_pack_exclusions(user_id: Option<&str>) -> ModelResult<HashSet<String>> {
+        let Some(user_id) = user_id else {
+            return Ok(HashSet::new());
+        };
+        let follows = Following::get_by_id(user_id, None, Some(STARTER_PACK_FOLLOWS_READ)).await?;
+        let mut excluded: HashSet<String> = follows
+            .map(|f| f.0)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        excluded.insert(user_id.to_string());
+        Ok(excluded)
     }
 
     /// Rebuilds the most-followed ranking from the graph, so its members and scores

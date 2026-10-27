@@ -203,3 +203,39 @@ pub fn bench_stream_user_ids_most_followed(c: &mut Criterion) {
         });
     });
 }
+
+pub fn bench_stream_user_ids_starter_pack(c: &mut Criterion) {
+    println!("******************************************************************************");
+    println!("Benchmarking the user id stream for a starter pack.");
+    println!("******************************************************************************");
+
+    run_setup();
+
+    let rt = Runtime::new().unwrap();
+    // Excluded from their own pack, with their follows.
+    let user_id = "4snwyct86m383rsduhw5xgcxpw7c63j3pq8x4ycqikxgik8y64ro";
+    // Mock labels whose candidates have the two endorsers a pack needs.
+    let labels = ["pubky", "opensource", "encryption"].map(String::from);
+
+    c.bench_function("stream_user_ids_starter_pack", |b| {
+        b.to_async(&rt).iter(|| async {
+            let user_ids = UserStream::get_user_list_from_source(UserStreamInput {
+                user_id: Some(user_id.to_string()),
+                skip: None,
+                limit: Some(20),
+                source: UserStreamSource::StarterPack,
+                reach: None,
+                timeframe: None,
+                preview: None,
+                author_id: None,
+                post_id: None,
+                tags: Some(labels.to_vec()),
+            })
+            .await
+            .unwrap()
+            .unwrap_or_default();
+            let user_id_stream = UserIdStream::new(user_ids);
+            std::hint::black_box(user_id_stream);
+        });
+    });
+}

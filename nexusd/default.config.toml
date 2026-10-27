@@ -202,6 +202,15 @@ slow_query_logging_threshold_ms = 100
 # TTL 24h.
 #cron = "0 47 3,15 * * *"    # at 03:47 and 15:47
 
+# Starter pack warmer: builds the `source=starter_pack` ranking of every this-month hot
+# tag, the labels onboarding offers, so the first person to pick one does not wait for it.
+# Off by default: a request builds a missing ranking itself. Run it a few minutes after
+# hot-tags-cache-this-month, whose labels it reads. A build that predates this job refuses
+# to start on an uncommented section.
+#[jobs.starter-pack-cache]
+# TTL 24h, and a tag with the label drops its ranking sooner.
+#cron = "0 35 3,15 * * *"    # at 03:35 and 15:35
+
 # The AllTime influencers ranking (`Sorted:Users:Influencers`), the default
 # `source=influencers` stream. It has no TTL and nothing else rescores it, so
 # this job runs once a day (at 02:04 UTC) with no section at all.

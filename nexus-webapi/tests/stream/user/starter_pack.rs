@@ -1,20 +1,26 @@
 //! `source=starter_pack`: people to follow for a set of interest tags.
 //!
-//! Fixtures are `wot.cypher`, where taggers carry trust (D1 0.4, D1B 0.1, D2 0.2) and SPAMMER
-//! has none. Ties break on endorser count then id, so `bitcoiner` is exactly:
+//! Fixtures are `wot.cypher`. Of the `bitcoiner` taggers only D1 (0.4), D2 (0.2) and D1B (0.1)
+//! carry trust, and nobody tagged them with the label, so each passes on their own trust split
+//! over their `bitcoiner` tags. A candidate needs two endorsers besides itself, so `bitcoiner` is
+//! exactly:
 //!
-//! | candidate | endorsers | trust |
-//! |-----------|-----------|-------|
-//! | BTC1      | D1 + D1B  | 0.5   |
-//! | BTC2      | D1        | 0.4   |
-//! | OBSERVER  | D1        | 0.4   |
-//! | BTC3      | D1B       | 0.1   |
-//! | SPAMMER   | itself    | 0.0   |
-//! | BTC5      | SPAMMER   | 0.0   |
+//! | candidate | endorsers   | trust passed on                     |
+//! |-----------|-------------|-------------------------------------|
+//! | BTC1      | D1, D1B, D2 | 0.4/3 + 0.1/2 + 0.2/3 = 0.25        |
+//! | BTC2      | D1, D2      | 0.4/3 + 0.2/3 = 0.2                 |
+//! | BTC3      | D1B, D2     | 0.1/2 + 0.2/3 = 0.117               |
+//! | OBSERVER  | D1          | dropped: one endorser               |
+//! | BTC5      | SPAMMER     | dropped: one endorser               |
+//! | SPAMMER   | BTC5        | dropped: its own tag does not count |
 
+use crate::utils::server::TestServiceServer;
 use crate::utils::{get_request, invalid_get_request};
 use anyhow::Result;
 use axum::http::StatusCode;
+use deadpool_redis::redis::AsyncCommands;
+use nexus_common::db::{get_redis_conn, RedisOps};
+use nexus_common::models::user::StarterPackRank;
 use nexus_webapi::models::ErrorResponsePayload;
 use serde_json::Value;
 
@@ -53,49 +59,44 @@ async fn bad_request(query: &str) -> Result<String> {
     Ok(payload.error)
 }
 
+/// Counting endorsers instead of trust would tie BTC2 and BTC3 and put BTC3 first on id.
 #[tokio_shared_rt::test(shared)]
-async fn test_starter_pack_ranks_by_summed_endorser_trust() -> Result<()> {
+async fn test_starter_pack_ranks_by_propagated_label_reputation() -> Result<()> {
     let ids = pack("tags=bitcoiner&limit=20").await?;
 
     assert_eq!(
         ids,
-        [BTC1, BTC2, OBSERVER, BTC3, SPAMMER, BTC5],
-        "candidates should rank by summed endorser trust, then endorser count, then id"
+        [BTC1, BTC2, BTC3],
+        "candidates should rank by the trust their endorsers pass on for the label"
     );
 
     Ok(())
 }
 
-/// Counting heads instead of trust would tie BTC2 and BTC3 and put BTC3 first on id.
+/// BTC5 tagged SPAMMER, so its self-tag is all that would make a second endorser.
 #[tokio_shared_rt::test(shared)]
-async fn test_starter_pack_prefers_a_trusted_endorser_over_a_weak_one() -> Result<()> {
+async fn test_starter_pack_ignores_a_self_tag() -> Result<()> {
     let ids = pack("tags=bitcoiner&limit=20").await?;
-    let rank = |id: &str| ids.iter().position(|c| c == id).expect("candidate present");
 
     assert!(
-        rank(BTC2) < rank(BTC3),
-        "a 0.4-trust endorsement should outrank a 0.1-trust one, got {ids:?}"
-    );
-    assert!(
-        rank(BTC3) < rank(BTC5),
-        "any trusted endorsement should outrank one from a rater with no score, got {ids:?}"
+        !ids.contains(&SPAMMER.to_string()),
+        "a self-tag should not count as an endorsement, got {ids:?}"
     );
 
     Ok(())
 }
 
-/// A self-tag is worth its author's own trust, and SPAMMER has none.
+/// D1 carries the most trust, so a lone endorsement that counted would rank OBSERVER high.
 #[tokio_shared_rt::test(shared)]
-async fn test_starter_pack_does_not_let_a_self_tag_mint_reputation() -> Result<()> {
+async fn test_starter_pack_needs_more_than_a_lone_endorsement() -> Result<()> {
     let ids = pack("tags=bitcoiner&limit=20").await?;
 
-    let rank = |id: &str| ids.iter().position(|c| c == id).expect("candidate present");
-
-    assert!(ids.contains(&SPAMMER.to_string()), "self-tags still count");
-    assert!(
-        rank(SPAMMER) > rank(BTC3),
-        "an untrusted self-tag should rank below every trusted endorsement, got {ids:?}"
-    );
+    for lone in [OBSERVER, BTC5] {
+        assert!(
+            !ids.contains(&lone.to_string()),
+            "{lone} has one endorser and should not be in the pack, got {ids:?}"
+        );
+    }
 
     Ok(())
 }
@@ -154,7 +155,7 @@ async fn test_starter_pack_excludes_deleted_users() -> Result<()> {
 /// The default window still asks that a candidate has posted at all.
 #[tokio_shared_rt::test(shared)]
 async fn test_starter_pack_excludes_accounts_that_never_posted() -> Result<()> {
-    let ids = pack("tags=satoshi&limit=20").await?;
+    let ids = pack("tags=packsilent&limit=20").await?;
 
     assert!(
         ids.is_empty(),
@@ -167,22 +168,22 @@ async fn test_starter_pack_excludes_accounts_that_never_posted() -> Result<()> {
 /// Pins the fallback that ships until the trust job runs, where every score is null.
 #[tokio_shared_rt::test(shared)]
 async fn test_starter_pack_orders_unscored_endorsements_deterministically() -> Result<()> {
-    let ids = pack("tags=bitcoiner&limit=20").await?;
-    let rank = |id: &str| ids.iter().position(|c| c == id).expect("candidate present");
+    let ids = pack("tags=packunscored&limit=20").await?;
 
-    assert!(
-        rank(SPAMMER) < rank(BTC5),
-        "candidates with no endorser trust should fall back to id order, got {ids:?}"
+    assert_eq!(
+        ids,
+        [BTC5, BTC4],
+        "candidates endorsed alike with no trust anywhere should fall back to id order"
     );
 
     Ok(())
 }
 
-/// A repeat must not buy a label two turns in the round-robin.
+/// A repeat must not buy a label two turns in the round-robin, which only shows next to another.
 #[tokio_shared_rt::test(shared)]
 async fn test_starter_pack_collapses_repeated_labels() -> Result<()> {
-    let once = pack("tags=bitcoiner&limit=20").await?;
-    let twice = pack("tags=bitcoiner,BITCOINER&limit=20").await?;
+    let once = pack("tags=bitcoiner,btc-dev&limit=20").await?;
+    let twice = pack("tags=bitcoiner,BITCOINER,btc-dev&limit=20").await?;
 
     assert_eq!(once, twice, "a repeated label should not change the pack");
 
@@ -343,10 +344,9 @@ async fn test_starter_pack_user_id_outranks_viewer_id() -> Result<()> {
     Ok(())
 }
 
-/// Past this the query cannot fetch enough candidates, so it must reject rather than return a
-/// short page.
+/// A pack is an onboarding list, so paging past 100 is rejected.
 #[tokio_shared_rt::test(shared)]
-async fn test_starter_pack_rejects_unpageable_skip() -> Result<()> {
+async fn test_starter_pack_rejects_a_deep_skip() -> Result<()> {
     let error = bad_request("source=starter_pack&tags=bitcoiner&skip=101").await?;
     assert!(
         error.contains("skip must be at most 100"),
@@ -380,6 +380,32 @@ async fn test_starter_pack_unknown_label_is_an_empty_pack() -> Result<()> {
     assert!(
         ids.is_empty(),
         "an unused label should return no one, got {ids:?}"
+    );
+
+    Ok(())
+}
+
+/// A request reads its labels' rankings from a cache that expires within a day; a tag with the
+/// label drops it sooner, which the watcher tests cover.
+#[tokio_shared_rt::test(shared)]
+async fn test_starter_pack_caches_each_label_for_a_day() -> Result<()> {
+    TestServiceServer::get_test_server().await;
+    let ids = pack("tags=btc-dev&limit=20").await?;
+
+    let cached = StarterPackRank::try_from_index_json(&["btc-dev"], None)
+        .await?
+        .expect("the request should have cached the label's ranking");
+    let cached_ids: Vec<&str> = cached.candidates.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(
+        cached_ids, ids,
+        "the pack should be served from that ranking"
+    );
+
+    let key = format!("{}:btc-dev", StarterPackRank::prefix().await);
+    let ttl: i64 = get_redis_conn().await?.ttl(&key).await?;
+    assert!(
+        (1..=24 * 60 * 60).contains(&ttl),
+        "the ranking should expire within a day, got a TTL of {ttl}"
     );
 
     Ok(())

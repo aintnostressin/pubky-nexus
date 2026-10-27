@@ -95,7 +95,7 @@ async fn test_wot_post_stream_depth_matrix_and_dedup() -> Result<()> {
 #[tokio_shared_rt::test(shared)]
 async fn test_wot_domain_post_stream() -> Result<()> {
     // bitcoiner: three external authors and the observer are endorsed by the
-    // observer's WoT; BTC1 is endorsed by two raters and must appear once.
+    // observer's WoT; BTC1 is endorsed by three raters and must appear once.
     let path = format!(
         "{ROOT_PATH}?source=wot_domain&observer_id={OBSERVER}&depth=2&domain_tags=bitcoiner&limit=30"
     );

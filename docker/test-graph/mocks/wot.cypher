@@ -31,6 +31,8 @@
 :param btcdev_tag => 'btc-dev';
 :param packdeleted_tag => 'packdeleted';
 :param packoverlap_tag => 'packoverlap';
+:param packsilent_tag => 'packsilent';
+:param packunscored_tag => 'packunscored';
 :param artist_tag => 'artist';
 :param nudity_tag => 'nudity';
 
@@ -63,16 +65,31 @@ MATCH (u:User {id: $d2}) SET u.trust = 0.2;
 // ##################################
 // ##### Starter-pack sentinels #####
 // ##################################
-// Endorsed and has a post, so only the deleted check can keep it out of a pack. Both markers
+// A pack candidate needs two endorsers besides itself. ARTIST1 is the second one wherever only
+// that rule is in play: with no trust and no followers it moves no ranking or influencer window.
+// Endorsed twice and has a post, so only the deleted check can keep it out of a pack. Both markers
 // are set to survive the switch to the boolean flag. High-sorting id, so the zero-score
 // influencer window is undisturbed.
 MERGE (u:User {id: $deleted_user}) SET u.name = "[DELETED]", u.deleted = true, u.bio = "", u.status = "undefined", u.indexed_at = 1650000000000, u.links = "[]", u.uri = "pubky://z4e8s17cou9qmuwen8p1556jzhf1wktmzo6ijsfnri9c4hnrdfty/pub/pubky.app/profile.json";
 MERGE (p:Post {id: "WOTPOSTDEL001"}) SET p.content = "post by a deleted account", p.kind = "short", p.indexed_at = 1650000000014;
 MATCH (u:User {id: $deleted_user}), (p:Post {id: "WOTPOSTDEL001"}) MERGE (u)-[:AUTHORED]->(p) SET p.uri = "pubky://z4e8s17cou9qmuwen8p1556jzhf1wktmzo6ijsfnri9c4hnrdfty/pub/pubky.app/posts/WOTPOSTDEL001";
 MATCH (from:User {id: $d1}), (to:User {id: $deleted_user}) MERGE (from)-[rel:TAGGED {label: $packdeleted_tag, id: "WOTTAGDEL0001", indexed_at: 1224534096400}]->(to) SET rel.uri = "pubky://qjftuwjog819ki1wktuy5tndebce36bmxxwtjjm3z1fr97jk9yuo/pub/pubky.app/tags/WOTTAGDEL0001";
+MATCH (from:User {id: $artist1}), (to:User {id: $deleted_user}) MERGE (from)-[rel:TAGGED {label: $packdeleted_tag, id: "WOTTAGDEL0002", indexed_at: 1224534096410}]->(to) SET rel.uri = "pubky://w153s1dr9rw6t8s3nd1de6pqquuprb37dwrnwh3nk85jt9ys9k7o/pub/pubky.app/tags/WOTTAGDEL0002";
 
 // Second label on BTC4, the only `btc-dev` candidate, so a two-label pack has a real duplicate.
 MATCH (from:User {id: $d2}), (to:User {id: $btc4}) MERGE (from)-[rel:TAGGED {label: $packoverlap_tag, id: "WOTTAGOVER001", indexed_at: 1224534096500}]->(to) SET rel.uri = "pubky://smf4xrqfhx7stnufkjzhbjyu3rbgb3gga64srqmzcyyoyzefse9y/pub/pubky.app/tags/WOTTAGOVER001";
+MATCH (from:User {id: $artist1}), (to:User {id: $btc4}) MERGE (from)-[rel:TAGGED {label: $packoverlap_tag, id: "WOTTAGOVER002", indexed_at: 1224534096510}]->(to) SET rel.uri = "pubky://w153s1dr9rw6t8s3nd1de6pqquuprb37dwrnwh3nk85jt9ys9k7o/pub/pubky.app/tags/WOTTAGOVER002";
+
+// Endorsed twice but never posted, so only the activity gate can keep the mod bot out.
+MATCH (from:User {id: $artist1}), (to:User {id: $modbot}) MERGE (from)-[rel:TAGGED {label: $packsilent_tag, id: "WOTTAGSILENT1", indexed_at: 1224534096520}]->(to) SET rel.uri = "pubky://w153s1dr9rw6t8s3nd1de6pqquuprb37dwrnwh3nk85jt9ys9k7o/pub/pubky.app/tags/WOTTAGSILENT1";
+MATCH (from:User {id: $spammer}), (to:User {id: $modbot}) MERGE (from)-[rel:TAGGED {label: $packsilent_tag, id: "WOTTAGSILENT2", indexed_at: 1224534096530}]->(to) SET rel.uri = "pubky://qdsygndnk45m9ru5jseg3uxk5xg4usj9hrcraqbzgigapzweaa9o/pub/pubky.app/tags/WOTTAGSILENT2";
+
+// Nobody here carries trust, as before the trust job first runs: the teleport is even, so
+// BTC4 and BTC5, endorsed alike, tie and fall back to id order.
+MATCH (from:User {id: $spammer}), (to:User {id: $btc4}) MERGE (from)-[rel:TAGGED {label: $packunscored_tag, id: "WOTTAGUNSCOR1", indexed_at: 1224534096540}]->(to) SET rel.uri = "pubky://qdsygndnk45m9ru5jseg3uxk5xg4usj9hrcraqbzgigapzweaa9o/pub/pubky.app/tags/WOTTAGUNSCOR1";
+MATCH (from:User {id: $spammer}), (to:User {id: $btc5}) MERGE (from)-[rel:TAGGED {label: $packunscored_tag, id: "WOTTAGUNSCOR2", indexed_at: 1224534096550}]->(to) SET rel.uri = "pubky://qdsygndnk45m9ru5jseg3uxk5xg4usj9hrcraqbzgigapzweaa9o/pub/pubky.app/tags/WOTTAGUNSCOR2";
+MATCH (from:User {id: $artist1}), (to:User {id: $btc4}) MERGE (from)-[rel:TAGGED {label: $packunscored_tag, id: "WOTTAGUNSCOR3", indexed_at: 1224534096560}]->(to) SET rel.uri = "pubky://w153s1dr9rw6t8s3nd1de6pqquuprb37dwrnwh3nk85jt9ys9k7o/pub/pubky.app/tags/WOTTAGUNSCOR3";
+MATCH (from:User {id: $artist1}), (to:User {id: $btc5}) MERGE (from)-[rel:TAGGED {label: $packunscored_tag, id: "WOTTAGUNSCOR4", indexed_at: 1224534096570}]->(to) SET rel.uri = "pubky://w153s1dr9rw6t8s3nd1de6pqquuprb37dwrnwh3nk85jt9ys9k7o/pub/pubky.app/tags/WOTTAGUNSCOR4";
 
 // ##############################
 // ##### Create follows #########
@@ -160,8 +177,14 @@ MATCH (from:User {id: $d1}), (to:User {id: $btc1}) MERGE (from)-[rel:TAGGED {lab
 MATCH (from:User {id: $d1}), (to:User {id: $btc2}) MERGE (from)-[rel:TAGGED {label: $bitcoiner_tag, id: "WOTTAGBTC0002", indexed_at: 1224534095200}]->(to) SET rel.uri = "pubky://qjftuwjog819ki1wktuy5tndebce36bmxxwtjjm3z1fr97jk9yuo/pub/pubky.app/tags/WOTTAGBTC0002";
 MATCH (from:User {id: $d1b}), (to:User {id: $btc3}) MERGE (from)-[rel:TAGGED {label: $bitcoiner_tag, id: "WOTTAGBTC0003", indexed_at: 1224534095300}]->(to) SET rel.uri = "pubky://t5ixbtatg4tq5q5ixg16qqrg1bmem75ksg6cweuftuydwzw91pzy/pub/pubky.app/tags/WOTTAGBTC0003";
 MATCH (from:User {id: $d1b}), (to:User {id: $btc1}) MERGE (from)-[rel:TAGGED {label: $bitcoiner_tag, id: "WOTTAGBTC0004", indexed_at: 1224534095400}]->(to) SET rel.uri = "pubky://t5ixbtatg4tq5q5ixg16qqrg1bmem75ksg6cweuftuydwzw91pzy/pub/pubky.app/tags/WOTTAGBTC0004";
-// Endorsed via btc-dev by depth-2 rater D2 -> BTC4
+// Depth-2 rater D2 calls all three bitcoiners too, giving BTC2 and BTC3 the second endorser a
+// starter pack needs. Split three ways, D2's trust keeps the pack's order BTC1 > BTC2 > BTC3.
+MATCH (from:User {id: $d2}), (to:User {id: $btc1}) MERGE (from)-[rel:TAGGED {label: $bitcoiner_tag, id: "WOTTAGBTC0007", indexed_at: 1224534096700}]->(to) SET rel.uri = "pubky://smf4xrqfhx7stnufkjzhbjyu3rbgb3gga64srqmzcyyoyzefse9y/pub/pubky.app/tags/WOTTAGBTC0007";
+MATCH (from:User {id: $d2}), (to:User {id: $btc2}) MERGE (from)-[rel:TAGGED {label: $bitcoiner_tag, id: "WOTTAGBTC0008", indexed_at: 1224534096800}]->(to) SET rel.uri = "pubky://smf4xrqfhx7stnufkjzhbjyu3rbgb3gga64srqmzcyyoyzefse9y/pub/pubky.app/tags/WOTTAGBTC0008";
+MATCH (from:User {id: $d2}), (to:User {id: $btc3}) MERGE (from)-[rel:TAGGED {label: $bitcoiner_tag, id: "WOTTAGBTC0009", indexed_at: 1224534096900}]->(to) SET rel.uri = "pubky://smf4xrqfhx7stnufkjzhbjyu3rbgb3gga64srqmzcyyoyzefse9y/pub/pubky.app/tags/WOTTAGBTC0009";
+// Endorsed via btc-dev by depth-2 rater D2 -> BTC4, and by D1B, a starter pack's second endorser
 MATCH (from:User {id: $d2}), (to:User {id: $btc4}) MERGE (from)-[rel:TAGGED {label: $btcdev_tag, id: "WOTTAGBTC0005", indexed_at: 1224534095500}]->(to) SET rel.uri = "pubky://smf4xrqfhx7stnufkjzhbjyu3rbgb3gga64srqmzcyyoyzefse9y/pub/pubky.app/tags/WOTTAGBTC0005";
+MATCH (from:User {id: $d1b}), (to:User {id: $btc4}) MERGE (from)-[rel:TAGGED {label: $btcdev_tag, id: "WOTTAGBTC0011", indexed_at: 1224534097100}]->(to) SET rel.uri = "pubky://t5ixbtatg4tq5q5ixg16qqrg1bmem75ksg6cweuftuydwzw91pzy/pub/pubky.app/tags/WOTTAGBTC0011";
 // Out of WoT: SPAMMER endorses BTC5 (bitcoiner) and ARTIST1 (artist) -> not visible to O.
 // These double as SPAMMER's own (depth-0 "Me") domain endorsements: a wot_domain
 // stream for SPAMMER at depth=0 surfaces BTC5/ARTIST1's posts (its follow-network is
@@ -171,6 +194,8 @@ MATCH (from:User {id: $spammer}), (to:User {id: $artist1}) MERGE (from)-[rel:TAG
 // SPAMMER self-tags as bitcoiner: its own post qualifies for its depth-0
 // Tagged-as feed.
 MATCH (from:User {id: $spammer}), (to:User {id: $spammer}) MERGE (from)-[rel:TAGGED {label: $bitcoiner_tag, id: "WOTTAGSELF002", indexed_at: 1224534096300}]->(to) SET rel.uri = "pubky://qdsygndnk45m9ru5jseg3uxk5xg4usj9hrcraqbzgigapzweaa9o/pub/pubky.app/tags/WOTTAGSELF002";
+// BTC5 returns the favour, so only the self-tag could make SPAMMER a two-endorser pack candidate.
+MATCH (from:User {id: $btc5}), (to:User {id: $spammer}) MERGE (from)-[rel:TAGGED {label: $bitcoiner_tag, id: "WOTTAGBTC0010", indexed_at: 1224534097000}]->(to) SET rel.uri = "pubky://wbhcz1gfz14jc4qjg74auyo5bwxd4gc3y84ic18iro17yi4bgz3y/pub/pubky.app/tags/WOTTAGBTC0010";
 // D1 (in O's WoT) tags the OBSERVER as bitcoiner, so O's own posts qualify for
 // O's network Tagged-as feed.
 MATCH (from:User {id: $d1}), (to:User {id: $o_obs}) MERGE (from)-[rel:TAGGED {label: $bitcoiner_tag, id: "WOTTAGSELF001", indexed_at: 1224534096100}]->(to) SET rel.uri = "pubky://qjftuwjog819ki1wktuy5tndebce36bmxxwtjjm3z1fr97jk9yuo/pub/pubky.app/tags/WOTTAGSELF001";

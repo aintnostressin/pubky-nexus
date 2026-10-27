@@ -18,6 +18,7 @@ mod resource_tag_list;
 mod resource_utils;
 mod retry_post_tag;
 mod retry_user_tag;
+mod starter_pack_invalidation;
 mod unknown_target_no_retry;
 mod uri;
 mod user_del_notification;

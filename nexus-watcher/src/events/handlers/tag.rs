@@ -10,13 +10,13 @@ use nexus_common::models::tag::post::TagPost;
 use nexus_common::models::tag::search::TagSearch;
 use nexus_common::models::tag::traits::{TagCollection, TaggersCollection};
 use nexus_common::models::tag::user::TagUser;
-use nexus_common::models::user::{UserIngestor, UsersByTagSearch};
+use nexus_common::models::user::{StarterPackRank, UserIngestor, UsersByTagSearch};
 use nexus_common::types::Pagination;
 use nexus_common::universal_tag::normalize::{
     classify_uri, normalize_uri, resource_id, UriCategory,
 };
 use pubky_app_specs::{ExtendedParsedUri, ParsedUri, PubkyAppTag, PubkyId, Resource};
-use tracing::{debug, Instrument};
+use tracing::{debug, warn, Instrument};
 
 use super::utils::{fail_on_blacklisted_hs, post_kind, post_relationships_is_reply};
 
@@ -43,7 +43,7 @@ pub async fn sync_put(
     let user_id = parsed_uri.user_id;
     let indexed_at = Utc::now().timestamp_millis();
 
-    match parsed_uri.resource {
+    let indexed = match parsed_uri.resource {
         // If post_id is in the tagged URI, we place tag to a post.
         Resource::Post(post_id) => {
             // Place the tag on post
@@ -63,7 +63,11 @@ pub async fn sync_put(
         other => Err(EventProcessorError::UnsupportedTarget(format!(
             "The tagged resource is not Post or User, instead is: {other:?}"
         ))),
+    };
+    if indexed.is_ok() {
+        invalidate_starter_pack(&tag.label).await;
     }
+    indexed
 }
 
 /// Handles a tag event from an app-specific path (e.g., /pub/mapky/tags/TAG_ID).
@@ -400,6 +404,8 @@ pub async fn del(tag_uri: &str) -> Result<(), EventProcessorError> {
     let author_id: Option<String> = row.get("author_id").unwrap_or(None);
     let post_uri: Option<String> = row.get("post_uri").unwrap_or(None);
     let resource_id: Option<String> = row.get("resource_id").unwrap_or(None);
+    // Resource tags take no part in the starter pack ranking.
+    let ranks_users = resource_id.is_none();
     let label: String = row
         .get("label")
         .map_err(|e| EventProcessorError::generic(format!("Missing label in delete_tag: {e}")))?;
@@ -453,6 +459,12 @@ pub async fn del(tag_uri: &str) -> Result<(), EventProcessorError> {
     ))
     .await?;
 
+    // Ahead of the steps below that can still fail: their retry finds the edge gone and
+    // returns early, so it would never get here.
+    if ranks_users {
+        invalidate_starter_pack(&label).await;
+    }
+
     // Now that the TAGGED edge is gone, invalidate the cached post counts so the
     // next read recomputes the lower count instead of recaching the pre-delete one.
     if let Some([author_id, post_id]) = post_counts_to_invalidate {
@@ -460,6 +472,14 @@ pub async fn del(tag_uri: &str) -> Result<(), EventProcessorError> {
     }
 
     Ok(())
+}
+
+/// The label's starter pack ranking is built from its tags, so a changed one makes it stale.
+/// Best effort: the ranking also expires within a day, so a failure must not fail the event.
+async fn invalidate_starter_pack(label: &str) {
+    if let Err(e) = StarterPackRank::invalidate(label).await {
+        warn!(label, error = %e, "Failed to invalidate the starter pack ranking");
+    }
 }
 
 pub fn is_tag_storage_uri(tag_uri: &str) -> bool {
