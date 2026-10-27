@@ -202,11 +202,11 @@ already left for up to ~`hs_resolver_ttl`.
 ### Following records
 
 `StaleMapping` decides what happens to a bound user whose record names another
-homeserver. The default, `Enabled`, keeps today's behaviour: the mapping is
+homeserver. The sweep runs with `Enabled`, today's behaviour: the mapping is
 marked `stale` and the user is indexed nowhere until the record names the stored
-homeserver again. `Disabled` follows the record: the mapping moves to the
-homeserver the record names, clearing a stale flag left from before. The sweep
-has no configuration knob for it yet (`UserHsResolverRunner::with_stale_mapping`).
+homeserver again. The recheck below runs with `Disabled`, which follows the
+record: the mapping moves to the homeserver the record names, clearing a stale
+flag left from before.
 
 Under both policies a record older than the one the mapping was applied from,
 by its timestamp against the edge's `record_ts`, is ignored: it is a replay or

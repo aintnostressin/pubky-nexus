@@ -399,6 +399,61 @@ mod tests {
         Ok(())
     }
 
+    /// The record the sweep marked a mapping stale from is followed by a
+    /// recheck that finds the same record: the mapping moves and the flag goes.
+    #[tokio_shared_rt::test(shared)]
+    async fn recheck_follows_the_record_the_sweep_marked_stale_from() -> Result<(), DynError> {
+        StackManager::setup(&StackConfig::default()).await?;
+        let user = Keypair::random();
+        let user_id = PubkyId::from(user.public_key());
+        let (hs_a, hs_b) = (random_pubky_id(), random_pubky_id());
+        UserIngestor::new(
+            [],
+            Arc::new(SigningResolver {
+                keypair: Keypair::random(),
+                homeserver: Some(hs_a.clone()),
+                timestamp: 10,
+            }),
+        )
+        .maybe_ingest_user(&user_id)
+        .await?;
+
+        // The sweep sees the user's record naming B and marks the mapping stale.
+        let record = PkdnsRecord::Published(signed_packet_naming(&user, Some(&hs_b), 20));
+        let stored = get_user_homeserver(user_id.as_ref()).await?;
+        let update = MappingUpdate::decide(stored.as_ref(), &record, StaleMapping::Enabled);
+        assert!(matches!(update, MappingUpdate::MarkedStale { .. }));
+        update
+            .apply(user_id.as_ref(), record.stored().as_ref())
+            .await?;
+
+        let recheck = UserIngestor::new(
+            [],
+            Arc::new(SigningResolver {
+                keypair: user,
+                homeserver: Some(hs_b.clone()),
+                timestamp: 20,
+            }),
+        )
+        .recheck_user(&user_id)
+        .await?;
+        assert_eq!(
+            recheck,
+            Some(HomeserverRecheck {
+                homeserver: Some(hs_b.to_string()),
+                outcome: RecheckOutcome::Switched,
+            })
+        );
+        let mapping = get_user_homeserver(user_id.as_ref()).await?.expect("bound");
+        assert_eq!(
+            (mapping.hs_id.as_str(), mapping.stale, mapping.record_ts),
+            (hs_b.as_ref(), false, Some(20))
+        );
+
+        exec_single_row(queries::del::delete_user(user_id.as_ref())).await?;
+        Ok(())
+    }
+
     /// The blacklist check looks the user's homeserver up through the injected resolver.
     #[tokio::test]
     async fn blacklist_check_uses_the_injected_resolver() {
