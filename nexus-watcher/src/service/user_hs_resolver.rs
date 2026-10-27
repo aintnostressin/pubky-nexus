@@ -223,7 +223,7 @@ pub async fn run(
                                 .marked_stale
                                 .add(1, &[stale_reason_attribute(reason)]);
                         }
-                        if matches!(resolution, Resolution::Applied(MappingUpdate::IgnoredOlder { .. })) {
+                        if resolution.ignored_older() {
                             HS_RESOLVER_METRICS.ignored_older_record.add(1, &[]);
                         }
                         let outcome = resolution.outcome();
@@ -455,6 +455,12 @@ impl Resolution {
             }) => Some(*reason),
             _ => None,
         }
+    }
+
+    /// Set when the record was older than the one the mapping was applied
+    /// from: the case the `ignored_older_record` counter counts.
+    fn ignored_older(&self) -> bool {
+        matches!(self, Self::Applied(MappingUpdate::IgnoredOlder { .. }))
     }
 }
 
@@ -1643,6 +1649,35 @@ mod tests {
             assert_eq!(resolution.outcome(), outcome, "{resolution:?}");
             assert_eq!(resolution.mapping(), mapping, "{resolution:?}");
             assert_eq!(resolution.newly_stale(), newly_stale, "{resolution:?}");
+        }
+    }
+
+    /// Only an ignored older record counts for `ignored_older_record`.
+    #[test]
+    fn test_only_an_ignored_older_record_counts_as_ignored() {
+        use MappingUpdate::*;
+
+        let ignored = Resolution::Applied(IgnoredOlder {
+            was_stale: false,
+            names_homeserver: true,
+        });
+        assert!(ignored.ignored_older());
+
+        let others = [
+            Resolution::Applied(Unbound),
+            Resolution::Applied(Bound { to: "hs".into() }),
+            Resolution::Applied(Confirmed { was_stale: true }),
+            Resolution::Applied(MarkedStale {
+                reason: StaleReason::HsChanged,
+                was_stale: false,
+            }),
+            Resolution::Applied(NoRecord { was_stale: false }),
+            Resolution::LookupFailed {
+                mapping: MappingState::Active,
+            },
+        ];
+        for other in others {
+            assert!(!other.ignored_older(), "{other:?}");
         }
     }
 
