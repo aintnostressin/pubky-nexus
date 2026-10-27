@@ -314,9 +314,9 @@ async fn get_users_needing_resolution(ttl_ms: u64) -> GraphResult<Vec<String>> {
     Ok(maybe_user_ids.unwrap_or_default())
 }
 
-/// `reason` attribute of the `marked_stale` counter, so that a resolver outage
-/// (`unresolved`) can be told apart from users genuinely migrating to another
-/// homeserver (`hs_changed`).
+/// `reason` attribute of the `marked_stale` counter: a signed record naming no
+/// homeserver (`unresolved`) or another one (`hs_changed`). An outage marks
+/// nothing stale.
 fn stale_reason_attribute(reason: StaleReason) -> KeyValue {
     let reason = match reason {
         StaleReason::Unresolved => "unresolved",
