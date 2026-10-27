@@ -215,6 +215,15 @@ a lagging node's answer and changes nothing, whatever it names. The same record
 seen again is applied again, so a caller that follows records can act on a
 record the sweep only marked stale.
 
+`PUT /v0/recheck/{user_id}` is the per-user trigger: it asks the network for the
+user's newest record (`resolve_most_recent`, every DHT node and relay) and
+follows it as `Disabled` does, so a user who migrated is indexed from the new
+homeserver without waiting for the sweep. It answers the homeserver the user is
+bound to afterwards and what the check did (`bound`, `confirmed`, `switched`,
+`kept`, `ignored`, `unbound`), 404 for a user nexus does not know, and 403 for
+a blacklisted homeserver. Like the ingest route, it needs the API's Pubky
+client. The client app should call it after a sign-in.
+
 ### Monitoring stale mappings
 
 When the resolver cannot reproduce a user's stored HS from PKDNS, it marks the
