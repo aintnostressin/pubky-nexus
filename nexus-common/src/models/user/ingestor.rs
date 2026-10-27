@@ -211,11 +211,11 @@ mod tests {
         }
     }
 
-    /// Answers every lookup with `keypair`'s own record naming one homeserver,
-    /// authored at `timestamp`.
+    /// Answers every lookup with `keypair`'s own record naming `homeserver`, or
+    /// none, authored at `timestamp`.
     struct SigningResolver {
         keypair: Keypair,
-        homeserver: PubkyId,
+        homeserver: Option<PubkyId>,
         timestamp: u64,
     }
 
@@ -224,41 +224,56 @@ mod tests {
         async fn resolve_record(&self, _: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
             Ok(PkdnsRecord::Published(signed_packet_naming(
                 &self.keypair,
-                Some(&self.homeserver),
+                self.homeserver.as_ref(),
                 self.timestamp,
             )))
         }
     }
 
+    /// Finds no record for anyone.
+    struct NoRecordResolver;
+
+    #[async_trait::async_trait]
+    impl PkdnsHomeserverResolver for NoRecordResolver {
+        async fn resolve_record(&self, _: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+            Ok(PkdnsRecord::Missing)
+        }
+    }
+
     /// A recheck follows the newest record: a record naming another homeserver
     /// moves a known user there, with a cursor on the new homeserver; a record
-    /// older than the one applied is ignored; a blacklisted homeserver is
-    /// refused; an unknown user is not rechecked.
+    /// older than the one applied is ignored; no record changes nothing; a
+    /// record naming no homeserver marks the mapping stale; a blacklisted
+    /// homeserver is refused; an unknown user is not rechecked.
     #[tokio_shared_rt::test(shared)]
     async fn recheck_follows_the_newest_record() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await?;
         let user_id = random_pubky_id();
         let (hs_a, hs_b) = (random_pubky_id(), random_pubky_id());
-        let ingestor = |blacklist: Vec<PubkyId>, homeserver: &PubkyId, timestamp| {
+        let ingestor = |blacklist: Vec<PubkyId>, homeserver: Option<&PubkyId>, timestamp| {
             UserIngestor::new(
                 blacklist,
                 Arc::new(SigningResolver {
                     keypair: Keypair::random(),
-                    homeserver: homeserver.clone(),
+                    homeserver: homeserver.cloned(),
                     timestamp,
                 }),
             )
         };
 
         assert_eq!(
-            ingestor(vec![], &hs_a, 10).recheck_user(&user_id).await?,
+            ingestor(vec![], Some(&hs_a), 10)
+                .recheck_user(&user_id)
+                .await?,
             None
         );
-        ingestor(vec![], &hs_a, 10)
+        ingestor(vec![], Some(&hs_a), 10)
             .maybe_ingest_user(&user_id)
             .await?;
 
-        let recheck = ingestor(vec![], &hs_b, 20).recheck_user(&user_id).await?;
+        let recheck = ingestor(vec![], Some(&hs_b), 20)
+            .recheck_user(&user_id)
+            .await?;
         assert_eq!(
             recheck,
             Some(HomeserverRecheck {
@@ -277,7 +292,9 @@ mod tests {
             "a cursor on the new homeserver"
         );
 
-        let recheck = ingestor(vec![], &hs_a, 5).recheck_user(&user_id).await?;
+        let recheck = ingestor(vec![], Some(&hs_a), 5)
+            .recheck_user(&user_id)
+            .await?;
         assert_eq!(
             recheck,
             Some(HomeserverRecheck {
@@ -286,7 +303,39 @@ mod tests {
             })
         );
 
-        let refused = ingestor(vec![hs_a.clone()], &hs_a, 30)
+        let recheck = UserIngestor::new([], Arc::new(NoRecordResolver))
+            .recheck_user(&user_id)
+            .await?;
+        assert_eq!(
+            recheck,
+            Some(HomeserverRecheck {
+                homeserver: Some(hs_b.to_string()),
+                outcome: RecheckOutcome::Kept,
+            })
+        );
+        let mapping = get_user_homeserver(user_id.as_ref()).await?.expect("bound");
+        assert_eq!(
+            (mapping.stale, mapping.record_ts),
+            (false, Some(20)),
+            "no record changes nothing"
+        );
+
+        let recheck = ingestor(vec![], None, 25).recheck_user(&user_id).await?;
+        assert_eq!(
+            recheck,
+            Some(HomeserverRecheck {
+                homeserver: Some(hs_b.to_string()),
+                outcome: RecheckOutcome::Unpublished,
+            })
+        );
+        let mapping = get_user_homeserver(user_id.as_ref()).await?.expect("bound");
+        assert_eq!(
+            (mapping.stale, mapping.record_ts),
+            (true, Some(25)),
+            "a record naming no homeserver marks the mapping stale"
+        );
+
+        let refused = ingestor(vec![hs_a.clone()], Some(&hs_a), 30)
             .recheck_user(&user_id)
             .await
             .unwrap_err();
@@ -317,7 +366,7 @@ mod tests {
             [],
             Arc::new(SigningResolver {
                 keypair: user,
-                homeserver: homeserver.clone(),
+                homeserver: Some(homeserver.clone()),
                 timestamp: 7,
             }),
         );

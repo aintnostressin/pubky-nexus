@@ -201,26 +201,29 @@ already left for up to ~`hs_resolver_ttl`.
 
 ### Following records
 
-`StaleMapping` decides what the sweep does with a bound user whose record no
-longer names the stored homeserver. The default, `Enabled`, keeps today's
-behaviour: the mapping is marked `stale` and the user is indexed nowhere until
-the record names the stored homeserver again. `Disabled` follows the record: a
-record naming another homeserver moves the mapping there, a record naming none
-keeps it, and a stale flag left from before is cleared either way. The sweep has
-no configuration knob for it yet (`UserHsResolverRunner::with_stale_mapping`).
+`StaleMapping` decides what happens to a bound user whose record names another
+homeserver. The default, `Enabled`, keeps today's behaviour: the mapping is
+marked `stale` and the user is indexed nowhere until the record names the stored
+homeserver again. `Disabled` follows the record: the mapping moves to the
+homeserver the record names, clearing a stale flag left from before. The sweep
+has no configuration knob for it yet (`UserHsResolverRunner::with_stale_mapping`).
 
 Under both policies a record older than the one the mapping was applied from,
 by its timestamp against the edge's `record_ts`, is ignored: it is a replay or
 a lagging node's answer and changes nothing, whatever it names. The same record
 seen again is applied again, so a caller that follows records can act on a
-record the sweep only marked stale.
+record the sweep only marked stale. No record at all says nothing: the mapping,
+its flag and its record stand and only `resolved_at` moves. A record naming no
+homeserver is a change the key holder signed, and marks the mapping stale under
+both policies.
 
 `PUT /v0/recheck/{user_id}` is the per-user trigger: it asks the network for the
 user's newest record (`resolve_most_recent`, every DHT node and relay) and
 follows it as `Disabled` does, so a user who migrated is indexed from the new
 homeserver without waiting for the sweep. It answers the homeserver the user is
 bound to afterwards and what the check did (`bound`, `confirmed`, `switched`,
-`kept`, `ignored`, `unbound`), 404 for a user nexus does not know, and 403 for
+`unpublished`, `kept`, `ignored`, `unbound`), 404 for a user nexus does not
+know, and 403 for
 a blacklisted homeserver. Like the ingest route, it needs the API's Pubky
 client. The client app should call it after a sign-in.
 

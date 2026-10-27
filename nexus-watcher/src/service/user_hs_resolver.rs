@@ -432,7 +432,7 @@ impl Resolution {
             }) => Outcome::Resolved,
             Self::Applied(
                 Unbound
-                | Kept { .. }
+                | NoRecord { .. }
                 | MarkedStale {
                     reason: StaleReason::Unresolved,
                     ..
@@ -457,7 +457,7 @@ impl Resolution {
                 Confirmed { was_stale }
                 | MarkedStale { was_stale, .. }
                 | Switched { was_stale, .. }
-                | Kept { was_stale }
+                | NoRecord { was_stale }
                 | IgnoredOlder { was_stale, .. },
             ) => match was_stale {
                 true => MappingState::Stale,
@@ -1185,7 +1185,8 @@ mod tests {
         Ok(())
     }
 
-    /// When the homeserver is unpublished, the binding is kept but marked stale.
+    /// When the record names no homeserver, the binding is kept but marked
+    /// stale, and the record is kept on the edge.
     #[tokio_shared_rt::test(shared)]
     async fn test_resolve_user_unpublished_keeps_binding_and_marks_stale() -> Result<(), DynError> {
         setup().await?;
@@ -1197,9 +1198,13 @@ mod tests {
         create_test_user(&user_id).await?;
         set_user_homeserver(&user_id, &stored_hs).await?;
 
-        // DHT no longer publishes a homeserver
-        let outcome =
-            resolve_user(&MockResolver::missing(), &user_pk, StaleMapping::Enabled).await?;
+        // The record no longer names a homeserver
+        let outcome = resolve_user(
+            &MockResolver::naming_none(10),
+            &user_pk,
+            StaleMapping::Enabled,
+        )
+        .await?;
         assert_eq!(
             outcome,
             Resolution::Applied(MappingUpdate::MarkedStale {
@@ -1210,11 +1215,57 @@ mod tests {
 
         assert_eq!(
             get_user_homeserver(&user_id).await?,
-            Some(mapping(&stored_hs, true, None))
+            Some(mapping(&stored_hs, true, Some(10)))
         );
         assert!(!get_user_ids_by_homeserver(&stored_hs)
             .await?
             .contains(&user_id));
+
+        cleanup_test_user(&user_id).await?;
+
+        Ok(())
+    }
+
+    /// No record found says nothing: the binding, its flag and its record stand
+    /// and only `resolved_at` moves, so the user is still read and looked up
+    /// again a TTL later.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_resolve_user_missing_record_changes_nothing() -> Result<(), DynError> {
+        setup().await?;
+
+        let user_pk = random_pk();
+        let user_id = user_pk.z32();
+        let stored_hs = random_pubky_id();
+
+        create_test_user(&user_id).await?;
+        resolve_user(
+            &MockResolver::naming(&stored_hs, 10),
+            &user_pk,
+            StaleMapping::Enabled,
+        )
+        .await?;
+        backdate_resolved_at(&user_id).await?;
+
+        let outcome =
+            resolve_user(&MockResolver::missing(), &user_pk, StaleMapping::Enabled).await?;
+        assert_eq!(
+            outcome,
+            Resolution::Applied(MappingUpdate::NoRecord { was_stale: false })
+        );
+
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            Some(mapping(&stored_hs, false, Some(10)))
+        );
+        assert!(get_user_ids_by_homeserver(&stored_hs)
+            .await?
+            .contains(&user_id));
+        assert!(
+            !get_users_needing_resolution(TTL_MS)
+                .await?
+                .contains(&user_id),
+            "resolved_at is refreshed"
+        );
 
         cleanup_test_user(&user_id).await?;
 
@@ -1418,10 +1469,7 @@ mod tests {
             resolve_user(&MockResolver::missing(), &user_pk, StaleMapping::Enabled).await?;
         assert_eq!(
             outcome,
-            Resolution::Applied(MappingUpdate::MarkedStale {
-                reason: StaleReason::Unresolved,
-                was_stale: true,
-            })
+            Resolution::Applied(MappingUpdate::NoRecord { was_stale: true })
         );
         assert_eq!(
             stored_record(&user_id).await?.map(|r| r.timestamp),
@@ -1474,42 +1522,6 @@ mod tests {
             .await?
             .contains(&user_id));
         assert!(get_user_ids_by_homeserver(&new_hs)
-            .await?
-            .contains(&user_id));
-
-        cleanup_test_user(&user_id).await?;
-        Ok(())
-    }
-
-    /// With stale mapping disabled a record naming no homeserver keeps the
-    /// mapping and clears a stale flag left from before.
-    #[tokio_shared_rt::test(shared)]
-    async fn test_resolve_user_keeps_mapping_without_homeserver_when_stale_mapping_disabled(
-    ) -> Result<(), DynError> {
-        setup().await?;
-
-        let user_pk = random_pk();
-        let user_id = user_pk.z32();
-        let stored_hs = random_pubky_id();
-        create_test_user(&user_id).await?;
-        set_user_homeserver(&user_id, &stored_hs).await?;
-        set_user_homeserver_stale(&user_id, true, None).await?;
-
-        let outcome = resolve_user(
-            &MockResolver::naming_none(10),
-            &user_pk,
-            StaleMapping::Disabled,
-        )
-        .await?;
-        assert_eq!(
-            outcome,
-            Resolution::Applied(MappingUpdate::Kept { was_stale: true })
-        );
-        assert_eq!(
-            get_user_homeserver(&user_id).await?,
-            Some(mapping(&stored_hs, false, Some(10)))
-        );
-        assert!(get_user_ids_by_homeserver(&stored_hs)
             .await?
             .contains(&user_id));
 
@@ -1787,7 +1799,7 @@ mod tests {
                 None,
             ),
             (
-                applied(MappingUpdate::Kept { was_stale: false }),
+                applied(MappingUpdate::NoRecord { was_stale: false }),
                 Outcome::Unresolved,
                 Active,
                 None,

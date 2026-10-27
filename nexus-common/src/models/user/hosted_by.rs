@@ -6,7 +6,9 @@
 //! record older than it is a replay or a lagging answer: it changes nothing,
 //! whatever it names and whatever the policy. The same record seen again is
 //! applied again, so a policy that follows records can act on a record the
-//! other policy only marked stale.
+//! other policy only marked stale. No record at all says nothing and changes
+//! nothing; a record naming no homeserver is a change the key holder signed,
+//! and marks the mapping stale under both policies.
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -24,8 +26,7 @@ pub enum StaleMapping {
     #[default]
     Enabled,
     /// Follow the record: a record naming another homeserver moves the mapping
-    /// there, a record naming none keeps it. A stale flag left from before is
-    /// cleared either way.
+    /// there, clearing a stale flag left from before.
     Disabled,
 }
 
@@ -56,8 +57,8 @@ pub enum MappingUpdate {
     Bound { to: String },
     /// The published homeserver is the stored one; the stale flag is cleared.
     Confirmed { was_stale: bool },
-    /// The published homeserver is missing or another one; the mapping is kept
-    /// and marked stale ([`StaleMapping::Enabled`]).
+    /// The record names no homeserver, or another one under
+    /// [`StaleMapping::Enabled`]; the mapping is kept and marked stale.
     MarkedStale {
         reason: StaleReason,
         was_stale: bool,
@@ -68,9 +69,9 @@ pub enum MappingUpdate {
         to: String,
         was_stale: bool,
     },
-    /// Nothing published; the mapping is kept and the stale flag cleared
-    /// ([`StaleMapping::Disabled`]).
-    Kept { was_stale: bool },
+    /// No record was found: nothing is known, so the mapping, its flag and its
+    /// record stand; only `resolved_at` is refreshed.
+    NoRecord { was_stale: bool },
     /// The record is older than the one the mapping was applied from; the
     /// mapping, its flag and its record stand.
     IgnoredOlder {
@@ -97,21 +98,24 @@ impl MappingUpdate {
             };
         };
         let was_stale = stored.stale;
-        if let (Some(clock), Some(timestamp)) = (stored.record_ts, record.timestamp()) {
-            if timestamp < clock {
-                return Self::IgnoredOlder {
-                    was_stale,
-                    names_homeserver: resolved.is_some(),
-                };
-            }
+        let Some(timestamp) = record.timestamp() else {
+            return Self::NoRecord { was_stale };
+        };
+        if stored.record_ts.is_some_and(|clock| timestamp < clock) {
+            return Self::IgnoredOlder {
+                was_stale,
+                names_homeserver: resolved.is_some(),
+            };
         }
         match (resolved, stale_mapping) {
             (Some(hs_id), _) if hs_id.as_ref() == stored.hs_id => Self::Confirmed { was_stale },
-            (resolved, StaleMapping::Enabled) => Self::MarkedStale {
-                reason: match resolved {
-                    None => StaleReason::Unresolved,
-                    Some(_) => StaleReason::HsChanged,
-                },
+            // A signed statement that the user has no homeserver now.
+            (None, _) => Self::MarkedStale {
+                reason: StaleReason::Unresolved,
+                was_stale,
+            },
+            (Some(_), StaleMapping::Enabled) => Self::MarkedStale {
+                reason: StaleReason::HsChanged,
                 was_stale,
             },
             (Some(hs_id), StaleMapping::Disabled) => Self::Switched {
@@ -119,7 +123,6 @@ impl MappingUpdate {
                 to: hs_id.to_string(),
                 was_stale,
             },
-            (None, StaleMapping::Disabled) => Self::Kept { was_stale },
         }
     }
 
@@ -139,16 +142,16 @@ impl MappingUpdate {
                 set_user_homeserver_stale(user_id, false, record).await
             }
             Self::MarkedStale { reason, .. } => {
-                warn!(%user_id, ?reason, "User homeserver changed or was removed; switching disabled, mapping marked stale");
+                warn!(%user_id, ?reason, "User's record no longer names the stored homeserver; mapping marked stale");
                 set_user_homeserver_stale(user_id, true, record).await
             }
             Self::Switched { from, to, .. } => {
                 info!(%user_id, %from, %to, "User published another homeserver; HS mapping switched");
                 exec_single_row(queries::put::set_user_homeserver(user_id, to, record)).await
             }
-            Self::Kept { .. } => {
-                debug!(%user_id, "PKDNS returned no homeserver; HS mapping kept");
-                set_user_homeserver_stale(user_id, false, record).await
+            Self::NoRecord { was_stale } => {
+                debug!(%user_id, "No PKDNS record found; HS mapping left as it is");
+                set_user_homeserver_stale(user_id, *was_stale, None).await
             }
             Self::IgnoredOlder { was_stale, .. } => {
                 warn!(%user_id, "PKDNS record is older than the one applied; ignored");
@@ -165,7 +168,7 @@ impl MappingUpdate {
             Self::Unbound => None,
             Self::Confirmed { .. }
             | Self::MarkedStale { .. }
-            | Self::Kept { .. }
+            | Self::NoRecord { .. }
             | Self::IgnoredOlder { .. } => stored.map(|mapping| mapping.hs_id.clone()),
         }
     }
@@ -177,7 +180,7 @@ impl MappingUpdate {
             Self::Unbound
             | Self::Confirmed { .. }
             | Self::MarkedStale { .. }
-            | Self::Kept { .. }
+            | Self::NoRecord { .. }
             | Self::IgnoredOlder { .. } => None,
         }
     }
@@ -256,15 +259,18 @@ pub enum RecheckOutcome {
     Confirmed,
     /// The mapping moved to the published homeserver.
     Switched,
-    /// Nothing is published; the mapping was kept.
+    /// The record names no homeserver; the mapping was kept and marked stale,
+    /// so the user is indexed nowhere until a record names one.
+    Unpublished,
+    /// No record was found; the mapping was kept.
     Kept,
     /// The record found is older than the one the mapping was applied from;
     /// the mapping was kept.
     Ignored,
 }
 
-/// A recheck follows the record ([`StaleMapping::Disabled`]), so it never
-/// marks a mapping stale; should one arrive anyway, it reads as kept.
+/// A recheck follows the record ([`StaleMapping::Disabled`]), so the only
+/// update that marks a mapping stale is a record naming no homeserver.
 impl From<&MappingUpdate> for RecheckOutcome {
     fn from(update: &MappingUpdate) -> Self {
         match update {
@@ -272,7 +278,8 @@ impl From<&MappingUpdate> for RecheckOutcome {
             MappingUpdate::Bound { .. } => Self::Bound,
             MappingUpdate::Confirmed { .. } => Self::Confirmed,
             MappingUpdate::Switched { .. } => Self::Switched,
-            MappingUpdate::Kept { .. } | MappingUpdate::MarkedStale { .. } => Self::Kept,
+            MappingUpdate::MarkedStale { .. } => Self::Unpublished,
+            MappingUpdate::NoRecord { .. } => Self::Kept,
             MappingUpdate::IgnoredOlder { .. } => Self::Ignored,
         }
     }
@@ -341,7 +348,7 @@ mod tests {
                 Some(on_a(false)),
                 PkdnsRecord::Missing,
                 Enabled,
-                marked_stale(Unresolved, false),
+                NoRecord { was_stale: false },
             ),
             (Some(on_a(false)), naming(&b), Disabled, switched(false)),
             (Some(on_a(true)), naming(&b), Disabled, switched(true)),
@@ -349,13 +356,13 @@ mod tests {
                 Some(on_a(false)),
                 naming_none(),
                 Disabled,
-                Kept { was_stale: false },
+                marked_stale(Unresolved, false),
             ),
             (
                 Some(on_a(true)),
                 PkdnsRecord::Missing,
                 Disabled,
-                Kept { was_stale: true },
+                NoRecord { was_stale: true },
             ),
         ];
         for (stored, record, policy, expected) in cases {
@@ -440,13 +447,9 @@ mod tests {
             "a newer record naming another homeserver"
         );
         assert_eq!(
-            MappingUpdate::decide(
-                Some(&on_a(false, Some(20))),
-                &PkdnsRecord::Missing,
-                Disabled
-            ),
-            Kept { was_stale: false },
-            "a missing record cannot be dated"
+            MappingUpdate::decide(Some(&on_a(true, Some(20))), &PkdnsRecord::Missing, Disabled),
+            NoRecord { was_stale: true },
+            "a missing record cannot be dated and changes nothing"
         );
     }
 
@@ -487,7 +490,11 @@ mod tests {
                 on_a.clone(),
                 Some(b.to_string()),
             ),
-            (Kept { was_stale: true }, on_a.clone(), Some(a.to_string())),
+            (
+                NoRecord { was_stale: true },
+                on_a.clone(),
+                Some(a.to_string()),
+            ),
             (
                 IgnoredOlder {
                     was_stale: false,
