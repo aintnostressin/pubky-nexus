@@ -170,12 +170,7 @@ pub fn create_mention_relationship(
 
 /// Reconciles the `COLLECTED` edges of a Collection post with its item list:
 /// every existing edge is dropped and one is merged per item that exists in
-/// the graph. Items that are not indexed get no edge. Returns `touched`, the
-/// `[author_id, post_id]` pairs whose edges were removed or merged (a key may
-/// repeat), so the caller can invalidate those post counts without knowing the
-/// old envelope. Idempotent. Removed edges are only reported by the run that
-/// removes them, so a failure between this query and the caller's invalidation
-/// leaves the removed items' cached counts stale until the `PostCounts` TTL.
+/// the graph. Items that are not indexed get no edge. Idempotent.
 /// # Arguments
 /// * `author_id` - The unique identifier of the user who authored the collection
 /// * `post_id` - The unique identifier of the collection post
@@ -205,22 +200,14 @@ pub fn sync_collection_items(
         "
         MATCH (:User {id: $author_id})-[:AUTHORED]->(c:Post {id: $post_id})
         WHERE $kind IS NULL OR (c.kind = $kind AND c.content = $content)
-        OPTIONAL MATCH (c)-[old:COLLECTED]->(prev:Post)<-[:AUTHORED]-(prev_author:User)
+        OPTIONAL MATCH (c)-[old:COLLECTED]->(:Post)
         DELETE old
-        // collect() drops nulls but keeps [null, null], so map a miss to a bare null.
-        WITH c, collect(CASE WHEN prev IS NULL THEN NULL ELSE [prev_author.id, prev.id] END) AS previous
-        // Aggregating subquery: yields one row even when $items is empty, so
-        // `previous` survives a teardown.
-        CALL {
-            WITH c
-            UNWIND $items AS item
-            MATCH (:User {id: item[0]})-[:AUTHORED]->(p:Post {id: item[1]})
-            // The spec validates URI shape only; a collection may list itself.
-            WHERE p <> c
-            MERGE (c)-[:COLLECTED]->(p)
-            RETURN collect(item) AS current
-        }
-        RETURN previous + current AS touched
+        WITH DISTINCT c
+        UNWIND $items AS item
+        MATCH (:User {id: item[0]})-[:AUTHORED]->(p:Post {id: item[1]})
+        // The spec validates URI shape only; a collection may list itself.
+        WHERE p <> c
+        MERGE (c)-[:COLLECTED]->(p)
         ",
     )
     .param("author_id", author_id)

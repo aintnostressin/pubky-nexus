@@ -1,10 +1,14 @@
-use super::utils::{check_member_total_engagement_user_posts, find_post_counts};
-use crate::event_processor::utils::watcher::WatcherTest;
+use super::utils::{
+    check_member_total_engagement_user_posts, find_post_counts, short_post, short_reply, test_user,
+};
+use crate::event_processor::utils::watcher::{HomeserverHashIdPath, WatcherTest};
 use anyhow::Result;
+use chrono::Utc;
+use nexus_common::db::RedisOps;
 use nexus_common::models::post::{PostCounts, PostStream};
 use pubky::Keypair;
 use pubky_app_specs::{
-    post_uri_builder, PubkyAppPost, PubkyAppPostEmbed, PubkyAppPostKind, PubkyAppUser,
+    post_uri_builder, PubkyAppPost, PubkyAppPostEmbed, PubkyAppPostKind, PubkyAppTag, PubkyAppUser,
 };
 
 #[tokio_shared_rt::test(shared)]
@@ -104,7 +108,7 @@ async fn test_homeserver_post_engagement() -> Result<()> {
 
 /// Read-through must not seed the engagement feed. `get_by_id` recomputes a
 /// cache miss via `cache_json` (JSON only), so a read must not resurrect a post
-/// into `POST_TOTAL_ENGAGEMENT`. Guards the `cache_json`-vs-`put_to_index` split.
+/// into `POST_TOTAL_ENGAGEMENT`.
 #[tokio_shared_rt::test(shared)]
 async fn test_post_counts_read_does_not_seed_engagement() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
@@ -139,8 +143,8 @@ async fn test_post_counts_read_does_not_seed_engagement() -> Result<()> {
 
     // Remove it from the feed, then force a read-through cache miss.
     PostStream::delete_from_engagement_sorted_set(&user_id, &post_id).await?;
-    PostCounts::invalidate(&[&user_id, &post_id]).await?;
-    let _ = find_post_counts(&user_id, &post_id).await;
+    PostCounts::remove_from_index_multiple_json(&[&post_key]).await?;
+    PostCounts::get_by_id(&user_id, &post_id).await?;
 
     assert!(
         check_member_total_engagement_user_posts(&post_key)
@@ -150,5 +154,95 @@ async fn test_post_counts_read_does_not_seed_engagement() -> Result<()> {
     );
 
     test.cleanup_user(&user_kp).await?;
+    Ok(())
+}
+
+/// The watcher keeps the engagement feed current but never writes or drops
+/// `Post:Counts` JSON: a cached entry outlives replies, tags and deletes until
+/// its TTL, and replies stay out of the feed.
+#[tokio_shared_rt::test(shared)]
+async fn test_watcher_leaves_post_counts_cache_alone() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+    let alice_kp = Keypair::random();
+    let alice_id = test
+        .create_user(&alice_kp, &test_user("Watcher:CountsCache:Alice", "counts"))
+        .await?;
+    let bob_kp = Keypair::random();
+    let bob_id = test
+        .create_user(&bob_kp, &test_user("Watcher:CountsCache:Bob", "counts"))
+        .await?;
+
+    let (post_id, _) = test.create_post(&alice_kp, &short_post("root")).await?;
+    let post_key: [&str; 2] = [&alice_id, &post_id];
+    assert!(
+        PostCounts::get_from_index(&alice_id, &post_id)
+            .await?
+            .is_none(),
+        "a post put writes no counts JSON"
+    );
+    assert_eq!(
+        check_member_total_engagement_user_posts(&post_key).await?,
+        Some(0)
+    );
+    let cached = PostCounts::get_by_id(&alice_id, &post_id)
+        .await?
+        .expect("counts of an indexed post");
+
+    let post_uri = post_uri_builder(alice_id.clone(), post_id.clone());
+    let (reply_id, reply_path) = test
+        .create_post(&bob_kp, &short_reply("reply", post_uri.clone()))
+        .await?;
+    let tag = PubkyAppTag {
+        uri: post_uri,
+        label: "counts_cache".to_string(),
+        created_at: Utc::now().timestamp_millis(),
+    };
+    test.put(&bob_kp, &tag.hs_path(), tag).await?;
+
+    assert_eq!(
+        check_member_total_engagement_user_posts(&post_key).await?,
+        Some(2)
+    );
+    let reply_key: [&str; 2] = [&bob_id, &reply_id];
+    assert!(check_member_total_engagement_user_posts(&reply_key)
+        .await?
+        .is_none());
+    assert!(PostCounts::get_from_index(&bob_id, &reply_id)
+        .await?
+        .is_none());
+    let graph = find_post_counts(&alice_id, &post_id).await;
+    assert_eq!((graph.replies, graph.tags), (1, 1));
+    let index = PostCounts::get_from_index(&alice_id, &post_id)
+        .await?
+        .expect("the read-through entry is still cached");
+    assert_eq!(
+        (index.replies, index.tags),
+        (cached.replies, cached.tags),
+        "reply and tag events leave the cached counts as they were"
+    );
+
+    test.cleanup_post(&bob_kp, &reply_path).await?;
+    assert_eq!(
+        check_member_total_engagement_user_posts(&post_key).await?,
+        Some(1)
+    );
+
+    let (lone_id, lone_path) = test.create_post(&alice_kp, &short_post("lone")).await?;
+    PostCounts::get_by_id(&alice_id, &lone_id).await?;
+    test.cleanup_post(&alice_kp, &lone_path).await?;
+    assert!(
+        check_member_total_engagement_user_posts(&[&alice_id, &lone_id])
+            .await?
+            .is_none()
+    );
+    assert!(
+        PostCounts::get_from_index(&alice_id, &lone_id)
+            .await?
+            .is_some(),
+        "a post delete leaves its cached counts to expire"
+    );
+
+    test.cleanup_user(&alice_kp).await?;
+    test.cleanup_user(&bob_kp).await?;
     Ok(())
 }

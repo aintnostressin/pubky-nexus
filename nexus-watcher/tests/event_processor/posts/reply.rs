@@ -194,10 +194,8 @@ async fn test_homeserver_post_reply() -> Result<()> {
 
 /// Regression for the `!is_reply` inversion in `PostCounts::get_by_id`
 /// (Greptile P1). The cache-miss code path rebuilds PostCounts from the
-/// graph and writes it back via `put_to_index`. Previously it passed
-/// `!is_reply` (double-negated), so the engagement-gate inside
-/// `put_to_index` (`if !is_reply`) evaluated `true` for replies — adding
-/// the reply to POST_TOTAL_ENGAGEMENT on every cache rebuild after a
+/// graph and writes it back. A rebuild that also seeded the engagement feed
+/// added the reply to POST_TOTAL_ENGAGEMENT on every cache rebuild after a
 /// Redis eviction.
 ///
 /// Test plan: create a reply (which correctly stays out of
@@ -251,7 +249,7 @@ async fn test_postcounts_get_by_id_does_not_leak_reply_into_engagement_on_cache_
     );
 
     // Evict the PostCounts JSON from Redis, forcing `get_by_id` to fall through
-    // to the graph and re-populate the cache via `put_to_index`.
+    // to the graph and re-populate the cache.
     PostCounts::remove_from_index_multiple_json(&[reply_key]).await?;
     assert!(
         PostCounts::get_from_index(&user_id, &reply_id)
