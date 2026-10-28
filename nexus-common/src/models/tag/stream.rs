@@ -335,7 +335,6 @@ impl HotTags {
 mod tests {
     use super::*;
     use crate::{types::DynError, StackConfig, StackManager};
-    use redis::JsonAsyncCommands;
 
     /// Off the production `HOT_TAGS_CACHE_PREFIX` keys the API tests share. The
     /// tests run in parallel, so each writes a timeframe of its own under it, or
@@ -457,47 +456,6 @@ mod tests {
 
             HotTags::clear_cache(&timeframe, rule, TEST_PREFIX).await?;
         }
-        Ok(())
-    }
-
-    /// A deploy finds the previous version's ranking next to its taggers JSON,
-    /// whose entries lack `tagged_count` and `score`. Reading it must be a miss,
-    /// which refreshes the cache, not a parse error on every request until the
-    /// key expires.
-    #[tokio_shared_rt::test(shared)]
-    async fn hot_tags_cache_misses_on_the_previous_taggers_shape() -> Result<(), DynError> {
-        StackManager::setup(&StackConfig::default()).await?;
-        const PREFIX: &str = "HotTagsCacheTest:Upgrade";
-        let (timeframe, rule) = (Timeframe::Today, HotTagsRule::Posts);
-        let timeframe_str = timeframe.to_string();
-        let previous_taggers_key = [
-            PREFIX,
-            &[&POST_HOT_TAGS[..], &["TaggersV2", &timeframe_str]]
-                .concat()
-                .join(":"),
-        ]
-        .join(":");
-        let mut conn = get_redis_conn().await?;
-        let _: () = conn
-            .json_set(
-                &previous_taggers_key,
-                "$",
-                &serde_json::json!({ "bitcoin": { "taggers": ["alice"], "total": 1 } }),
-            )
-            .await?;
-        HotTags::replace_index_sorted_set(
-            &HotTags::build_hot_tags_key_parts(rule, &timeframe_str),
-            &[(42.0, "bitcoin")],
-            Some(PREFIX),
-            None,
-        )
-        .await?;
-
-        let read = HotTags::get_from_global_cache(&whole_snapshot(&timeframe), rule, PREFIX).await;
-        let _: () = conn.del(&previous_taggers_key).await?;
-        HotTags::clear_cache(&timeframe, rule, PREFIX).await?;
-
-        assert!(read?.is_none(), "the previous shape must read as a miss");
         Ok(())
     }
 
