@@ -34,8 +34,8 @@ pub struct HotTag {
     pub tagged_count: u64,
     pub taggers_count: usize,
     /// Each tagger's trust times 1 + 1/2 + ... + 1/n, summed over the taggers,
-    /// n being the posts they tagged with the label in the timeframe. Orders
-    /// the list while the `trust_ranked_hot_tags` feature is on.
+    /// n being the posts they tagged with the label in the timeframe. The list
+    /// is ordered by it or by post count.
     pub score: f64,
 }
 
