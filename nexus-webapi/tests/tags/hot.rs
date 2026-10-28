@@ -1070,25 +1070,40 @@ async fn test_hot_tags_switch_off_orders_by_posts() -> Result<()> {
     };
 
     features(false).store().await?;
-    let off = get_request("/v0/tags/hot?timeframe=today").await;
+    // Nothing between storing the switch off and on again may panic: a panic
+    // would leave it off for every test that follows. `get_request` asserts
+    // the status, so the off read goes through the client directly.
+    let off = async {
+        let url = crate::utils::host_url().await;
+        let client = httpc_test::new_client("")?;
+        let response = client
+            .do_get(&format!("{url}/v0/tags/hot?timeframe=today"))
+            .await?;
+        let status = response.status();
+        let body = response.json_body()?;
+        Ok::<_, anyhow::Error>((status, body))
+    }
+    .await;
     let restored = features(true).store().await;
     let cleared = HotTags::clear_global_cache(&Timeframe::Today, HotTagsRule::Posts).await;
-    let on = get_request("/v0/tags/hot?timeframe=today").await;
     restored?;
     cleared?;
+    let on = get_request("/v0/tags/hot?timeframe=today").await;
 
-    let off = off?;
+    let (status, off) = off?;
+    assert_eq!(status, 200, "switch off: {off}");
     let tags = off.as_array().expect("Stream tags should be an array");
+    // By posts, then label ascending: the cache keeps the graph's tie-breaks
     assert_eq!(
         labels(tags),
-        ["today", "hotzero", "hotthree", "hotpair", "tag2", "tag1", "hotone"]
+        ["hotpair", "hotthree", "hotzero", "today", "hotone", "tag1", "tag2"]
     );
-    let hot_tag = StreamTagMockup::new(String::from("hotzero"), 1, 3, 1, 0.0);
-    compare_unit_hot_tag(&tags[1], hot_tag);
     let hot_tag = StreamTagMockup::new(String::from("hotpair"), 3, 3, 3, 0.75);
-    compare_unit_hot_tag(&tags[3], hot_tag);
+    compare_unit_hot_tag(&tags[0], hot_tag);
+    let hot_tag = StreamTagMockup::new(String::from("hotzero"), 1, 3, 1, 0.0);
+    compare_unit_hot_tag(&tags[2], hot_tag);
     let hot_tag = StreamTagMockup::new(String::from("hotone"), 1, 1, 1, 0.3);
-    compare_unit_hot_tag(&tags[6], hot_tag);
+    compare_unit_hot_tag(&tags[4], hot_tag);
 
     let on = on?;
     let tags = on.as_array().expect("Stream tags should be an array");

@@ -78,14 +78,6 @@ impl HotTagsRule {
             HotTagsRule::Trust => &TRUST_RANKED_POST_HOT_TAGS,
         }
     }
-
-    /// The cached ranking's score for `tag`: what the rule orders by.
-    fn cache_score(self, tag: &HotTag) -> f64 {
-        match self {
-            HotTagsRule::Posts => tag.tagged_count as f64,
-            HotTagsRule::Trust => tag.score,
-        }
-    }
 }
 
 // Define a newtype wrapper
@@ -269,8 +261,11 @@ impl HotTags {
         Ok(Some(hot_tags))
     }
 
-    /// Overwrite the JSON and atomically replace the sorted set, which ranks the
-    /// labels by what the rule orders by.
+    /// Overwrite the JSON and atomically replace the sorted set. Its member scores
+    /// are the ranks, first label highest: a sorted set orders equal scores by
+    /// label, descending, so storing the rule's own score would drop the graph's
+    /// tie-breaks, and under the trust rule every label without a trusted tagger
+    /// ties at zero.
     async fn put_to_global_cache(
         hot_tags_list: HotTags,
         timeframe: &Timeframe,
@@ -281,7 +276,8 @@ impl HotTags {
         let key_parts = Self::build_hot_tags_key_parts(rule, &timeframe_str);
         let ranking: Vec<(f64, &str)> = hot_tags_list
             .iter()
-            .map(|tag| (rule.cache_score(tag), tag.label.as_str()))
+            .enumerate()
+            .map(|(rank, tag)| ((hot_tags_list.len() - rank) as f64, tag.label.as_str()))
             .collect();
         let cached_by_label: HashMap<String, CachedTaggers> = hot_tags_list
             .iter()
@@ -422,7 +418,7 @@ mod tests {
     /// The graph caps `taggers_id` at `GLOBAL_HOT_TAGS_TAGGERS_LIMIT` but counts every
     /// distinct tagger, so `taggers_count` has to round-trip the cache on its own. Read
     /// back through `get_from_global_cache`, since deriving it from the stored sample is
-    /// the regression this guards. The sorted set holds only what a rule orders by, so
+    /// the regression this guards. The sorted set holds only the ranks, so
     /// `tagged_count` and `score` round-trip apart from it, under either rule.
     #[tokio_shared_rt::test(shared)]
     async fn tagger_total_round_trips_the_cache_apart_from_the_sample() -> Result<(), DynError> {
