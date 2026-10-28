@@ -1072,16 +1072,21 @@ async fn test_hot_tags_switch_off_orders_by_posts() -> Result<()> {
     features(false).store().await?;
     // Nothing between storing the switch off and on again may panic: a panic
     // would leave it off for every test that follows. `get_request` asserts
-    // the status, so the off read goes through the client directly.
+    // the status, so the off reads go through the client directly.
     let off = async {
         let url = crate::utils::host_url().await;
         let client = httpc_test::new_client("")?;
-        let response = client
-            .do_get(&format!("{url}/v0/tags/hot?timeframe=today"))
-            .await?;
-        let status = response.status();
-        let body = response.json_body()?;
-        Ok::<_, anyhow::Error>((status, body))
+        let mut bodies = Vec::new();
+        // The global read fills the keys the taggers route reads
+        for endpoint in [
+            "/v0/tags/hot?timeframe=today".to_string(),
+            format!("/v0/tags/hot?user_id={HOT_PEER}&reach=following&timeframe=today"),
+            "/v0/tags/taggers/hotone?timeframe=today".to_string(),
+        ] {
+            let response = client.do_get(&format!("{url}{endpoint}")).await?;
+            bodies.push((endpoint, response.status(), response.json_body()?));
+        }
+        Ok::<_, anyhow::Error>(bodies)
     }
     .await;
     let restored = features(true).store().await;
@@ -1090,9 +1095,11 @@ async fn test_hot_tags_switch_off_orders_by_posts() -> Result<()> {
     cleared?;
     let on = get_request("/v0/tags/hot?timeframe=today").await;
 
-    let (status, off) = off?;
-    assert_eq!(status, 200, "switch off: {off}");
-    let tags = off.as_array().expect("Stream tags should be an array");
+    let off = off?;
+    for (endpoint, status, body) in &off {
+        assert_eq!(*status, 200, "switch off, {endpoint}: {body}");
+    }
+    let tags = off[0].2.as_array().expect("Stream tags should be an array");
     // By posts, then label ascending: the cache keeps the graph's tie-breaks
     assert_eq!(
         labels(tags),
@@ -1104,6 +1111,11 @@ async fn test_hot_tags_switch_off_orders_by_posts() -> Result<()> {
     compare_unit_hot_tag(&tags[2], hot_tag);
     let hot_tag = StreamTagMockup::new(String::from("hotone"), 1, 1, 1, 0.3);
     compare_unit_hot_tag(&tags[4], hot_tag);
+    // By trust, Peer's following list is hotthree, hotone, hotpair, hotzero
+    let tags = off[1].2.as_array().expect("Stream tags should be an array");
+    assert_eq!(labels(tags), ["hotthree", "hotzero", "hotone", "hotpair"]);
+    // hotone has one post, so only the order by posts lists it globally
+    assert_eq!(off[2].2, json!([HOT_SECOND]));
 
     let on = on?;
     let tags = on.as_array().expect("Stream tags should be an array");
