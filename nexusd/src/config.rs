@@ -164,6 +164,7 @@ mod tests {
             .expect("[jobs.trust-recompute] should be present");
         assert!(trust_job.cron.is_none());
         assert!(!c.features.hide_unranked_authors);
+        assert!(!c.features.trust_ranked_hot_tags);
         assert!(c.trust_rank.seed.is_empty());
         assert_eq!(c.trust_rank.alpha, DEFAULT_TRUST_ALPHA);
         assert_eq!(c.trust_rank.max_iterations, DEFAULT_TRUST_MAX_ITERATIONS);
@@ -306,13 +307,37 @@ mod tests {
 
         let absent = DEFAULT_CONFIG_TOML
             .replace("[features]\n", "")
-            .replace("hide_unranked_authors = false\n", "");
+            .replace("hide_unranked_authors = false\n", "")
+            .replace("trust_ranked_hot_tags = false\n", "");
         assert!(!absent.contains("[features]"));
         let c =
             DaemonConfig::try_from_str(&absent).expect("a config without [features] should parse");
         assert!(!c.features.hide_unranked_authors);
 
         let typo = DEFAULT_CONFIG_TOML.replace("hide_unranked_authors", "hide_unranked_author");
+        assert!(DaemonConfig::try_from_str(&typo).is_err());
+    }
+
+    /// The hot-tags ranking switch parses and reaches the watcher's config, a
+    /// config that predates it keeps hot tags ranked by posts, and a misspelled
+    /// switch fails to parse instead of being ignored.
+    #[test]
+    fn test_trust_ranked_hot_tags_parsing() {
+        let on = DEFAULT_CONFIG_TOML.replace(
+            "trust_ranked_hot_tags = false",
+            "trust_ranked_hot_tags = true",
+        );
+        let c = DaemonConfig::try_from_str(&on).expect("switch on should parse");
+        assert!(c.features.trust_ranked_hot_tags);
+        assert!(c.watcher_config().features.trust_ranked_hot_tags);
+
+        let absent = DEFAULT_CONFIG_TOML.replace("trust_ranked_hot_tags = false\n", "");
+        assert!(!absent.contains("trust_ranked_hot_tags"));
+        let c =
+            DaemonConfig::try_from_str(&absent).expect("a config without the switch should parse");
+        assert!(!c.features.trust_ranked_hot_tags);
+
+        let typo = DEFAULT_CONFIG_TOML.replace("trust_ranked_hot_tags", "trust_ranked_hot_tag");
         assert!(DaemonConfig::try_from_str(&typo).is_err());
     }
 

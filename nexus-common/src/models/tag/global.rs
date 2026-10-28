@@ -1,19 +1,23 @@
 use super::{
-    stream::{HOT_TAGS_CACHE_PREFIX, POST_HOT_TAGS},
+    stream::{HotTagsRule, HOT_TAGS_CACHE_PREFIX},
     Taggers as TaggersType,
 };
-use crate::db::{fetch_key_from_graph, kv::RedisResult, queries, GraphResult, RedisOps};
+use crate::db::{
+    fetch_key_from_graph, get_redis_conn, kv::RedisResult, queries, GraphResult, RedisOps,
+};
 use crate::models::error::ModelResult;
 use crate::types::{StreamReach, Timeframe};
 use async_trait::async_trait;
+use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, ops::Deref};
 use utoipa::ToSchema;
 
-/// Versioned: `Taggers` holds the pre-[`CachedTaggers`] shape, a bare id array per
-/// label, which this type cannot deserialize. A new segment lets those keys age out
-/// on their own TTL instead of erroring every read until they do.
-const TAGGERS_INDEX: &str = "TaggersV2";
+/// Versioned: earlier segments hold shapes this type cannot deserialize, a bare
+/// id array per label under `Taggers` and [`CachedTaggers`] without
+/// `tagged_count` and `score` under `TaggersV2`. A new segment lets those keys
+/// age out on their own TTL instead of erroring every read until they do.
+const TAGGERS_INDEX: &str = "TaggersV3";
 
 #[derive(Serialize, Deserialize, Debug, ToSchema, Clone)]
 pub struct Taggers(pub TaggersType);
@@ -35,13 +39,16 @@ impl AsRef<[String]> for Taggers {
     }
 }
 
-/// One label's cached taggers. `total` is the graph's distinct tagger count, which
-/// can exceed `taggers.len()`: the list is a sample capped at write time, so it
-/// cannot stand in for the count.
+/// One label's cached hot tag, all but its rank, which the sorted set beside it
+/// keeps. `total` is the graph's distinct tagger count, which can exceed
+/// `taggers.len()`: the list is a sample capped at write time, so it cannot
+/// stand in for the count.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CachedTaggers {
     pub taggers: Taggers,
     pub total: usize,
+    pub tagged_count: u64,
+    pub score: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -58,33 +65,52 @@ impl Deref for HotTagsTaggers {
 }
 
 impl Taggers {
-    /// Cached taggers map for one timeframe
+    /// Cached taggers map for one timeframe under `rule`
     pub async fn get_from_index(
         timeframe: &Timeframe,
+        rule: HotTagsRule,
         prefix: &str,
     ) -> RedisResult<Option<HotTagsTaggers>> {
         let timeframe_str = timeframe.to_string();
         HotTagsTaggers::try_from_index_json(
-            &Self::build_key_parts(&timeframe_str),
+            &Self::build_key_parts(rule, &timeframe_str),
             Some(prefix.into()),
         )
         .await
     }
 
-    /// Overwrites the timeframe's taggers JSON and arms its TTL.
+    /// Overwrites the timeframe's taggers JSON under `rule` and arms its TTL.
     pub async fn put_to_index(
         taggers: HotTagsTaggers,
         timeframe: &Timeframe,
+        rule: HotTagsRule,
         prefix: &str,
     ) -> RedisResult<()> {
         let timeframe_str = timeframe.to_string();
         taggers
             .put_index_json(
-                &Self::build_key_parts(&timeframe_str),
+                &Self::build_key_parts(rule, &timeframe_str),
                 Some(prefix.to_string()),
                 Some(timeframe.to_cache_period()),
             )
             .await
+    }
+
+    /// Drops the timeframe's taggers JSON under `rule`.
+    pub(super) async fn clear_index(
+        timeframe: &Timeframe,
+        rule: HotTagsRule,
+        prefix: &str,
+    ) -> RedisResult<()> {
+        let timeframe_str = timeframe.to_string();
+        let key = [
+            prefix,
+            &Self::build_key_parts(rule, &timeframe_str).join(":"),
+        ]
+        .join(":");
+        let mut conn = get_redis_conn().await?;
+        let _: () = conn.del(key).await?;
+        Ok(())
     }
 
     /// Global taggers come from the hot-tags cache; reach-scoped taggers hit the graph.
@@ -112,14 +138,17 @@ impl Taggers {
         })
     }
 
-    /// Page of taggers for `label` from the cached map, if that timeframe key exists.
+    /// Page of taggers for `label` from the cached map of the stored rule, if that
+    /// timeframe key exists.
     async fn get_from_global_timeline(
         label: &str,
         skip: usize,
         limit: usize,
         timeframe: &Timeframe,
     ) -> RedisResult<Option<TaggersType>> {
-        let Some(by_label) = Self::get_from_index(timeframe, HOT_TAGS_CACHE_PREFIX).await? else {
+        let rule = HotTagsRule::stored().await?;
+        let Some(by_label) = Self::get_from_index(timeframe, rule, HOT_TAGS_CACHE_PREFIX).await?
+        else {
             return Ok(None);
         };
         Ok(by_label
@@ -152,7 +181,7 @@ impl Taggers {
         fetch_key_from_graph::<TaggersType>(query, "tagger_ids").await
     }
 
-    fn build_key_parts(timeframe: &str) -> Vec<&str> {
-        [&POST_HOT_TAGS[..], &[TAGGERS_INDEX], &[timeframe]].concat()
+    fn build_key_parts(rule: HotTagsRule, timeframe: &str) -> Vec<&str> {
+        [rule.cache_key_parts(), &[TAGGERS_INDEX], &[timeframe]].concat()
     }
 }

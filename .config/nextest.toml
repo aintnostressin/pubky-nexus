@@ -55,6 +55,13 @@ threads-required = 'num-test-threads'
 filter = 'test(=models::user::influencers::tests::refresh_converges_a_stale_all_time_ranking) | test(=models::user::influencers::tests::read_all_time_ranking_walks_every_page) | test(=models::user::influencers::tests::requests_that_miss_together_share_one_rebuild) | test(=models::user::influencers::tests::a_rebuild_holds_up_only_misses_of_its_own_ranking)'
 threads-required = 'num-test-threads'
 
+# These tests store the hot-tags ranking switch (HotTags:TrustRanked) off and on
+# again. Every hot-tags read follows it, and the suites expect it on, as the mock
+# stores it, so they run alone.
+[[profile.default.overrides]]
+filter = 'test(=tags::hot::test_hot_tags_switch_off_orders_by_posts) | test(=config::features::tests::store_round_trips_the_hot_tags_switch)'
+threads-required = 'num-test-threads'
+
 # nexusd/tests/cache_setup/main.rs calls clear_redis(), which issues FLUSHDB
 # against the shared Redis instance. It must not overlap with any other test in
 # the run, including nexus-webapi's search suite under --workspace, or that

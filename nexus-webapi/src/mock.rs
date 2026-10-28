@@ -87,13 +87,15 @@ impl MockDb {
             .expect("Failed to run run-queries.sh");
     }
 
-    /// Rebuilds Redis from the graph, with the trust filter on: the mock data
-    /// and its tests expect it, whatever the config says. Stored before the
-    /// reindex, whose ranking publish applies it.
+    /// Rebuilds Redis from the graph, with the trust filter and the trust-ranked
+    /// hot tags on: the mock data and its tests expect them, whatever the config
+    /// says. Stored before the reindex, whose ranking publish applies the filter
+    /// and whose hot-tags caches follow the ranking switch.
     pub async fn sync_redis() {
         Self::drop_cache().await;
         let features = FeaturesConfig {
             hide_unranked_authors: true,
+            trust_ranked_hot_tags: true,
         };
         features
             .store()

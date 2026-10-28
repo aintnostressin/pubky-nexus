@@ -106,10 +106,12 @@ async fn clear_redis_recreates_post_content_index() -> Result<()> {
     assert_post_content_schema(&after, &prefix, "after clear_redis");
 
     // Restore the mock cache from the graph so the flush is not observable
-    // by whatever runs after this test, with the trust filter switched on as
-    // the mock data has it: the flush dropped the stored switch.
+    // by whatever runs after this test, with the trust filter and the
+    // trust-ranked hot tags switched on as the mock data has them: the flush
+    // dropped the stored switches.
     let features = FeaturesConfig {
         hide_unranked_authors: true,
+        trust_ranked_hot_tags: true,
     };
     features.store().await?;
     reindex::sync().await;

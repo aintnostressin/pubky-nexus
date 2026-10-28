@@ -161,7 +161,7 @@ mod tests {
     use super::{NexusWatcher, DEFAULT_WATCHER_CONFIG_TOML, WATCHER_CONFIG_FILE_NAME};
 
     /// A missing config file is written from the default config, which loads
-    /// with the trust filter off.
+    /// with the trust filter and the trust-ranked hot tags off.
     #[tokio::test]
     async fn test_load_or_create_config_writes_the_default() {
         let dir = tempfile::tempdir().unwrap();
@@ -170,6 +170,7 @@ mod tests {
             .await
             .expect("the default config should load");
         assert!(!config.features.hide_unranked_authors);
+        assert!(!config.features.trust_ranked_hot_tags);
 
         let written = std::fs::read_to_string(dir.path().join(WATCHER_CONFIG_FILE_NAME)).unwrap();
         assert_eq!(written, DEFAULT_WATCHER_CONFIG_TOML);

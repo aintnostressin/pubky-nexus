@@ -88,7 +88,7 @@ pub async fn tag_taggers_handler(
 #[utoipa::path(
     get,
     path = TAGS_HOT_ROUTE,
-    description = "Global Tags by reach",
+    description = "Global Tags by reach. Ranked by tagger trust when the `trust_ranked_hot_tags` feature is on: each tagger adds their trust times a diminishing bonus for the number of posts they tagged with the label in the timeframe (1 + 1/2 + … + 1/n), and the global list needs at least 3 posts behind a label. `score` is that sum. `taggers_id` lists the most trusted taggers first. The counts are unweighted.",
     tag = "Tags",
     params(
         ("user_id" = Option<PubkyId>, Query, description = "User Pubky ID"),

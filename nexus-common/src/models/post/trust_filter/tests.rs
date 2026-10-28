@@ -441,8 +441,10 @@ mod live {
     async fn toggle_stores_the_switch_and_applies_it() -> TestResult {
         setup(&[]).await?;
         let mut conn = get_redis_conn().await?;
+        // The hot-tags switch stays on, as the mock data stores it
         let features = |on| FeaturesConfig {
             hide_unranked_authors: on,
+            trust_ranked_hot_tags: true,
         };
 
         let off = features(false).toggle().await;
