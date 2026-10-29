@@ -980,8 +980,8 @@ async fn test_global_hot_tags_gives_repeat_tags_a_diminishing_bonus() -> Result<
 }
 
 /// The whole order of the global Today list: by score, a label on one post
-/// included. Peer's following list holds the same fixture labels in the same
-/// order.
+/// included. Peer's following list, without Peer's own hotpair tags, ranks
+/// hotpair at 0.3, after hotone by label.
 #[tokio_shared_rt::test(shared)]
 async fn test_global_hot_tags_order_by_score() -> Result<()> {
     let body = get_request("/v0/tags/hot?timeframe=today").await?;
