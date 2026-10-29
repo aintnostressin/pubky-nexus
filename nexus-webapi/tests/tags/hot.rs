@@ -13,7 +13,7 @@ use crate::utils::server::TestServiceServer;
 use crate::utils::{get_request, invalid_get_request};
 
 // The suites run with `trust_ranked_hot_tags` on, as the mock stores it: hot tags
-// rank by tagger trust, and the global list needs three posts behind a label.
+// rank by tagger trust.
 
 const PEER_PUBKY: &str = "o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo";
 // mocks/hot-tags.cypher users
@@ -661,13 +661,11 @@ async fn test_hot_tags_label_taggers() -> Result<()> {
     Ok(())
 }
 
-/// Global taggers come from the cached list, so the label needs three posts
-/// this month: month has them, tag1 only two.
 #[tokio_shared_rt::test(shared)]
 async fn test_hot_tags_label_taggers_with_skip_limit_and_timeframe() -> Result<()> {
     let endpoint = &format!(
         "/v0/tags/taggers/{}?skip=1&limit=2&timeframe=this_month",
-        "month"
+        "tag1"
     );
 
     let body = get_request(endpoint).await?;
@@ -981,26 +979,19 @@ async fn test_global_hot_tags_gives_repeat_tags_a_diminishing_bonus() -> Result<
     Ok(())
 }
 
-/// The global list needs three posts behind a label, so hotone, with one, is
-/// left out. Reach lists have no floor: Peer's following list keeps it.
+/// The whole order of the global Today list: by score, a label on one post
+/// included. Peer's following list holds the same fixture labels in the same
+/// order.
 #[tokio_shared_rt::test(shared)]
-async fn test_global_hot_tags_need_three_posts() -> Result<()> {
+async fn test_global_hot_tags_order_by_score() -> Result<()> {
     let body = get_request("/v0/tags/hot?timeframe=today").await?;
     let tags = body.as_array().expect("Stream tags should be an array");
-    assert_eq!(labels(tags), ["today", "hotpair", "hotthree", "hotzero"]);
-
-    for timeframe in ["this_week", "this_month", "all_time"] {
-        let body = get_request(&format!("/v0/tags/hot?timeframe={timeframe}")).await?;
-        let tags = body.as_array().expect("Stream tags should be an array");
-        assert!(!tags.is_empty(), "{timeframe} returned no hot tags");
-        for tag in tags {
-            assert!(
-                tag["tagged_count"].as_u64() >= Some(3),
-                "{timeframe}: {} has fewer than 3 posts",
-                tag["label"]
-            );
-        }
-    }
+    assert_eq!(
+        labels(tags),
+        ["today", "tag1", "hotpair", "tag2", "hotthree", "hotone", "hotzero"]
+    );
+    let hot_tag = StreamTagMockup::new(String::from("hotone"), 1, 1, 1, 0.3);
+    compare_unit_hot_tag(find_tag(tags, "hotone"), hot_tag);
 
     let endpoint = format!("/v0/tags/hot?user_id={HOT_PEER}&reach=following&timeframe=today");
     let body = get_request(&endpoint).await?;
@@ -1056,8 +1047,7 @@ async fn test_hot_tags_carry_a_score() -> Result<()> {
     Ok(())
 }
 
-/// With the switch off, hot tags keep the order by posts, with no floor, from
-/// keys of their own, and still carry the score; on again, the trust order is
+/// With the switch off, hot tags keep the order by posts, from keys of their own, and still carry the score; on again, the trust order is
 /// back. Changes the switch every hot-tags read follows, so it runs alone (see
 /// .config/nextest.toml), and it clears the keys it made.
 #[tokio_shared_rt::test(shared)]
@@ -1077,11 +1067,9 @@ async fn test_hot_tags_switch_off_orders_by_posts() -> Result<()> {
         let url = crate::utils::host_url().await;
         let client = httpc_test::new_client("")?;
         let mut bodies = Vec::new();
-        // The global read fills the keys the taggers route reads
         for endpoint in [
             "/v0/tags/hot?timeframe=today".to_string(),
             format!("/v0/tags/hot?user_id={HOT_PEER}&reach=following&timeframe=today"),
-            "/v0/tags/taggers/hotone?timeframe=today".to_string(),
         ] {
             let response = client.do_get(&format!("{url}{endpoint}")).await?;
             bodies.push((endpoint, response.status(), response.json_body()?));
@@ -1114,12 +1102,13 @@ async fn test_hot_tags_switch_off_orders_by_posts() -> Result<()> {
     // By trust, Peer's following list is hotthree, hotone, hotpair, hotzero
     let tags = off[1].2.as_array().expect("Stream tags should be an array");
     assert_eq!(labels(tags), ["hotthree", "hotzero", "hotone", "hotpair"]);
-    // hotone has one post, so only the order by posts lists it globally
-    assert_eq!(off[2].2, json!([HOT_SECOND]));
 
     let on = on?;
     let tags = on.as_array().expect("Stream tags should be an array");
-    assert_eq!(labels(tags), ["today", "hotpair", "hotthree", "hotzero"]);
+    assert_eq!(
+        labels(tags),
+        ["today", "tag1", "hotpair", "tag2", "hotthree", "hotone", "hotzero"]
+    );
 
     Ok(())
 }

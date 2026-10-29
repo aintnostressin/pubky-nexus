@@ -277,16 +277,15 @@ MATCH (p1:Post {id: $post3}), (p2:Post {id: $reply_6}) MERGE (p2)-[:REPLIED]->(p
 // ##### Trust-ranked hot tags #######################
 // ###################################################
 // With `trust_ranked_hot_tags` on, each tagger adds their trust times
-// 1 + 1/2 + ... + 1/n for the n posts they tagged with a label, and the global
-// list needs 3 posts behind a label. trust.cypher gives Author, Peer and Second
-// 0.3 and leaves Newcomer without trust. The tags are placed today, so every
-// timeframe sees them; the posts and follows are old, and nobody outside the
-// block follows these users. The ids sort high, out of the influencer suite's
+// 1 + 1/2 + ... + 1/n for the n posts they tagged with a label. trust.cypher
+// gives Author, Peer and Second 0.3 and leaves Newcomer without trust. The tags
+// are placed today, so every timeframe sees them; the posts and follows are old,
+// and nobody outside the block follows these users. The ids sort high, out of the influencer suite's
 // zero-score window; Newcomer's sorts lowest, so trust order differs from id order.
 //   hotthree: Author tags A, B, C                 0.3 * H(3) = 0.55, 3 posts
 //   hotzero:  Newcomer tags A, B, C               0, 3 posts: same counts, no trust
 //   hotpair:  Peer tags A, B; Second, Newcomer C  0.3 * H(2) + 0.3 = 0.75, 3 posts
-//   hotone:   Second tags A                       0.3, 1 post: under the global floor
+//   hotone:   Second tags A                       0.3, 1 post
 // Peer follows Author, Newcomer and Second, so Peer's following reach sees all four.
 :param hot_author => 'zmtwun7yyb77rnx6phr9c5w3ceax5fhjboof4h6xypydo5ujjoby';
 :param hot_newcomer => 'z1yrrut7hwr3cnpsiu768qcj1yojuz54g4ecqz5ejjjzen1ppb4y';

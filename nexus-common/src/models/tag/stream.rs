@@ -45,8 +45,7 @@ pub struct HotTag {
 pub enum HotTagsRule {
     /// By posts tagged with the label.
     Posts,
-    /// By [`HotTag::score`]. The global list needs
-    /// [`HOT_TAGS_MIN_POSTS`](queries::get::HOT_TAGS_MIN_POSTS) posts behind a label.
+    /// By [`HotTag::score`].
     Trust,
 }
 

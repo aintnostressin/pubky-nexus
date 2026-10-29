@@ -1249,11 +1249,6 @@ pub fn get_tag_taggers_by_reach(
         .param("limit", limit as i64)
 }
 
-/// Distinct posts a label needs in the timeframe to be listed in the global hot
-/// tags while they rank by tagger trust: trusted attention on one or two posts
-/// makes a poor hot tag. Reach lists have no floor, or a small network would empty.
-pub const HOT_TAGS_MIN_POSTS: usize = 3;
-
 pub fn get_hot_tags_by_reach(
     user_id: &str,
     reach: StreamReach,
@@ -1272,7 +1267,7 @@ pub fn get_hot_tags_by_reach(
         ",
         stream_reach_to_graph_subquery(&reach),
         hot_tags_tagged_label(tags_query),
-        rank_hot_tags("", rule)
+        rank_hot_tags(rule)
     );
     reach_attrs(Query::new("get_hot_tags_by_reach", &cypher), &reach)
         .param("user_id", user_id)
@@ -1284,10 +1279,6 @@ pub fn get_hot_tags_by_reach(
 }
 
 pub fn get_global_hot_tags(tags_query: &HotTagsInputDTO, rule: HotTagsRule) -> Query {
-    let floor = match rule {
-        HotTagsRule::Trust => "WHERE tagged_count >= $min_posts",
-        HotTagsRule::Posts => "",
-    };
     let (from, to) = tags_query.timeframe.to_timestamp_range();
     let cypher = format!(
         "
@@ -1296,13 +1287,12 @@ pub fn get_global_hot_tags(tags_query: &HotTagsInputDTO, rule: HotTagsRule) -> Q
         {}
         ",
         hot_tags_tagged_label(tags_query),
-        rank_hot_tags(floor, rule)
+        rank_hot_tags(rule)
     );
     Query::new("get_global_hot_tags", &cypher)
         .param("skip", tags_query.skip as i64)
         .param("limit", tags_query.limit as i64)
         .param("taggers_limit", tags_query.taggers_limit as i64)
-        .param("min_posts", HOT_TAGS_MIN_POSTS as i64)
         .param("from", from)
         .param("to", to)
 }
@@ -1318,9 +1308,7 @@ fn hot_tags_tagged_label(tags_query: &HotTagsInputDTO) -> String {
 /// Ranks the labels of the `(tagger)-[tag:TAGGED]->(tagged)` rows matched before
 /// it. Each tagger adds their trust times 1 + 1/2 + ... + 1/n, n being the
 /// distinct nodes they tagged with the label: repeats count, less and less.
-/// `floor` is a `WHERE` on `tagged_count`, the label's distinct tagged nodes,
-/// applied before the per-tagger work.
-fn rank_hot_tags(floor: &str, rule: HotTagsRule) -> String {
+fn rank_hot_tags(rule: HotTagsRule) -> String {
     let order = match rule {
         HotTagsRule::Trust => "hot_tag.score DESC, hot_tag.tagged_count DESC, hot_tag.label ASC",
         HotTagsRule::Posts => "hot_tag.tagged_count DESC, hot_tag.label ASC",
@@ -1329,7 +1317,6 @@ fn rank_hot_tags(floor: &str, rule: HotTagsRule) -> String {
         "
         // The label's distinct tagged nodes, and every tag behind them
         WITH tag.label AS label, COLLECT([tagger, tagged]) AS tags, COUNT(DISTINCT tagged) AS tagged_count
-        {floor}
         UNWIND tags AS tagger_tagged
         // One row per label and tagger: how many distinct nodes they tagged with it
         WITH label, tagged_count, tagger_tagged[0] AS tagger, COUNT(DISTINCT tagger_tagged[1]) AS tagger_count
