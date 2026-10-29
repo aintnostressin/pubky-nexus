@@ -1060,6 +1060,9 @@ async fn test_hot_tags_switch_off_orders_by_posts() -> Result<()> {
     };
 
     features(false).store().await?;
+    // Without the trust order's keys, a taggers read that ignored the switch
+    // would find nothing
+    let cleared_trust = HotTags::clear_global_cache(&Timeframe::Today, HotTagsRule::Trust).await;
     // Nothing between storing the switch off and on again may panic: a panic
     // would leave it off for every test that follows. `get_request` asserts
     // the status, so the off reads go through the client directly.
@@ -1067,9 +1070,11 @@ async fn test_hot_tags_switch_off_orders_by_posts() -> Result<()> {
         let url = crate::utils::host_url().await;
         let client = httpc_test::new_client("")?;
         let mut bodies = Vec::new();
+        // The global read fills the keys the taggers route reads
         for endpoint in [
             "/v0/tags/hot?timeframe=today".to_string(),
             format!("/v0/tags/hot?user_id={HOT_PEER}&reach=following&timeframe=today"),
+            "/v0/tags/taggers/hotone?timeframe=today".to_string(),
         ] {
             let response = client.do_get(&format!("{url}{endpoint}")).await?;
             bodies.push((endpoint, response.status(), response.json_body()?));
@@ -1081,6 +1086,7 @@ async fn test_hot_tags_switch_off_orders_by_posts() -> Result<()> {
     let cleared = HotTags::clear_global_cache(&Timeframe::Today, HotTagsRule::Posts).await;
     restored?;
     cleared?;
+    cleared_trust?;
     let on = get_request("/v0/tags/hot?timeframe=today").await;
 
     let off = off?;
@@ -1102,6 +1108,7 @@ async fn test_hot_tags_switch_off_orders_by_posts() -> Result<()> {
     // By trust, Peer's following list is hotthree, hotone, hotpair, hotzero
     let tags = off[1].2.as_array().expect("Stream tags should be an array");
     assert_eq!(labels(tags), ["hotthree", "hotzero", "hotone", "hotpair"]);
+    assert_eq!(off[2].2, json!([HOT_SECOND]));
 
     let on = on?;
     let tags = on.as_array().expect("Stream tags should be an array");
