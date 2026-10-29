@@ -272,3 +272,59 @@ MATCH (p1:Post {id: $post3}), (p2:Post {id: $reply_5}) MERGE (p2)-[:REPLIED]->(p
 MERGE (p:Post { id: $reply_6 }) SET p.content = "This is a 6 reply", p.kind = "short", p.indexed_at = 1737441201104340;
 MATCH (u:User { id: $user5 }), (p:Post {id: $reply_6}) MERGE (u)-[:AUTHORED]->(p) SET p.uri = "pubky://tkpeqpx3ywoawiw6q8e6kuo9o3egr7fnhx83rudznbrrmqgdmomo/pub/pubky.app/posts/0032BZ3YFDGM8";
 MATCH (p1:Post {id: $post3}), (p2:Post {id: $reply_6}) MERGE (p2)-[:REPLIED]->(p1);
+
+// ###################################################
+// ##### Trust-ranked hot tags #######################
+// ###################################################
+// With `trust_ranked_hot_tags` on, each tagger adds their trust times
+// 1 + 1/2 + ... + 1/n for the n posts they tagged with a label. trust.cypher
+// gives Author, Peer and Second 0.3 and leaves Newcomer without trust. The tags
+// are placed today, so every timeframe sees them; the posts and follows are old,
+// and nobody outside the block follows these users. The ids sort high, out of the influencer suite's
+// zero-score window; Newcomer's sorts lowest, so trust order differs from id order.
+//   hotthree: Author tags A, B, C                 0.3 * H(3) = 0.55, 3 posts
+//   hotzero:  Newcomer tags A, B, C               0, 3 posts: same counts, no trust
+//   hotpair:  Peer tags A, B; Second, Newcomer C  0.3 * H(2) + 0.3 = 0.75, 3 posts
+//   hotone:   Second tags A                       0.3, 1 post
+// Peer follows Author, Newcomer and Second, so Peer's following reach sees all four.
+:param hot_author => 'zmtwun7yyb77rnx6phr9c5w3ceax5fhjboof4h6xypydo5ujjoby';
+:param hot_newcomer => 'z1yrrut7hwr3cnpsiu768qcj1yojuz54g4ecqz5ejjjzen1ppb4y';
+:param hot_peer => 'zp9hooj5djnji9py6td7qj13fju4ta9j1i67h618ps7bkjf6xr5o';
+:param hot_second => 'zwz9ek4dx65b8sw7xj78kucokissw1xh9m48jq7jzpwuf817ifky';
+
+UNWIND [
+  [$hot_author, "HotTag:Author"],
+  [$hot_newcomer, "HotTag:Newcomer"],
+  [$hot_peer, "HotTag:Peer"],
+  [$hot_second, "HotTag:Second"]
+] AS row
+MERGE (u:User {id: row[0]})
+SET u.name = row[1], u.bio = "", u.status = "undefined", u.indexed_at = 1724134095000, u.links = "[]",
+    u.uri = "pubky://" + row[0] + "/pub/pubky.app/profile.json";
+
+UNWIND [["HOTPOSTA00001", "Post A", 1620000000001], ["HOTPOSTB00002", "Post B", 1620000000002], ["HOTPOSTC00003", "Post C", 1620000000003]] AS row
+MATCH (u:User {id: $hot_author})
+MERGE (p:Post {id: row[0]}) SET p.content = row[1], p.kind = "short", p.indexed_at = row[2]
+MERGE (u)-[:AUTHORED]->(p) SET p.uri = "pubky://" + u.id + "/pub/pubky.app/posts/" + row[0];
+
+UNWIND [
+  [$hot_author, "HOTPOSTA00001", "hotthree", "HOTTAGTHREE01"],
+  [$hot_author, "HOTPOSTB00002", "hotthree", "HOTTAGTHREE02"],
+  [$hot_author, "HOTPOSTC00003", "hotthree", "HOTTAGTHREE03"],
+  [$hot_newcomer, "HOTPOSTA00001", "hotzero", "HOTTAGZERO001"],
+  [$hot_newcomer, "HOTPOSTB00002", "hotzero", "HOTTAGZERO002"],
+  [$hot_newcomer, "HOTPOSTC00003", "hotzero", "HOTTAGZERO003"],
+  [$hot_peer, "HOTPOSTA00001", "hotpair", "HOTTAGPAIR001"],
+  [$hot_peer, "HOTPOSTB00002", "hotpair", "HOTTAGPAIR002"],
+  [$hot_second, "HOTPOSTC00003", "hotpair", "HOTTAGPAIR003"],
+  [$hot_newcomer, "HOTPOSTC00003", "hotpair", "HOTTAGPAIR004"],
+  [$hot_second, "HOTPOSTA00001", "hotone", "HOTTAGONE0001"]
+] AS row
+WITH row, datetime().epochMillis AS today_millis
+MATCH (u:User {id: row[0]}), (p:Post {id: row[1]})
+MERGE (u)-[rel:TAGGED {label: row[2], id: row[3], indexed_at: today_millis}]->(p)
+SET rel.uri = "pubky://" + row[0] + "/pub/pubky.app/tags/" + row[3];
+
+UNWIND [[$hot_author, "HOTFOLLOW0001", 1620000000004], [$hot_newcomer, "HOTFOLLOW0002", 1620000000005], [$hot_second, "HOTFOLLOW0003", 1620000000006]] AS row
+MATCH (peer:User {id: $hot_peer}), (u:User {id: row[0]})
+MERGE (peer)-[:FOLLOWS {indexed_at: row[2], id: row[1]}]->(u);

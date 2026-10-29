@@ -86,6 +86,12 @@ max_missing_dep_backoff_secs = 3600
 # updates the shared post sets, and the next trust recompute retries that if it
 # fails. Wiping Redis switches it off until the watcher's next start.
 hide_unranked_authors = false
+# Rank hot tags by tagger trust: each tagger adds their trust times
+# 1 + 1/2 + ... + 1/n for the n posts they tagged with a label. This changes the
+# hot-tag order, which then no longer follows the post count, so the app must
+# show each tag's `score` first. Restart the watcher (or `nexusd run`) to apply
+# a change.
+trust_ranked_hot_tags = false
 
 [stack]
 # Logging, options: error, warn, info, debug and trace
