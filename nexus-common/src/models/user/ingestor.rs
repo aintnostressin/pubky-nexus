@@ -443,6 +443,28 @@ mod tests {
         Ok(())
     }
 
+    /// A newly seen user whose lookup is answered with another key's record is
+    /// neither ingested nor bound where that record points.
+    #[tokio_shared_rt::test(shared)]
+    async fn ingest_refuses_another_keys_record() -> Result<(), DynError> {
+        StackManager::setup(&StackConfig::default()).await?;
+        let user_id = random_pubky_id();
+        let ingestor = UserIngestor::new(
+            [],
+            Arc::new(SigningResolver {
+                keypair: Keypair::random(),
+                homeserver: Some(random_pubky_id()),
+                timestamp: 1,
+            }),
+        );
+
+        let err = ingestor.maybe_ingest_user(&user_id).await.unwrap_err();
+        assert!(err.to_string().contains("is signed by"), "{err}");
+        assert!(UserDetails::get_by_id(user_id.as_ref()).await?.is_none());
+        assert!(get_user_homeserver(user_id.as_ref()).await?.is_none());
+        Ok(())
+    }
+
     /// A recheck asks the network for the newest record, not the cache: the
     /// cached record still names the old homeserver, the fresh one the new.
     #[tokio_shared_rt::test(shared)]
