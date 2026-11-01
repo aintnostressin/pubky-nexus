@@ -167,7 +167,7 @@ impl UserIngestor {
 
         let user_pk = user_id.to_public_key();
         let record = self
-            .resolve_unless_blacklisted(user_id, self.resolver.resolve_record_fresh(&user_pk))
+            .resolve_unless_blacklisted(user_id, self.resolver.resolve_own_record_fresh(&user_pk))
             .await
             .inspect_err(|e| tracing::warn!("Aborting recheck of {user_id}: {e}"))?;
 
@@ -475,6 +475,49 @@ mod tests {
                 homeserver: Some(hs_b.to_string()),
                 outcome: RecheckOutcome::Switched,
             })
+        );
+
+        exec_single_row(queries::del::delete_user(user_id.as_ref())).await?;
+        Ok(())
+    }
+
+    /// A recheck whose fresh answer is another key's record fails and leaves
+    /// the mapping where it was, rather than moving the user where that record
+    /// points.
+    #[tokio_shared_rt::test(shared)]
+    async fn recheck_refuses_another_keys_record() -> Result<(), DynError> {
+        StackManager::setup(&StackConfig::default()).await?;
+        let user = Keypair::random();
+        let user_id = PubkyId::from(user.public_key());
+        let (hs_a, hs_b) = (random_pubky_id(), random_pubky_id());
+        UserIngestor::new(
+            [],
+            Arc::new(SigningResolver {
+                keypair: user.clone(),
+                homeserver: Some(hs_a.clone()),
+                timestamp: 10,
+            }),
+        )
+        .maybe_ingest_user(&user_id)
+        .await?;
+
+        let resolver = TwoAnswersResolver {
+            cached: PkdnsRecord::Published(signed_packet_naming(&user, Some(&hs_a), 10)),
+            fresh: PkdnsRecord::Published(signed_packet_naming(
+                &Keypair::random(),
+                Some(&hs_b),
+                20,
+            )),
+        };
+        let err = UserIngestor::new([], Arc::new(resolver))
+            .recheck_user(&user_id)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("is signed by"), "{err}");
+        let mapping = get_user_homeserver(user_id.as_ref()).await?.expect("bound");
+        assert_eq!(
+            (mapping.hs_id.as_str(), mapping.stale, mapping.record_ts),
+            (hs_a.as_ref(), false, Some(10))
         );
 
         exec_single_row(queries::del::delete_user(user_id.as_ref())).await?;
