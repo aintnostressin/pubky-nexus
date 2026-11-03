@@ -205,30 +205,17 @@ resolver run, preventing redundant PKDNS lookups.
 Higher → cheaper, but Nexus may keep pulling a user's events from an HS they have
 already left for up to ~`hs_resolver_ttl`.
 
-### Following records
+### Record order
 
-`StaleMapping` decides what happens to a bound user whose record names another
-homeserver. The sweep runs with `Enabled`, today's behaviour: the mapping is
-marked `stale` and the user is indexed nowhere until the record names the stored
-homeserver again. The recheck below runs with `Disabled`, which follows the
-record: the mapping moves to the homeserver the record names, clearing a stale
-flag left from before.
+A bound user whose record names another homeserver, or none, keeps the mapping,
+which is marked `stale`: the user is indexed nowhere until a record names the
+stored homeserver again. The mapping is never switched.
 
-Under both policies a record older than the one the mapping was applied from,
-by its timestamp against the edge's `record_ts`, is ignored: it is a replay or
-a lagging node's answer and changes nothing, whatever it names. The same record
-seen again is applied again, so a caller that follows records can act on a
-record the sweep only marked stale. No record at all says nothing: the mapping,
-its flag and its record stand and only `resolved_at` moves. A record naming no
-homeserver is a change the key holder signed, and marks the mapping stale under
-both policies.
-
-`UserIngestor::recheck_user` is the per-user trigger: it asks the network for
-the user's newest record (`resolve_most_recent`, every DHT node and relay) and
-follows it as `Disabled` does, so a user who migrated is indexed from the new
-homeserver without waiting for the sweep. It returns the homeserver the user is
-bound to afterwards and what the check did, `None` for a user nexus does not
-know, and refuses a blacklisted homeserver. No route exposes it.
+A record older than the one the mapping was applied from, by its timestamp
+against the edge's `record_ts`, is ignored: it is a replay or a lagging node's
+answer and changes nothing, whatever it names. The same record seen again is
+applied again. No record at all says nothing: the mapping, its flag and its
+record stand and only `resolved_at` moves.
 
 ### Monitoring stale mappings
 

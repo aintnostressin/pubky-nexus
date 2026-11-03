@@ -504,10 +504,9 @@ pub fn set_user_homeserver(
 /// Toggles the `stale` flag on a user's existing `HOSTED_BY` relationship and
 /// refreshes `resolved_at`.
 ///
-/// The flag is set by `MappingUpdate::MarkedStale`, when the record names no
-/// homeserver or, for the sweep, another one, and it pauses the user's
-/// indexing; `Confirmed` clears it, and `Switched` moves the mapping instead,
-/// through `set_user_homeserver`.
+/// The bound homeserver is never changed. The flag is set by
+/// `MappingUpdate::MarkedStale`, when the record names another homeserver or
+/// none, and it pauses the user's indexing; `Confirmed` clears it.
 ///
 /// `record` is the PKDNS record the flag is applied from, kept on the edge as
 /// [`set_user_homeserver`] keeps it; `None`, when no record was found, leaves
