@@ -1765,7 +1765,7 @@ mod tests {
 
     /// The exported label strings are part of the alerting contract; pin them.
     #[test]
-    fn test_outcome_and_mapping_label_strings() {
+    fn test_outcome_mapping_and_reason_label_strings() {
         assert_eq!(Outcome::Resolved.as_str(), "resolved");
         assert_eq!(Outcome::Unresolved.as_str(), "unresolved");
         assert_eq!(Outcome::Error.as_str(), "error");
@@ -1776,6 +1776,14 @@ mod tests {
         assert_eq!(label(Some(MappingState::Stale)), "stale");
         assert_eq!(label(None), "unknown");
         assert_eq!(mapping_attribute(None).key.as_str(), "mapping");
+
+        let reason = |reason| stale_reason_attribute(reason).value.to_string();
+        assert_eq!(reason(StaleReason::Unresolved), "unresolved");
+        assert_eq!(reason(StaleReason::HsChanged), "hs_changed");
+        assert_eq!(
+            stale_reason_attribute(StaleReason::HsChanged).key.as_str(),
+            "reason"
+        );
     }
 
     #[test]
