@@ -1414,6 +1414,11 @@ mod tests {
             Some(30),
             "a missing record leaves the stored one"
         );
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            Some(mapping(&hs_id, true, Some(30))),
+            "a missing record leaves a stale mapping stale"
+        );
 
         cleanup_test_user(&user_id).await?;
         Ok(())
@@ -1480,6 +1485,24 @@ mod tests {
                 was_stale: false,
             }),
             "a newer record is applied"
+        );
+
+        let outcome = resolve_user(
+            &MockResolver::signed_by(&user, Some(&stored_hs), 20),
+            &user_pk,
+        )
+        .await?;
+        assert_eq!(
+            outcome,
+            Resolution::Applied(MappingUpdate::IgnoredOlder {
+                was_stale: true,
+                names_homeserver: true,
+            })
+        );
+        assert_eq!(
+            get_user_homeserver(&user_id).await?,
+            Some(mapping(&stored_hs, true, Some(30))),
+            "an older record naming the stored homeserver leaves a stale mapping stale"
         );
 
         cleanup_test_user(&user_id).await?;
