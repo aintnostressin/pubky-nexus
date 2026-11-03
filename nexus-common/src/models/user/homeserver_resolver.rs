@@ -99,60 +99,39 @@ pub trait PkdnsHomeserverResolver: Send + Sync {
     /// Looks up the PKDNS record of `user_pk`.
     async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord>;
 
-    /// Like [`Self::resolve_record`], but asks every DHT node and relay for the newest
-    /// record instead of trusting a cache, which is what a check made because something
-    /// changed has to do. A resolver without a cache has nothing fresher to answer with, so
-    /// by default it answers as [`Self::resolve_record`] does.
-    async fn resolve_record_fresh(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
-        self.resolve_record(user_pk).await
-    }
-
-    /// [`Self::resolve_record`], refusing a packet nexus cannot apply; see
-    /// [`own_record`].
+    /// Looks up the PKDNS record of `user_pk`, refusing a packet nexus cannot
+    /// apply:
+    /// - One signed by another key fails the lookup. pkarr 6.0.1 on mainline
+    ///   6.2.0 checks a DHT answer against the key the answer carries, not the
+    ///   key asked for, so any DHT node can answer with another key's packet.
+    /// - One whose timestamp does not fit the graph counts as no record. pkarr
+    ///   reads a DHT item's `seq` as a `u64`, so an item signed with a negative
+    ///   `seq` arrives with such a timestamp; its signature does not verify as a
+    ///   pkarr packet, so it could not be kept as proof either.
     async fn resolve_own_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
-        own_record(user_pk, self.resolve_record(user_pk).await?)
+        let record = self.resolve_record(user_pk).await?;
+        let PkdnsRecord::Published(packet) = &record else {
+            return Ok(record);
+        };
+        if packet.public_key() != *user_pk.as_inner() {
+            return Err(PubkyClientError::RequestFailed {
+                message: format!(
+                    "PKDNS answer for {} is signed by {}",
+                    user_pk.z32(),
+                    packet.public_key().to_z32()
+                ),
+            });
+        }
+        if StoredRecord::try_from(packet).is_err() {
+            tracing::warn!(
+                user_id = %user_pk.z32(),
+                timestamp = packet.timestamp().as_u64(),
+                "PKDNS record timestamp does not fit the graph; taken as no record"
+            );
+            return Ok(PkdnsRecord::Missing);
+        }
+        Ok(record)
     }
-
-    /// [`Self::resolve_record_fresh`], refusing a packet nexus cannot apply;
-    /// see [`own_record`].
-    async fn resolve_own_record_fresh(
-        &self,
-        user_pk: &PublicKey,
-    ) -> PubkyClientResult<PkdnsRecord> {
-        own_record(user_pk, self.resolve_record_fresh(user_pk).await?)
-    }
-}
-
-/// `record`, as a lookup of `user_pk` answered it, unless nexus cannot apply it:
-/// - One signed by another key fails the lookup. pkarr 6.0.1 on mainline 6.2.0
-///   checks a DHT answer against the key the answer carries, not the key asked
-///   for, so any DHT node can answer with another key's packet.
-/// - One whose timestamp does not fit the graph counts as no record. pkarr
-///   reads a DHT item's `seq` as a `u64`, so an item signed with a negative
-///   `seq` arrives with such a timestamp; its signature does not verify as a
-///   pkarr packet, so it could not be kept as proof either.
-fn own_record(user_pk: &PublicKey, record: PkdnsRecord) -> PubkyClientResult<PkdnsRecord> {
-    let PkdnsRecord::Published(packet) = &record else {
-        return Ok(record);
-    };
-    if packet.public_key() != *user_pk.as_inner() {
-        return Err(PubkyClientError::RequestFailed {
-            message: format!(
-                "PKDNS answer for {} is signed by {}",
-                user_pk.z32(),
-                packet.public_key().to_z32()
-            ),
-        });
-    }
-    if StoredRecord::try_from(packet).is_err() {
-        tracing::warn!(
-            user_id = %user_pk.z32(),
-            timestamp = packet.timestamp().as_u64(),
-            "PKDNS record timestamp does not fit the graph; taken as no record"
-        );
-        return Ok(PkdnsRecord::Missing);
-    }
-    Ok(record)
 }
 
 /// Looks up the PKDNS record of `user_pk` through `pubky`: the lookup behind
@@ -160,15 +139,6 @@ fn own_record(user_pk: &PublicKey, record: PkdnsRecord) -> PubkyClientResult<Pkd
 /// no homeserver into one `None`.
 pub async fn pkdns_record_of(pubky: &Pubky, user_pk: &PublicKey) -> PkdnsRecord {
     match pubky.client().pkarr().resolve(user_pk).await {
-        Some(packet) => PkdnsRecord::Published(packet),
-        None => PkdnsRecord::Missing,
-    }
-}
-
-/// The newest PKDNS record of `user_pk` on the network, asked of every DHT node
-/// and relay, which also refreshes `pubky`'s pkarr cache with it.
-pub async fn pkdns_record_of_fresh(pubky: &Pubky, user_pk: &PublicKey) -> PkdnsRecord {
-    match pubky.client().pkarr().resolve_most_recent(user_pk).await {
         Some(packet) => PkdnsRecord::Published(packet),
         None => PkdnsRecord::Missing,
     }
@@ -197,11 +167,6 @@ impl PkdnsHomeserverResolver for PubkyConnectorResolver {
     async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
         let pubky = PubkyConnector::get()?;
         Ok(pkdns_record_of(&pubky, user_pk).await)
-    }
-
-    async fn resolve_record_fresh(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
-        let pubky = PubkyConnector::get()?;
-        Ok(pkdns_record_of_fresh(&pubky, user_pk).await)
     }
 }
 
