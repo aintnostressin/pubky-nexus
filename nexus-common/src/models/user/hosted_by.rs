@@ -221,6 +221,11 @@ mod tests {
                 marked_stale(Unresolved, false),
             ),
             (
+                Some(on_a(true)),
+                naming_none(),
+                marked_stale(Unresolved, true),
+            ),
+            (
                 Some(on_a(false)),
                 PkdnsRecord::Missing,
                 NoRecord { was_stale: false },
