@@ -1,6 +1,6 @@
 //! A user's `HOSTED_BY` binding and how a resolved `_pubky` record is applied
 //! to it: decided by [`MappingUpdate::decide`], written by [`MappingUpdate::apply`].
-//! Shared by the watcher's periodic sweep and the API's recheck.
+//! Shared by the watcher's periodic sweep and the ingestor's recheck.
 //!
 //! The record a mapping was last applied from is kept on the edge, and a
 //! record older than it is a replay or a lagging answer: it changes nothing,
@@ -10,9 +10,7 @@
 //! nothing; a record naming no homeserver is a change the key holder signed,
 //! and marks the mapping stale under both policies.
 
-use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
-use utoipa::ToSchema;
 
 use crate::db::{exec_single_row, fetch_row_from_graph, queries, GraphResult};
 use crate::models::user::{PkdnsRecord, StoredRecord};
@@ -240,7 +238,7 @@ pub async fn set_user_homeserver_stale(
 }
 
 /// The result of re-checking a user's homeserver against the network.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HomeserverRecheck {
     /// The homeserver the user is bound to after the check, if any.
     pub homeserver: Option<String>,
@@ -248,8 +246,7 @@ pub struct HomeserverRecheck {
 }
 
 /// What a recheck did to the user's mapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecheckOutcome {
     /// Nothing is published and the user has no mapping.
     Unbound,
@@ -453,21 +450,21 @@ mod tests {
         );
     }
 
-    /// The API's outcome strings are part of its contract; pin them per update.
+    /// Each update maps to the recheck outcome that names it.
     #[test]
-    fn recheck_outcome_strings_follow_the_update() {
+    fn recheck_outcome_follows_the_update() {
         use MappingUpdate::*;
 
         let cases = [
-            (Unbound, "unbound"),
-            (Bound { to: "b".into() }, "bound"),
-            (Confirmed { was_stale: true }, "confirmed"),
+            (Unbound, RecheckOutcome::Unbound),
+            (Bound { to: "b".into() }, RecheckOutcome::Bound),
+            (Confirmed { was_stale: true }, RecheckOutcome::Confirmed),
             (
                 MarkedStale {
                     reason: StaleReason::Unresolved,
                     was_stale: false,
                 },
-                "unpublished",
+                RecheckOutcome::Unpublished,
             ),
             (
                 Switched {
@@ -475,23 +472,19 @@ mod tests {
                     to: "b".into(),
                     was_stale: false,
                 },
-                "switched",
+                RecheckOutcome::Switched,
             ),
-            (NoRecord { was_stale: true }, "kept"),
+            (NoRecord { was_stale: true }, RecheckOutcome::Kept),
             (
                 IgnoredOlder {
                     was_stale: false,
                     names_homeserver: true,
                 },
-                "ignored",
+                RecheckOutcome::Ignored,
             ),
         ];
         for (update, expected) in cases {
-            assert_eq!(
-                serde_json::to_value(RecheckOutcome::from(&update)).expect("serialises"),
-                serde_json::json!(expected),
-                "{update:?}"
-            );
+            assert_eq!(RecheckOutcome::from(&update), expected, "{update:?}");
         }
     }
 

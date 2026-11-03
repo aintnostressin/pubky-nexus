@@ -223,15 +223,12 @@ its flag and its record stand and only `resolved_at` moves. A record naming no
 homeserver is a change the key holder signed, and marks the mapping stale under
 both policies.
 
-`PUT /v0/recheck/{user_id}` is the per-user trigger: it asks the network for the
-user's newest record (`resolve_most_recent`, every DHT node and relay) and
+`UserIngestor::recheck_user` is the per-user trigger: it asks the network for
+the user's newest record (`resolve_most_recent`, every DHT node and relay) and
 follows it as `Disabled` does, so a user who migrated is indexed from the new
-homeserver without waiting for the sweep. It answers the homeserver the user is
-bound to afterwards and what the check did (`bound`, `confirmed`, `switched`,
-`unpublished`, `kept`, `ignored`, `unbound`), 404 for a user nexus does not
-know, and 403 for
-a blacklisted homeserver. Like the ingest route, it needs the API's Pubky
-client. The client app should call it after a sign-in.
+homeserver without waiting for the sweep. It returns the homeserver the user is
+bound to afterwards and what the check did, `None` for a user nexus does not
+know, and refuses a blacklisted homeserver. No route exposes it.
 
 ### Monitoring stale mappings
 
