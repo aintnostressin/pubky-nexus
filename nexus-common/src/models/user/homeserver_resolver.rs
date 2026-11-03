@@ -31,10 +31,7 @@ impl PkdnsRecord {
     /// nothing else. `None` for a missing record, and for one whose timestamp
     /// does not fit the graph.
     pub fn timestamp(&self) -> Option<i64> {
-        match self {
-            Self::Published(packet) => i64::try_from(packet.timestamp().as_u64()).ok(),
-            Self::Missing => None,
-        }
+        self.stored().map(|stored| stored.timestamp)
     }
 
     /// The record as kept on the user's `HOSTED_BY` edge, when there is one and
