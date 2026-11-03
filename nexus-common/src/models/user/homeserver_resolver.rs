@@ -327,6 +327,7 @@ mod tests {
 
         let record = PkdnsRecord::Published(packet);
         assert_eq!(record.stored(), None);
+        assert_eq!(record.timestamp(), None);
 
         let resolver = FixedRecordResolver(record);
         assert_eq!(
