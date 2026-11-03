@@ -22,8 +22,7 @@ pub use homeserver_resolver::{
 };
 pub use hosted_by::{
     get_user_homeserver, set_user_homeserver, set_user_homeserver_from_record,
-    set_user_homeserver_stale, HomeserverMapping, HomeserverRecheck, MappingUpdate, RecheckOutcome,
-    StaleMapping, StaleReason,
+    set_user_homeserver_stale, HomeserverMapping, MappingUpdate, StaleReason,
 };
 pub use influencers::{Influencers, GLOBAL_INFLUENCERS_CACHE_SIZE};
 pub use ingestor::UserIngestor;

@@ -11,8 +11,7 @@
 
 use nexus_common::db::{fetch_key_from_graph, fetch_row_from_graph, queries, GraphResult};
 use nexus_common::models::user::{
-    get_user_homeserver, HomeserverMapping, MappingUpdate, PkdnsHomeserverResolver, StaleMapping,
-    StaleReason,
+    get_user_homeserver, HomeserverMapping, MappingUpdate, PkdnsHomeserverResolver, StaleReason,
 };
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
@@ -403,7 +402,7 @@ impl Resolution {
     fn outcome(&self) -> Outcome {
         use MappingUpdate::*;
         match self {
-            Self::Applied(Bound { .. } | Confirmed { .. } | Switched { .. }) => Outcome::Resolved,
+            Self::Applied(Bound { .. } | Confirmed { .. }) => Outcome::Resolved,
             Self::Applied(MarkedStale {
                 reason: StaleReason::HsChanged,
                 ..
@@ -434,7 +433,6 @@ impl Resolution {
             Self::Applied(
                 Confirmed { was_stale }
                 | MarkedStale { was_stale, .. }
-                | Switched { was_stale, .. }
                 | NoRecord { was_stale }
                 | IgnoredOlder { was_stale, .. },
             ) => match was_stale {
@@ -466,9 +464,8 @@ impl Resolution {
 }
 
 /// Resolves a single user's HS and applies it to the `HOSTED_BY` mapping (see
-/// [`MappingUpdate::decide`]), keeping the record on the edge. The sweep marks
-/// a mapping stale when the record names another homeserver
-/// ([`StaleMapping::Enabled`]); following the record is the recheck's job.
+/// [`MappingUpdate::decide`]), keeping the record on the edge. A record naming
+/// another homeserver marks the mapping stale; the mapping is never switched.
 ///
 /// A failed lookup is reported as a [`Resolution`] and leaves the graph
 /// untouched; only graph errors are returned as `Err`.
@@ -493,7 +490,7 @@ async fn resolve_user(
     // Read after the lookup, which can take seconds: a recheck may have moved
     // the mapping meanwhile, and the decision is made against what is there now.
     let stored = get_user_homeserver(&user_id).await?;
-    let update = MappingUpdate::decide(stored.as_ref(), &record, StaleMapping::Enabled);
+    let update = MappingUpdate::decide(stored.as_ref(), &record);
     update.apply(&user_id, record.stored().as_ref()).await?;
     Ok(Resolution::Applied(update))
 }
@@ -1748,16 +1745,6 @@ mod tests {
             ),
             (
                 marked_stale(HsChanged, true),
-                Outcome::Resolved,
-                Stale,
-                None,
-            ),
-            (
-                applied(MappingUpdate::Switched {
-                    from: "a".into(),
-                    to: "b".into(),
-                    was_stale: true,
-                }),
                 Outcome::Resolved,
                 Stale,
                 None,
