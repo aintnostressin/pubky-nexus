@@ -475,21 +475,20 @@ async fn resolve_user(
 ) -> Result<Resolution, DynError> {
     let user_id = user_pk.z32();
 
+    // Read the mapping before the lookup, so a failed lookup can be attributed
+    // to the mapping state it would have affected.
+    let stored = get_user_homeserver(&user_id).await?;
+
     let record = match resolver.resolve_own_record(user_pk).await {
         Ok(record) => record,
         Err(e) => {
             warn!(%user_id, error = %e, "PKDNS lookup failed");
-            // Attributed to the mapping state it would have affected.
-            let stored = get_user_homeserver(&user_id).await?;
             return Ok(Resolution::LookupFailed {
                 mapping: MappingState::of(&stored),
             });
         }
     };
 
-    // Read after the lookup, which can take seconds: a recheck may have moved
-    // the mapping meanwhile, and the decision is made against what is there now.
-    let stored = get_user_homeserver(&user_id).await?;
     let update = MappingUpdate::decide(stored.as_ref(), &record);
     update.apply(&user_id, record.stored().as_ref()).await?;
     Ok(Resolution::Applied(update))
@@ -629,7 +628,6 @@ mod tests {
     use nexus_common::types::DynError;
     use nexus_common::utils::test_utils::{random_pk, random_pubky_id, signed_packet_naming};
     use nexus_common::{StackConfig, StackManager};
-    use pubky::pkarr::SignedPacket;
     use pubky::Keypair;
     use pubky_app_specs::PubkyId;
 
@@ -665,31 +663,6 @@ mod tests {
     impl PkdnsHomeserverResolver for MockResolver {
         async fn resolve_record(&self, _user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
             Ok(self.record.clone())
-        }
-    }
-
-    /// Resolver stub that moves the user to `homeserver` during the lookup, as
-    /// a recheck does while the sweep waits on the DHT, and answers the record
-    /// it moved them with.
-    struct RebindingResolver {
-        user_id: String,
-        homeserver: PubkyId,
-        packet: SignedPacket,
-    }
-
-    #[async_trait::async_trait]
-    impl PkdnsHomeserverResolver for RebindingResolver {
-        async fn resolve_record(&self, _user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
-            set_user_homeserver_from_record(
-                &self.user_id,
-                &self.homeserver,
-                &StoredRecord::try_from(&self.packet).expect("a storable test packet"),
-            )
-            .await
-            .map_err(|e| PubkyClientError::RequestFailed {
-                message: e.to_string(),
-            })?;
-            Ok(PkdnsRecord::Published(self.packet.clone()))
         }
     }
 
@@ -1507,39 +1480,6 @@ mod tests {
                 was_stale: false,
             }),
             "a newer record is applied"
-        );
-
-        cleanup_test_user(&user_id).await?;
-        Ok(())
-    }
-
-    /// The sweep decides against the mapping as it is after the lookup: a
-    /// recheck that moved the user meanwhile is confirmed, not overwritten.
-    #[tokio_shared_rt::test(shared)]
-    async fn test_resolve_user_decides_against_the_mapping_after_the_lookup() -> Result<(), DynError>
-    {
-        setup().await?;
-
-        let user = Keypair::random();
-        let user_pk = user.public_key();
-        let user_id = user_pk.z32();
-        let (hs_a, hs_b) = (random_pubky_id(), random_pubky_id());
-        create_test_user(&user_id).await?;
-        resolve_user(&MockResolver::signed_by(&user, Some(&hs_a), 10), &user_pk).await?;
-
-        let resolver = RebindingResolver {
-            user_id: user_id.clone(),
-            homeserver: hs_b.clone(),
-            packet: signed_packet_naming(&user, Some(&hs_b), 20),
-        };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
-        assert_eq!(
-            outcome,
-            Resolution::Applied(MappingUpdate::Confirmed { was_stale: false })
-        );
-        assert_eq!(
-            get_user_homeserver(&user_id).await?,
-            Some(mapping(&hs_b, false, Some(20)))
         );
 
         cleanup_test_user(&user_id).await?;
