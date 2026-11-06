@@ -919,24 +919,27 @@ async fn test_hot_tags_by_reach_taggers_limit_keeps_most_trusted() -> Result<()>
     assert_taggers_by_trust("following", std::slice::from_ref(full_tag)).await
 }
 
-/// hotthree and hotzero both have three posts from one tagger, but only Author
-/// has trust: 0.3 × (1 + 1/2 + 1/3) against nothing, so hotzero comes last.
+/// hotthree and hotzero both have four posts from one tagger, but only Author
+/// has trust: 0.3 × (1 + 1/2 + 1/3 + 1/4) against nothing, so hotzero comes last.
 #[tokio_shared_rt::test(shared)]
 async fn test_global_hot_tags_weighs_taggers_by_trust() -> Result<()> {
     let body = get_request("/v0/tags/hot?timeframe=today").await?;
     let tags = body.as_array().expect("Stream tags should be an array");
 
-    let hot_tag = StreamTagMockup::new(String::from("hotthree"), 1, 3, 1);
+    let hot_tag = StreamTagMockup::new(String::from("hotthree"), 1, 4, 1);
     compare_unit_hot_tag(find_tag(tags, "hotthree"), hot_tag);
-    let hot_tag = StreamTagMockup::new(String::from("hotzero"), 1, 3, 1);
+    let hot_tag = StreamTagMockup::new(String::from("hotzero"), 1, 4, 1);
     compare_unit_hot_tag(tags.last().expect("hot tags"), hot_tag);
 
     Ok(())
 }
 
 /// Repeat tags add less and less: Peer's two hotpair posts and Second's one,
-/// 0.3 × (1 + 1/2) + 0.3, outweigh Author's three hotthree posts,
-/// 0.3 × (1 + 1/2 + 1/3). Newcomer's hotpair tag adds nothing.
+/// 0.3 × (1 + 1/2) + 0.3 = 0.75, outweigh Author's four hotthree posts,
+/// 0.3 × (1 + 1/2 + 1/3 + 1/4) = 0.625, which still outweigh tag2's two
+/// taggers on one post, 0.6. Without the bonus hotthree would score 0.3, after
+/// tag2; with a linear one 1.2, before hotpair; by post count it would lead.
+/// Newcomer's hotpair tag adds nothing.
 #[tokio_shared_rt::test(shared)]
 async fn test_global_hot_tags_gives_repeat_tags_a_diminishing_bonus() -> Result<()> {
     let body = get_request("/v0/tags/hot?timeframe=today").await?;
@@ -945,12 +948,12 @@ async fn test_global_hot_tags_gives_repeat_tags_a_diminishing_bonus() -> Result<
     let order = labels(tags);
     let position = |label| order.iter().position(|listed| *listed == label);
     assert!(
-        position("hotpair") < position("hotthree"),
-        "hotpair should rank above hotthree: {order:?}"
+        position("hotpair") < position("hotthree") && position("hotthree") < position("tag2"),
+        "hotthree should rank between hotpair and tag2: {order:?}"
     );
     let hot_tag = StreamTagMockup::new(String::from("hotpair"), 3, 3, 3);
     compare_unit_hot_tag(find_tag(tags, "hotpair"), hot_tag);
-    let hot_tag = StreamTagMockup::new(String::from("hotthree"), 1, 3, 1);
+    let hot_tag = StreamTagMockup::new(String::from("hotthree"), 1, 4, 1);
     compare_unit_hot_tag(find_tag(tags, "hotthree"), hot_tag);
 
     Ok(())
@@ -965,7 +968,7 @@ async fn test_global_hot_tags_order_by_score() -> Result<()> {
     let tags = body.as_array().expect("Stream tags should be an array");
     assert_eq!(
         labels(tags),
-        ["today", "tag1", "hotpair", "tag2", "hotthree", "hotone", "hotzero"]
+        ["today", "tag1", "hotpair", "hotthree", "tag2", "hotone", "hotzero"]
     );
     let hot_tag = StreamTagMockup::new(String::from("hotone"), 1, 1, 1);
     compare_unit_hot_tag(find_tag(tags, "hotone"), hot_tag);

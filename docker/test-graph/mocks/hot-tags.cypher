@@ -282,10 +282,13 @@ MATCH (p1:Post {id: $post3}), (p2:Post {id: $reply_6}) MERGE (p2)-[:REPLIED]->(p
 // are placed today, so every timeframe sees them; the posts and follows are old,
 // and nobody outside the block follows these users. The ids sort high, out of the influencer suite's
 // zero-score window; Newcomer's sorts lowest, so trust order differs from id order.
-//   hotthree: Author tags A, B, C                 0.3 * H(3) = 0.55, 3 posts
-//   hotzero:  Newcomer tags A, B, C               0, 3 posts: same counts, no trust
+//   hotthree: Author tags A, B, C, D              0.3 * H(4) = 0.625, 4 posts
+//   hotzero:  Newcomer tags A, B, C, D            0, 4 posts: same counts, no trust
 //   hotpair:  Peer tags A, B; Second, Newcomer C  0.3 * H(2) + 0.3 = 0.75, 3 posts
 //   hotone:   Second tags A                       0.3, 1 post
+// With tag1 (0.9) and tag2 (0.6) from tags.cypher, the bonus alone places
+// hotthree between hotpair and tag2: without it hotthree scores 0.3, with a
+// linear one 1.2, and by post count it comes first.
 // Peer follows Author, Newcomer and Second, so Peer's following reach sees all four.
 :param hot_author => 'zmtwun7yyb77rnx6phr9c5w3ceax5fhjboof4h6xypydo5ujjoby';
 :param hot_newcomer => 'z1yrrut7hwr3cnpsiu768qcj1yojuz54g4ecqz5ejjjzen1ppb4y';
@@ -302,7 +305,7 @@ MERGE (u:User {id: row[0]})
 SET u.name = row[1], u.bio = "", u.status = "undefined", u.indexed_at = 1724134095000, u.links = "[]",
     u.uri = "pubky://" + row[0] + "/pub/pubky.app/profile.json";
 
-UNWIND [["HOTPOSTA00001", "Post A", 1620000000001], ["HOTPOSTB00002", "Post B", 1620000000002], ["HOTPOSTC00003", "Post C", 1620000000003]] AS row
+UNWIND [["HOTPOSTA00001", "Post A", 1620000000001], ["HOTPOSTB00002", "Post B", 1620000000002], ["HOTPOSTC00003", "Post C", 1620000000003], ["HOTPOSTD00004", "Post D", 1620000000007]] AS row
 MATCH (u:User {id: $hot_author})
 MERGE (p:Post {id: row[0]}) SET p.content = row[1], p.kind = "short", p.indexed_at = row[2]
 MERGE (u)-[:AUTHORED]->(p) SET p.uri = "pubky://" + u.id + "/pub/pubky.app/posts/" + row[0];
@@ -311,9 +314,11 @@ UNWIND [
   [$hot_author, "HOTPOSTA00001", "hotthree", "HOTTAGTHREE01"],
   [$hot_author, "HOTPOSTB00002", "hotthree", "HOTTAGTHREE02"],
   [$hot_author, "HOTPOSTC00003", "hotthree", "HOTTAGTHREE03"],
+  [$hot_author, "HOTPOSTD00004", "hotthree", "HOTTAGTHREE04"],
   [$hot_newcomer, "HOTPOSTA00001", "hotzero", "HOTTAGZERO001"],
   [$hot_newcomer, "HOTPOSTB00002", "hotzero", "HOTTAGZERO002"],
   [$hot_newcomer, "HOTPOSTC00003", "hotzero", "HOTTAGZERO003"],
+  [$hot_newcomer, "HOTPOSTD00004", "hotzero", "HOTTAGZERO004"],
   [$hot_peer, "HOTPOSTA00001", "hotpair", "HOTTAGPAIR001"],
   [$hot_peer, "HOTPOSTB00002", "hotpair", "HOTTAGPAIR002"],
   [$hot_second, "HOTPOSTC00003", "hotpair", "HOTTAGPAIR003"],
