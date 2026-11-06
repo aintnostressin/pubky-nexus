@@ -45,12 +45,15 @@ async fn key_based_processor_skips_unrecognized_events() -> Result<(), DynError>
     ]]));
 
     let handler = create_mock_handler(Ok(()), None);
+    let hs_id = homeserver.id.to_string();
     let processor = processor(homeserver, handler.clone(), source.clone());
 
     processor.run().await?;
 
     // The unrecognized event is skipped, while the valid event is handled.
     assert_eq!(handler.get_handle_count(), 1);
+    // As read from this homeserver, whose key the handler stores with the line.
+    assert_eq!(handler.get_handled_homeserver_ids(), vec![hs_id]);
 
     // The processor fetched events only for the hosted user.
     assert_eq!(source.calls().await, vec![user_id]);
