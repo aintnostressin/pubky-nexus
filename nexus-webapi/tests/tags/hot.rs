@@ -959,6 +959,27 @@ async fn test_global_hot_tags_gives_repeat_tags_a_diminishing_bonus() -> Result<
     Ok(())
 }
 
+/// Whale, at trust 0.4, is the only Today tagger above the others' 0.3, and its
+/// trust counts capped at the ten trusted Today taggers' 90th percentile, 0.31:
+/// hotwhale scores 0.31 × (1 + 1/2) = 0.465, after tag2's 0.6. Uncapped, its
+/// 0.4 × 1.5 = 0.6 and two posts would place it before tag2.
+#[tokio_shared_rt::test(shared)]
+async fn test_global_hot_tags_cap_the_most_trusted_taggers() -> Result<()> {
+    let body = get_request("/v0/tags/hot?timeframe=today").await?;
+    let tags = body.as_array().expect("Stream tags should be an array");
+
+    let order = labels(tags);
+    let position = |label| order.iter().position(|listed| *listed == label);
+    assert!(
+        position("tag2") < position("hotwhale") && position("hotwhale") < position("hotone"),
+        "hotwhale should rank between tag2 and hotone: {order:?}"
+    );
+    let hot_tag = StreamTagMockup::new(String::from("hotwhale"), 1, 2, 1);
+    compare_unit_hot_tag(find_tag(tags, "hotwhale"), hot_tag);
+
+    Ok(())
+}
+
 /// The whole order of the global Today list: by score, a label on one post
 /// included. Peer's following list, without Peer's own hotpair tags, ranks
 /// hotpair at 0.3, after hotone by label.
@@ -968,7 +989,7 @@ async fn test_global_hot_tags_order_by_score() -> Result<()> {
     let tags = body.as_array().expect("Stream tags should be an array");
     assert_eq!(
         labels(tags),
-        ["today", "tag1", "hotpair", "hotthree", "tag2", "hotone", "hotzero"]
+        ["today", "tag1", "hotpair", "hotthree", "tag2", "hotwhale", "hotone", "hotzero"]
     );
     let hot_tag = StreamTagMockup::new(String::from("hotone"), 1, 1, 1);
     compare_unit_hot_tag(find_tag(tags, "hotone"), hot_tag);

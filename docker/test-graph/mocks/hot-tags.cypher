@@ -286,24 +286,34 @@ MATCH (p1:Post {id: $post3}), (p2:Post {id: $reply_6}) MERGE (p2)-[:REPLIED]->(p
 //   hotzero:  Newcomer tags A, B, C, D            0, 4 posts: same counts, no trust
 //   hotpair:  Peer tags A, B; Second, Newcomer C  0.3 * H(2) + 0.3 = 0.75, 3 posts
 //   hotone:   Second tags A                       0.3, 1 post
+//   hotwhale: Whale (trust 0.4) tags A, B         capped 0.31 * H(2) = 0.465, 2 posts
 // With tag1 (0.9) and tag2 (0.6) from tags.cypher, the bonus alone places
 // hotthree between hotpair and tag2: without it hotthree scores 0.3, with a
-// linear one 1.2, and by post count it comes first.
-// Peer follows Author, Newcomer and Second, so Peer's following reach sees all four.
+// linear one 1.2, and by post count it comes first. Whale is the only Today
+// tagger above the others' 0.3: the 90th percentile of the ten trusted Today
+// taggers caps its trust at 0.31, placing hotwhale after tag2; uncapped, its
+// 0.6 and two posts would place it before tag2.
+// Peer follows Author, Newcomer and Second, so Peer's following reach sees them;
+// nobody follows Whale.
 :param hot_author => 'zmtwun7yyb77rnx6phr9c5w3ceax5fhjboof4h6xypydo5ujjoby';
 :param hot_newcomer => 'z1yrrut7hwr3cnpsiu768qcj1yojuz54g4ecqz5ejjjzen1ppb4y';
 :param hot_peer => 'zp9hooj5djnji9py6td7qj13fju4ta9j1i67h618ps7bkjf6xr5o';
 :param hot_second => 'zwz9ek4dx65b8sw7xj78kucokissw1xh9m48jq7jzpwuf817ifky';
+:param hot_whale => 'zzebt9x5wbxftu9ofb1bbuut1aweagx73ox5mrrb564g1ro8iggo';
 
 UNWIND [
   [$hot_author, "HotTag:Author"],
   [$hot_newcomer, "HotTag:Newcomer"],
   [$hot_peer, "HotTag:Peer"],
-  [$hot_second, "HotTag:Second"]
+  [$hot_second, "HotTag:Second"],
+  [$hot_whale, "HotTag:Whale"]
 ] AS row
 MERGE (u:User {id: row[0]})
 SET u.name = row[1], u.bio = "", u.status = "undefined", u.indexed_at = 1724134095000, u.links = "[]",
     u.uri = "pubky://" + row[0] + "/pub/pubky.app/profile.json";
+
+// Tied with wot.cypher's D1 for the highest fixture trust; trust.cypher leaves it as set
+MATCH (whale:User {id: $hot_whale}) SET whale.trust = 0.4;
 
 UNWIND [["HOTPOSTA00001", "Post A", 1620000000001], ["HOTPOSTB00002", "Post B", 1620000000002], ["HOTPOSTC00003", "Post C", 1620000000003], ["HOTPOSTD00004", "Post D", 1620000000007]] AS row
 MATCH (u:User {id: $hot_author})
@@ -323,7 +333,9 @@ UNWIND [
   [$hot_peer, "HOTPOSTB00002", "hotpair", "HOTTAGPAIR002"],
   [$hot_second, "HOTPOSTC00003", "hotpair", "HOTTAGPAIR003"],
   [$hot_newcomer, "HOTPOSTC00003", "hotpair", "HOTTAGPAIR004"],
-  [$hot_second, "HOTPOSTA00001", "hotone", "HOTTAGONE0001"]
+  [$hot_second, "HOTPOSTA00001", "hotone", "HOTTAGONE0001"],
+  [$hot_whale, "HOTPOSTA00001", "hotwhale", "HOTTAGWHALE01"],
+  [$hot_whale, "HOTPOSTB00002", "hotwhale", "HOTTAGWHALE02"]
 ] AS row
 WITH row, datetime().epochMillis AS today_millis
 MATCH (u:User {id: row[0]}), (p:Post {id: row[1]})

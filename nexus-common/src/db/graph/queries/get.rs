@@ -1306,17 +1306,31 @@ fn hot_tags_tagged_label(tags_query: &HotTagsInputDTO) -> String {
 /// Ranks the labels of the `(tagger)-[tag:TAGGED]->(tagged)` rows matched before
 /// it. Each tagger adds their trust times 1 + 1/2 + ... + 1/n, n being the
 /// distinct nodes they tagged with the label: repeats count, less and less.
+/// The trust counted is capped at the 90th percentile of the trusted taggers
+/// in the rows, so the most trusted accounts weigh like well-trusted ones: none
+/// carries a label alone. Below the cap the weight is linear, so splitting
+/// trust over more accounts still gains nothing.
 const RANK_HOT_TAGS: &str = "
         // The label's distinct tagged nodes, and every tag behind them
         WITH tag.label AS label, COLLECT([tagger, tagged]) AS tags, COUNT(DISTINCT tagged) AS tagged_count
         UNWIND tags AS tagger_tagged
         // One row per label and tagger: how many distinct nodes they tagged with it
         WITH label, tagged_count, tagger_tagged[0] AS tagger, COUNT(DISTINCT tagger_tagged[1]) AS tagger_count
+        WITH COLLECT([label, tagged_count, tagger, tagger_count]) AS rows, COLLECT(DISTINCT tagger) AS taggers
+        // One row even without trusted taggers, whose cap is then null and caps nothing
+        CALL (taggers) {
+            UNWIND taggers AS tagger
+            WITH tagger WHERE tagger.trust > 0
+            RETURN percentileCont(tagger.trust, 0.9) AS trust_cap
+        }
+        UNWIND rows AS row
+        WITH row[0] AS label, row[1] AS tagged_count, row[2] AS tagger, row[3] AS tagger_count, trust_cap
         WITH label, tagged_count, tagger.id AS tagger_id, coalesce(tagger.trust, 0.0) AS trust,
-            reduce(bonus = 0.0, n IN range(1, tagger_count) | bonus + 1.0 / n) AS bonus
+            reduce(bonus = 0.0, n IN range(1, tagger_count) | bonus + 1.0 / n) AS bonus, trust_cap
         // COLLECT keeps its input order: the most trusted taggers first, ties by id
         ORDER BY trust DESC, tagger_id ASC
-        WITH label, tagged_count, COLLECT(tagger_id) AS taggers, sum(trust * bonus) AS score
+        WITH label, tagged_count, COLLECT(tagger_id) AS taggers,
+            sum(CASE WHEN trust > trust_cap THEN trust_cap ELSE trust END * bonus) AS score
         ORDER BY score DESC, tagged_count DESC, label ASC
         SKIP $skip LIMIT $limit
         RETURN COLLECT({
