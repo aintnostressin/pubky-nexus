@@ -435,7 +435,11 @@ struct CountingHandler {
 
 #[async_trait::async_trait]
 impl EventHandler for CountingHandler {
-    async fn handle(&self, _event: &Event) -> Result<(), EventProcessorError> {
+    async fn handle(
+        &self,
+        _event: &Event,
+        _homeserver_id: &str,
+    ) -> Result<(), EventProcessorError> {
         self.handled.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -1333,7 +1337,11 @@ impl ShutdownOnFirstHandle {
 
 #[async_trait::async_trait]
 impl EventHandler for ShutdownOnFirstHandle {
-    async fn handle(&self, _event: &Event) -> Result<(), EventProcessorError> {
+    async fn handle(
+        &self,
+        _event: &Event,
+        _homeserver_id: &str,
+    ) -> Result<(), EventProcessorError> {
         if self.handle_count.fetch_add(1, Ordering::SeqCst) == 0 {
             let _ = self.shutdown_tx.send(true);
         }

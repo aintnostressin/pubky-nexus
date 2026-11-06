@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use nexus_common::file::ConfigLoader;
 use nexus_common::types::DynError;
 use nexus_common::StackConfig;
+use pubky_app_specs::PubkyId;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::fmt::Debug;
 use std::path::PathBuf;
@@ -15,6 +16,10 @@ const DEFAULT_CONFIG_TOML: &str = include_str!("default.config.toml");
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrationConfig {
     pub backfill_ready: Vec<String>,
+    /// The watcher's `homeserver`. Optional so configs written before it existed still load;
+    /// a migration that needs it fails without it.
+    #[serde(default)]
+    pub primary_homeserver: Option<PubkyId>,
     pub stack: StackConfig,
 }
 
@@ -52,6 +57,10 @@ impl MigrationBuilder {
 
     pub fn stack(&self) -> &StackConfig {
         &self.0.stack
+    }
+
+    pub fn primary_homeserver(&self) -> Option<PubkyId> {
+        self.0.primary_homeserver.clone()
     }
 
     pub fn migrations_backfill_ready(self) -> Vec<String> {

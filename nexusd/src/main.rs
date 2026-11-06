@@ -37,14 +37,14 @@ async fn main() -> Result<(), DynError> {
                     let builder = MigrationBuilder::new(config_dir).await?;
                     StackManager::setup(builder.stack()).await?;
                     let mut mm = MigrationManager::default();
-                    import_migrations(&mut mm);
+                    import_migrations(&mut mm, builder.primary_homeserver());
                     mm.run(&builder.migrations_backfill_ready()).await?;
                 }
                 MigrationCommands::Check => {
                     let builder = MigrationBuilder::new(config_dir).await?;
                     StackManager::setup(builder.stack()).await?;
                     let mut mm = MigrationManager::default();
-                    import_migrations(&mut mm);
+                    import_migrations(&mut mm, builder.primary_homeserver());
                     let pending = mm.check(&builder.migrations_backfill_ready()).await?;
                     if pending.is_empty() {
                         println!("No pending migrations");

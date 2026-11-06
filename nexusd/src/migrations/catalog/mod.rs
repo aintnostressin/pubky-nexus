@@ -1,8 +1,10 @@
 //! Concrete migrations the daemon can register. The manager does not depend on these types.
 
 use super::manager::{Migration, MigrationManager};
+use pubky_app_specs::PubkyId;
 
 use collected_edges_backfill_1789344000::CollectedEdgesBackfill1789344000;
+use event_line_homeserver_backfill_1794005092::EventLineHomeserverBackfill1794005092;
 use file_details_keys_retire_1792145757::FileDetailsKeysRetire1792145757;
 use post_content_index_author_setup_1780531200::PostContentIndexAuthorSetup1780531200;
 use post_content_index_setup_1780444800::PostContentIndexSetup1780444800;
@@ -21,7 +23,12 @@ use users_by_tags_index_backfill_1786924800::UsersByTagsIndexBackfill1786924800;
 /// Registers this daemon's migrations with the manager.
 ///
 /// After `db migration new`, add `Box::new(YourMigration)` here.
-pub fn import_migrations(migration_manager: &mut MigrationManager) {
+///
+/// `primary_homeserver` is the migrations config's, for the migrations that need it.
+pub fn import_migrations(
+    migration_manager: &mut MigrationManager,
+    primary_homeserver: Option<PubkyId>,
+) {
     let migrations: Vec<Box<dyn Migration>> = vec![
         // Note: Add your migrations here to be picked up by the manager
         Box::new(UsersByPkReindex1751635096),
@@ -41,6 +48,7 @@ pub fn import_migrations(migration_manager: &mut MigrationManager) {
         Box::new(ResourceTagKeysRetire1792076035),
         Box::new(FileDetailsKeysRetire1792145757),
         Box::new(UserCountsKeysRetire1792418266),
+        Box::new(EventLineHomeserverBackfill1794005092 { primary_homeserver }),
     ];
     for migration in migrations {
         migration_manager.register(migration);
@@ -50,6 +58,7 @@ pub fn import_migrations(migration_manager: &mut MigrationManager) {
 // `db migration new` appends `pub mod …;` here.
 // pub mod tag_counts_reset_1739459180;
 pub mod collected_edges_backfill_1789344000;
+pub mod event_line_homeserver_backfill_1794005092;
 pub mod file_details_keys_retire_1792145757;
 pub mod post_content_index_author_setup_1780531200;
 pub mod post_content_index_setup_1780444800;

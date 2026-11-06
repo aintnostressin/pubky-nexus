@@ -266,7 +266,15 @@ pub trait TEventProcessor: Send + Sync + 'static {
             }
         }
 
-        if let Err(e) = self.event_handler().handle(event).await {
+        // Only processors that read a homeserver call this; the line is stored with its key.
+        let Some(homeserver_id) = self.homeserver_id() else {
+            error!(event.uri = %event.uri, "No homeserver to store with the event; skipping event");
+            span.record("otel.status_code", "ERROR");
+            span.record("otel.status_message", "NO_HOMESERVER");
+            return Ok(());
+        };
+
+        if let Err(e) = self.event_handler().handle(event, homeserver_id).await {
             span.record("otel.status_code", "ERROR");
             span.record("otel.status_message", tracing::field::display(&e));
 

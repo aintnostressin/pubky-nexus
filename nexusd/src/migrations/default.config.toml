@@ -3,6 +3,9 @@
 #backfill_ready = ["Xakala1741101644"]
 backfill_ready = []
 
+# The watcher's `homeserver`, the primary homeserver. Migrations that need it fail without it.
+#primary_homeserver = "<z32 public key>"
+
 [stack]
 # Logging, options: error, warn, info, debug and trace
 log_level = "debug"
