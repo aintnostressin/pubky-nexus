@@ -106,6 +106,10 @@ const PREVIEW_PROBES: usize = 20;
 /// route in `nexus-webapi/src/routes/v0/stream/users.rs`.
 const USERS_PAGE_MAX: usize = 20;
 
+/// How many times the preview test reads the whole ranking, at most, to see two reads in
+/// a row agree.
+const RANKING_READS: usize = 3;
+
 #[tokio_shared_rt::test(shared)]
 async fn test_global_influencers_preview() -> Result<()> {
     let ranking_ids = global_influencers_ranking().await?;
@@ -168,7 +172,11 @@ fn assert_contiguous_window(ranking_ids: &[String], preview_ids: &[String]) {
     let start = ranking_ids
         .iter()
         .position(|id| *id == preview_ids[0])
-        .expect("The first preview influencer must appear in the global ranking");
+        .unwrap_or_else(|| {
+            panic!(
+                "The first preview influencer must appear in the global ranking: {preview_ids:?}"
+            )
+        });
 
     assert_eq!(
         ranking_ids.get(start..start + preview_ids.len()),
@@ -177,10 +185,33 @@ fn assert_contiguous_window(ranking_ids: &[String], preview_ids: &[String]) {
     );
 }
 
-/// The global influencers ranking as the API serves it: the cached top
+/// The global influencers ranking as the API serves it, once reading it no longer
+/// changes it.
+///
+/// Serving the all-time ranking evicts the deleted users it meets from the live set
+/// (`filter_deleted` in nexus-common), and every later entry moves up one place. The
+/// entry that moves up into the page just served is never returned, so the read that
+/// evicts comes back one live user short. The mock data ranks two deleted users in the
+/// top 100, so on a fresh mock the first read this deep is short. Read until two reads
+/// agree.
+async fn global_influencers_ranking() -> Result<Vec<String>> {
+    let mut ranking = read_global_influencers_ranking().await?;
+
+    for _ in 1..RANKING_READS {
+        let next = read_global_influencers_ranking().await?;
+        if next == ranking {
+            return Ok(ranking);
+        }
+        ranking = next;
+    }
+
+    panic!("the global influencers ranking did not settle within {RANKING_READS} reads");
+}
+
+/// One read of the global influencers ranking: the cached top
 /// `GLOBAL_INFLUENCERS_CACHE_SIZE` entries, read as pages of at most `USERS_PAGE_MAX`.
 /// A preview window can start at the last offset of the cache, so the whole cache is read.
-async fn global_influencers_ranking() -> Result<Vec<String>> {
+async fn read_global_influencers_ranking() -> Result<Vec<String>> {
     let mut ranking = Vec::new();
 
     for skip in (0..GLOBAL_INFLUENCERS_CACHE_SIZE).step_by(USERS_PAGE_MAX) {
