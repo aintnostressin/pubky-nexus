@@ -14,8 +14,10 @@ pub const USER_1: &str = "pyc598poqkdgtx1wc4aeptx67mqg71mmywyh7uzkffzittjmbiuo";
 const USER_4: &str = "r91hi8kc3x6761gwfiigr7yn6nca1z47wm6jadhw1jbx1co93r9y";
 const USER_5: &str = "tkpeqpx3ywoawiw6q8e6kuo9o3egr7fnhx83rudznbrrmqgdmomo";
 // mocks/hot-tags.cypher's trust-ranked block, tagged today: Peer follows Author,
-// Second and Newcomer, who has no trust and the lowest id
+// Second and Newcomer, who has zero trust and the lowest id; Lurker follows
+// Whale, Second and Sliver
 const HOT_PEER: &str = "zp9hooj5djnji9py6td7qj13fju4ta9j1i67h618ps7bkjf6xr5o";
+const HOT_LURKER: &str = "zzr77pcnyhbty8k8xhe5fd9h83tquur74uuyk71exbp4t6yemmey";
 const HOT_SECOND: &str = "zwz9ek4dx65b8sw7xj78kucokissw1xh9m48jq7jzpwuf817ifky";
 const HOT_NEWCOMER: &str = "z1yrrut7hwr3cnpsiu768qcj1yojuz54g4ecqz5ejjjzen1ppb4y";
 
@@ -959,10 +961,10 @@ async fn test_global_hot_tags_gives_repeat_tags_a_diminishing_bonus() -> Result<
     Ok(())
 }
 
-/// Whale, at trust 0.4, is the only Today tagger above the others' 0.3, and its
-/// trust counts capped at the ten trusted Today taggers' 90th percentile, 0.31:
-/// hotwhale scores 0.31 × (1 + 1/2) = 0.465, after tag2's 0.6. Uncapped, its
-/// 0.4 × 1.5 = 0.6 and two posts would place it before tag2.
+/// Whale, at trust 0.4, is the only Today tagger above 0.3, so its trust counts
+/// capped at the third most trusted Today tagger's, 0.3: hotwhale scores
+/// 0.3 × (1 + 1/2) = 0.45, after tag2's 0.6. Uncapped, its 0.4 × 1.5 = 0.6 and
+/// two posts would place it before tag2.
 #[tokio_shared_rt::test(shared)]
 async fn test_global_hot_tags_cap_the_most_trusted_taggers() -> Result<()> {
     let body = get_request("/v0/tags/hot?timeframe=today").await?;
@@ -982,14 +984,26 @@ async fn test_global_hot_tags_cap_the_most_trusted_taggers() -> Result<()> {
 
 /// The whole order of the global Today list: by score, a label on one post
 /// included. Peer's following list, without Peer's own hotpair tags, ranks
-/// hotpair at 0.3, after hotone by label.
+/// hotpair at 0.3, after hotone by label. Its trusted taggers are Author and
+/// Second, so nothing is capped there; were Newcomer's zero trust counted as a
+/// third, the cap would be 0 and the list would fall back to post counts.
 #[tokio_shared_rt::test(shared)]
 async fn test_global_hot_tags_order_by_score() -> Result<()> {
     let body = get_request("/v0/tags/hot?timeframe=today").await?;
     let tags = body.as_array().expect("Stream tags should be an array");
     assert_eq!(
         labels(tags),
-        ["today", "tag1", "hotpair", "hotthree", "tag2", "hotwhale", "hotone", "hotzero"]
+        [
+            "today",
+            "tag1",
+            "hotpair",
+            "hotthree",
+            "tag2",
+            "hotwhale",
+            "hotone",
+            "hotsliver",
+            "hotzero"
+        ]
     );
     let hot_tag = StreamTagMockup::new(String::from("hotone"), 1, 1, 1);
     compare_unit_hot_tag(find_tag(tags, "hotone"), hot_tag);
@@ -1000,6 +1014,23 @@ async fn test_global_hot_tags_order_by_score() -> Result<()> {
     assert_eq!(labels(tags), ["hotthree", "hotone", "hotpair", "hotzero"]);
     let hot_tag = StreamTagMockup::new(String::from("hotone"), 1, 1, 1);
     compare_unit_hot_tag(find_tag(tags, "hotone"), hot_tag);
+
+    Ok(())
+}
+
+/// The known limit of a window with fewer than three trusted taggers: Lurker
+/// follows Whale (0.4), Second (0.3) and Sliver (0.001). Sliver is the third
+/// most trusted, so its 0.001 caps all three and the list becomes a count of
+/// tags: hotsliver, 0.001 × (1 + 1/2 + 1/3), passes hotwhale, 0.001 × 1.5.
+/// Without Sliver nothing would be capped and hotwhale, at 0.6, would lead.
+#[tokio_shared_rt::test(shared)]
+async fn test_hot_tags_by_reach_sliver_of_trust_caps_a_small_window() -> Result<()> {
+    let endpoint = format!("/v0/tags/hot?user_id={HOT_LURKER}&reach=following&timeframe=today");
+    let body = get_request(&endpoint).await?;
+    let tags = body.as_array().expect("Stream tags should be an array");
+    assert_eq!(labels(tags), ["hotsliver", "hotwhale", "hotone", "hotpair"]);
+    let hot_tag = StreamTagMockup::new(String::from("hotsliver"), 1, 3, 1);
+    compare_unit_hot_tag(find_tag(tags, "hotsliver"), hot_tag);
 
     Ok(())
 }

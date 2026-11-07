@@ -1306,10 +1306,12 @@ fn hot_tags_tagged_label(tags_query: &HotTagsInputDTO) -> String {
 /// Ranks the labels of the `(tagger)-[tag:TAGGED]->(tagged)` rows matched before
 /// it. Each tagger adds their trust times 1 + 1/2 + ... + 1/n, n being the
 /// distinct nodes they tagged with the label: repeats count, less and less.
-/// The trust counted is capped at the 90th percentile of the trusted taggers
-/// in the rows, so the most trusted accounts weigh like well-trusted ones: none
-/// carries a label alone. Below the cap the weight is linear, so splitting
-/// trust over more accounts still gains nothing.
+/// The trust counted is capped at the third most trusted tagger's in the rows,
+/// so the two most trusted weigh no more than the next. From three trusted
+/// taggers on, more can only raise the cap, so accounts with a sliver of trust
+/// cannot pull it down, and below it the weight is linear: splitting trust gains
+/// nothing. With fewer than three nothing is capped, so in such a window a third
+/// tagger with a sliver of trust caps the other two at its level.
 const RANK_HOT_TAGS: &str = "
         // The label's distinct tagged nodes, and every tag behind them
         WITH tag.label AS label, COLLECT([tagger, tagged]) AS tags, COUNT(DISTINCT tagged) AS tagged_count
@@ -1317,11 +1319,12 @@ const RANK_HOT_TAGS: &str = "
         // One row per label and tagger: how many distinct nodes they tagged with it
         WITH label, tagged_count, tagger_tagged[0] AS tagger, COUNT(DISTINCT tagger_tagged[1]) AS tagger_count
         WITH COLLECT([label, tagged_count, tagger, tagger_count]) AS rows, COLLECT(DISTINCT tagger) AS taggers
-        // One row even without trusted taggers, whose cap is then null and caps nothing
+        // One row even with fewer than three trusted taggers: the cap is then null and caps nothing
         CALL (taggers) {
             UNWIND taggers AS tagger
-            WITH tagger WHERE tagger.trust > 0
-            RETURN percentileCont(tagger.trust, 0.9) AS trust_cap
+            WITH tagger.trust AS trust WHERE trust > 0
+            ORDER BY trust DESC
+            RETURN COLLECT(trust)[2] AS trust_cap
         }
         UNWIND rows AS row
         WITH row[0] AS label, row[1] AS tagged_count, row[2] AS tagger, row[3] AS tagger_count, trust_cap
