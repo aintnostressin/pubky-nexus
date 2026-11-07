@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use nexus_common::file::ConfigLoader;
 use nexus_common::types::DynError;
 use nexus_common::StackConfig;
-use pubky_app_specs::PubkyId;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::fmt::Debug;
 use std::path::PathBuf;
@@ -16,10 +15,6 @@ const DEFAULT_CONFIG_TOML: &str = include_str!("default.config.toml");
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrationConfig {
     pub backfill_ready: Vec<String>,
-    /// The watcher's `homeserver`. Optional so configs written before it existed still load;
-    /// a migration that needs it fails without it.
-    #[serde(default)]
-    pub primary_homeserver: Option<PubkyId>,
     pub stack: StackConfig,
 }
 
@@ -59,10 +54,6 @@ impl MigrationBuilder {
         &self.0.stack
     }
 
-    pub fn primary_homeserver(&self) -> Option<PubkyId> {
-        self.0.primary_homeserver.clone()
-    }
-
     pub fn migrations_backfill_ready(self) -> Vec<String> {
         self.0.backfill_ready
     }
@@ -93,33 +84,6 @@ mod tests {
         );
         // The written default config has no backfill_ready entries.
         assert!(builder.0.backfill_ready.is_empty());
-        // ... and leaves the primary homeserver unset.
-        assert!(builder.primary_homeserver().is_none());
-    }
-
-    #[tokio::test]
-    async fn new_loads_primary_homeserver_from_config() {
-        const PRIMARY: &str = "8um71us3fyw6h8wbcxb5ar3rwusy1a6u49956ikzojg3gcwd1dty";
-        let config_dir = tempfile::tempdir().expect("tempdir should be created");
-        let migrations_dir = config_dir.path().join(MIGRATIONS_CONFIG_DIR);
-        std::fs::create_dir_all(&migrations_dir).expect("migrations dir should be created");
-        std::fs::write(
-            migrations_dir.join(MIGRATIONS_CONFIG_FILE_NAME),
-            DEFAULT_CONFIG_TOML.replace(
-                "#primary_homeserver = \"<z32 public key>\"",
-                &format!("primary_homeserver = \"{PRIMARY}\""),
-            ),
-        )
-        .expect("config file should be written");
-
-        let builder = MigrationBuilder::new(config_dir.path().to_path_buf())
-            .await
-            .expect("builder should load the config");
-
-        assert_eq!(
-            builder.primary_homeserver().map(|key| key.to_string()),
-            Some(PRIMARY.to_string())
-        );
     }
 
     #[tokio::test]

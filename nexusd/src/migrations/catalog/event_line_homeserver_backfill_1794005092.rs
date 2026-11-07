@@ -9,14 +9,14 @@ use redis::Script;
 use std::collections::{BTreeSet, HashMap};
 use tracing::info;
 
-/// Give every event line stored before Nexus kept the homeserver key that key, so each line of
-/// `/v0/events` ends with one.
+/// Give the event lines stored before Nexus kept the homeserver key that key, where the graph
+/// knows it.
 ///
 /// # What this does
 /// Walks the `Events` list one page at a time. For each line without a key it takes the user
 /// from the line's address and appends the key of the homeserver the user's `HOSTED_BY` edge
-/// points to. A user without an edge, or a line whose user can't be read, gets the primary
-/// homeserver: the primary processor indexes every user that has no edge.
+/// points to. A line whose user has no edge, or whose user can't be read, is left as it is,
+/// without a key.
 ///
 /// The edge says where the user is hosted now, not where an old event was read from. For a
 /// user who moved, their older lines get the new homeserver.
@@ -28,15 +28,13 @@ use tracing::info;
 ///
 /// # Idempotency
 /// A line that already ends with a key is left alone, and the script writes a line only while
-/// it still holds what was read, so a failed run is safe to repeat.
+/// it still holds what was read, so a failed run is safe to repeat. A repeated run also gives a
+/// key to the lines of users who have gained an edge since.
 ///
 /// # Deploy ordering
 /// Run it after the watchers that store the key are deployed. A line an older watcher appends
 /// after the walk passed its end stays without a key.
-pub struct EventLineHomeserverBackfill1794005092 {
-    /// `primary_homeserver` from the migrations config. The backfill fails without it.
-    pub primary_homeserver: Option<PubkyId>,
-}
+pub struct EventLineHomeserverBackfill1794005092;
 
 /// Event lines read and rewritten per page.
 const EVENT_PAGE_SIZE: usize = 500;
@@ -114,19 +112,12 @@ impl Migration for EventLineHomeserverBackfill1794005092 {
     }
 
     async fn backfill(&self) -> Result<(), DynError> {
-        let Some(primary) = &self.primary_homeserver else {
-            return Err(
-                "EventLineHomeserverBackfill migration: set `primary_homeserver` in the \
-                        migrations config to the watcher's `homeserver`, then re-run it"
-                    .into(),
-            );
-        };
         let key = format!("{}:Events", EventLine::prefix().await);
 
         let mut cursor: u64 = 0;
         let mut lines_read: u64 = 0;
         let mut lines_rewritten: usize = 0;
-        let mut lines_primary: u64 = 0;
+        let mut lines_left: usize = 0;
         loop {
             let (lines, next_cursor) =
                 EventLine::get_from_index(Some(cursor), EVENT_PAGE_SIZE).await?;
@@ -153,30 +144,29 @@ impl Migration for EventLineHomeserverBackfill1794005092 {
                 .collect();
             let homeservers = hosting_homeservers(user_ids.into_iter().collect()).await?;
 
+            let keyless_count = keyless.len();
             let rewrites: Vec<(u64, String, String)> = keyless
                 .into_iter()
-                .map(|(index, line)| {
-                    let hosted_by = line_user_id(&line)
-                        .and_then(|user_id| homeservers.get(user_id.as_ref()).cloned());
-                    let homeserver_id = hosted_by.unwrap_or_else(|| {
-                        lines_primary += 1;
-                        primary.to_string()
-                    });
-                    let rewritten = EventLine::new(&line, &homeserver_id).as_str().to_string();
-                    (index, line, rewritten)
+                .filter_map(|(index, line)| {
+                    let homeserver_id = homeservers.get(line_user_id(&line)?.as_ref())?;
+                    let rewritten = EventLine::new(&line, homeserver_id).as_str().to_string();
+                    Some((index, line, rewritten))
                 })
                 .collect();
-            lines_rewritten += rewrite_lines(&key, &rewrites).await?;
+            lines_left += keyless_count - rewrites.len();
+            if !rewrites.is_empty() {
+                lines_rewritten += rewrite_lines(&key, &rewrites).await?;
+            }
 
             info!(
                 "EventLineHomeserverBackfill migration: {lines_read} event lines read, \
-                 {lines_rewritten} given a homeserver, {lines_primary} of them the primary"
+                 {lines_rewritten} given a homeserver, {lines_left} left without one"
             );
         }
 
         info!(
             "EventLineHomeserverBackfill migration: complete — {lines_read} event lines read, \
-             {lines_rewritten} given a homeserver, {lines_primary} of them the primary"
+             {lines_rewritten} given a homeserver, {lines_left} left without one"
         );
         Ok(())
     }

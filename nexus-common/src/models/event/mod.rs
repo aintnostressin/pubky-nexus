@@ -7,6 +7,9 @@ use tracing::error;
 ///
 /// The key is always the last field. Homeservers write file names unencoded, so the address
 /// may contain spaces: a reader takes the key after the last space, not after the second.
+///
+/// Some lines stored before Nexus kept the key have none: those of users whose homeserver the
+/// graph didn't know when they were backfilled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventLine(String);
 

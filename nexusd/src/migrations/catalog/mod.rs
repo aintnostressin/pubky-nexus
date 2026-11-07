@@ -1,7 +1,6 @@
 //! Concrete migrations the daemon can register. The manager does not depend on these types.
 
 use super::manager::{Migration, MigrationManager};
-use pubky_app_specs::PubkyId;
 
 use collected_edges_backfill_1789344000::CollectedEdgesBackfill1789344000;
 use event_line_homeserver_backfill_1794005092::EventLineHomeserverBackfill1794005092;
@@ -23,12 +22,7 @@ use users_by_tags_index_backfill_1786924800::UsersByTagsIndexBackfill1786924800;
 /// Registers this daemon's migrations with the manager.
 ///
 /// After `db migration new`, add `Box::new(YourMigration)` here.
-///
-/// `primary_homeserver` is the migrations config's, for the migrations that need it.
-pub fn import_migrations(
-    migration_manager: &mut MigrationManager,
-    primary_homeserver: Option<PubkyId>,
-) {
+pub fn import_migrations(migration_manager: &mut MigrationManager) {
     let migrations: Vec<Box<dyn Migration>> = vec![
         // Note: Add your migrations here to be picked up by the manager
         Box::new(UsersByPkReindex1751635096),
@@ -48,7 +42,7 @@ pub fn import_migrations(
         Box::new(ResourceTagKeysRetire1792076035),
         Box::new(FileDetailsKeysRetire1792145757),
         Box::new(UserCountsKeysRetire1792418266),
-        Box::new(EventLineHomeserverBackfill1794005092 { primary_homeserver }),
+        Box::new(EventLineHomeserverBackfill1794005092),
     ];
     for migration in migrations {
         migration_manager.register(migration);
