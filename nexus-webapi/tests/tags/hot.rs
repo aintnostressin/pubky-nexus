@@ -1,6 +1,10 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use axum::http::StatusCode;
-use serde_json::Value;
+use nexus_common::db::fetch_key_from_graph;
+use nexus_common::db::graph::Query;
+use serde_json::{json, Value};
 
 use crate::utils::{get_request, invalid_get_request};
 
@@ -9,6 +13,13 @@ const PEER_PUBKY: &str = "o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo";
 pub const USER_1: &str = "pyc598poqkdgtx1wc4aeptx67mqg71mmywyh7uzkffzittjmbiuo";
 const USER_4: &str = "r91hi8kc3x6761gwfiigr7yn6nca1z47wm6jadhw1jbx1co93r9y";
 const USER_5: &str = "tkpeqpx3ywoawiw6q8e6kuo9o3egr7fnhx83rudznbrrmqgdmomo";
+// mocks/hot-tags.cypher's trust-ranked block, tagged today: Peer follows Author,
+// Second and Newcomer, who has zero trust and the lowest id; Lurker follows
+// Whale, Second and Sliver
+const HOT_PEER: &str = "zp9hooj5djnji9py6td7qj13fju4ta9j1i67h618ps7bkjf6xr5o";
+const HOT_LURKER: &str = "zzr77pcnyhbty8k8xhe5fd9h83tquur74uuyk71exbp4t6yemmey";
+const HOT_SECOND: &str = "zwz9ek4dx65b8sw7xj78kucokissw1xh9m48jq7jzpwuf817ifky";
+const HOT_NEWCOMER: &str = "z1yrrut7hwr3cnpsiu768qcj1yojuz54g4ecqz5ejjjzen1ppb4y";
 
 struct StreamTagMockup {
     label: String,
@@ -68,7 +79,7 @@ async fn test_global_hot_tags() -> Result<()> {
     analyse_hot_tags_structure(tags);
 
     // Analyse the tag that is in the 4th index
-    let hot_tag = StreamTagMockup::new(String::from("pubky"), 9, 15, 9);
+    let hot_tag = StreamTagMockup::new(String::from("opensource"), 5, 8, 5);
     compare_unit_hot_tag(&tags[4], hot_tag);
 
     Ok(())
@@ -120,7 +131,7 @@ async fn test_global_hot_tags_with_this_month_timeframe() -> Result<()> {
     analyse_hot_tags_structure(tags);
 
     // Analyse the first tag
-    let hot_tag = StreamTagMockup::new(String::from("today"), 3, 3, 3);
+    let hot_tag = StreamTagMockup::new(String::from("month"), 4, 3, 4);
     compare_unit_hot_tag(&tags[0], hot_tag);
 
     Ok(())
@@ -141,7 +152,7 @@ async fn test_global_hot_tags_skip_limit() -> Result<()> {
     assert_eq!(tags.len(), 5);
 
     // Analyse the first tag
-    let hot_tag = StreamTagMockup::new(String::from("ha"), 9, 16, 9);
+    let hot_tag = StreamTagMockup::new(String::from("sentimental"), 8, 11, 8);
     compare_unit_hot_tag(&tags[0], hot_tag);
 
     Ok(())
@@ -204,7 +215,7 @@ async fn test_hot_tags_by_following_reach_and_today_timeframe() -> Result<()> {
     assert_eq!(tags.len(), 3);
 
     // Analyse the tag that is in the 0 index
-    let hot_tag = StreamTagMockup::new(String::from("today"), 2, 2, 2);
+    let hot_tag = StreamTagMockup::new(String::from("tag1"), 3, 1, 3);
     compare_unit_hot_tag(&tags[0], hot_tag);
 
     Ok(())
@@ -247,9 +258,9 @@ async fn test_hot_tags_by_following_reach_and_month_timeframe_skip_and_limit() -
     assert_eq!(tags.len(), 2);
 
     // Analyse the tag that is in the 0 index
-    let hot_tag = StreamTagMockup::new(String::from("today"), 2, 2, 2);
-    compare_unit_hot_tag(&tags[0], hot_tag);
     let hot_tag = StreamTagMockup::new(String::from("tag1"), 3, 1, 3);
+    compare_unit_hot_tag(&tags[0], hot_tag);
+    let hot_tag = StreamTagMockup::new(String::from("tag3"), 3, 1, 3);
     compare_unit_hot_tag(&tags[1], hot_tag);
 
     Ok(())
@@ -289,7 +300,7 @@ async fn test_hot_tags_by_following_reach_with_skip_limit() -> Result<()> {
     analyse_hot_tags_structure(tags);
 
     // Analyse the tag that is in the 0 index
-    let hot_tag = StreamTagMockup::new(String::from("💯"), 1, 3, 1);
+    let hot_tag = StreamTagMockup::new(String::from("🤘"), 3, 3, 3);
     compare_unit_hot_tag(&tags[0], hot_tag);
 
     Ok(())
@@ -345,7 +356,7 @@ async fn test_hot_tags_by_followers_reach() -> Result<()> {
     analyse_hot_tags_structure(tags);
 
     // Analyse the tag that is in the 1st index
-    let hot_tag = StreamTagMockup::new(String::from("pubky"), 2, 3, 2);
+    let hot_tag = StreamTagMockup::new(String::from("test"), 3, 3, 3);
     compare_unit_hot_tag(&tags[0], hot_tag);
 
     Ok(())
@@ -364,7 +375,7 @@ async fn test_hot_tags_by_followers_reach_with_skip_limit() -> Result<()> {
     analyse_hot_tags_structure(tags);
 
     // Analyse the tag that is in the 0 index
-    let hot_tag = StreamTagMockup::new(String::from("✅"), 1, 2, 1);
+    let hot_tag = StreamTagMockup::new(String::from("👀"), 2, 2, 2);
     compare_unit_hot_tag(&tags[0], hot_tag);
 
     Ok(())
@@ -470,7 +481,7 @@ async fn test_hot_tags_by_friends_reach() -> Result<()> {
     analyse_hot_tags_structure(tags);
 
     // Analyse the tag that is in the 1st index
-    let hot_tag = StreamTagMockup::new(String::from("pubky"), 2, 3, 2);
+    let hot_tag = StreamTagMockup::new(String::from("test"), 3, 3, 3);
     compare_unit_hot_tag(&tags[0], hot_tag);
 
     Ok(())
@@ -581,16 +592,17 @@ async fn test_hot_tags_by_friends_reach_and_all_timeframe() -> Result<()> {
 
 const PUBKY_TAG: &str = "pubky";
 
+// The most trusted first: they all have the same trust, so by id
 const TAGGERS: [&str; 9] = [
-    "y4euc58gnmxun9wo87gwmanu6kztt9pgw1zz1yp1azp7trrsjamy",
-    "s1empmp4x6owkewyijcbnn1faejhhu536w8i7n9oqh57om9qjfho",
-    "emq37ky6fbnaun7q1ris6rx3mqmw3a33so1txfesg9jj3ak9ryoy",
-    "7w4hmktqa7gia5thmk7zki8px7ttwpwjtgaaaou4tbqx64re8d1o",
-    "ze86rtgp6x1qdyno4uzp8gexbb887dtemmonoh4j3iisbzitcppo",
-    "end1obs8cy3ssqzhm73hiojwpakb4ac1fiubbmk5zfuruaaumwso",
     "4snwyct86m383rsduhw5xgcxpw7c63j3pq8x4ycqikxgik8y64ro",
+    "7w4hmktqa7gia5thmk7zki8px7ttwpwjtgaaaou4tbqx64re8d1o",
+    "emq37ky6fbnaun7q1ris6rx3mqmw3a33so1txfesg9jj3ak9ryoy",
+    "end1obs8cy3ssqzhm73hiojwpakb4ac1fiubbmk5zfuruaaumwso",
     "omynbjw4ksjc4at5gretyoatw1g5h53tkee5z55fh69sng1d3jpy",
     "pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy",
+    "s1empmp4x6owkewyijcbnn1faejhhu536w8i7n9oqh57om9qjfho",
+    "y4euc58gnmxun9wo87gwmanu6kztt9pgw1zz1yp1azp7trrsjamy",
+    "ze86rtgp6x1qdyno4uzp8gexbb887dtemmonoh4j3iisbzitcppo",
 ];
 
 #[tokio_shared_rt::test(shared)]
@@ -604,7 +616,7 @@ async fn test_hot_tags_label_taggers() -> Result<()> {
     assert_eq!(taggers.len(), 9);
 
     for (index, tagger) in TAGGERS.into_iter().enumerate() {
-        assert_eq!(TAGGERS[index], tagger);
+        assert_eq!(taggers[index], tagger);
     }
 
     let endpoint = &format!("/v0/tags/taggers/{PUBKY_TAG}?skip=4&limit=2");
@@ -798,55 +810,99 @@ fn tagger_ids(tag: &Value) -> Vec<String> {
         .collect()
 }
 
-fn assert_taggers_in_id_order(tags: &[Value]) {
-    for tag in tags {
-        let ids = tagger_ids(tag);
-        let mut sorted = ids.clone();
-        sorted.sort();
-        assert_eq!(
-            ids, sorted,
-            "taggers of {} are not in user id order",
-            tag["label"]
-        );
-    }
-}
-
 fn find_tag<'a>(tags: &'a [Value], label: &str) -> &'a Value {
     tags.iter()
         .find(|tag| tag["label"] == label)
         .unwrap_or_else(|| panic!("hot tag {label} missing"))
 }
 
-/// `taggers_id` is cut to `taggers_limit` after collecting, so without an order the
-/// kept taggers depend on graph storage order and can change between snapshots.
-#[tokio_shared_rt::test(shared)]
-async fn test_global_hot_tags_taggers_in_id_order() -> Result<()> {
-    let body = get_request("/v0/tags/hot").await?;
-    let tags = body.as_array().expect("Stream tags should be an array");
-    assert!(!tags.is_empty());
+fn labels(tags: &[Value]) -> Vec<&str> {
+    tags.iter()
+        .map(|tag| tag["label"].as_str().expect("label should be a string"))
+        .collect()
+}
 
-    assert_taggers_in_id_order(tags);
+/// Each listed tagger's trust, from the graph; zero without one.
+async fn trust_of(tags: &[Value]) -> Result<HashMap<String, f64>> {
+    let ids: Vec<String> = tags.iter().flat_map(tagger_ids).collect();
+    let query = Query::new(
+        "test_tagger_trust",
+        "UNWIND $ids AS id MATCH (u:User {id: id})
+        RETURN COLLECT([u.id, coalesce(u.trust, 0.0)]) AS trust",
+    )
+    .param("ids", ids);
+    let trust = fetch_key_from_graph::<Vec<(String, f64)>>(query, "trust").await?;
+    Ok(trust.unwrap_or_default().into_iter().collect())
+}
 
+/// `taggers_id` lists the most trusted taggers first, ties by id.
+async fn assert_taggers_by_trust(endpoint: &str, tags: &[Value]) -> Result<()> {
+    let trust = trust_of(tags).await?;
+    for tag in tags {
+        let ids = tagger_ids(tag);
+        let mut by_trust = ids.clone();
+        by_trust.sort_by(|a, b| trust[b].total_cmp(&trust[a]).then_with(|| a.cmp(b)));
+        assert_eq!(
+            ids, by_trust,
+            "{endpoint}: taggers of {} are not the most trusted first, ties by id",
+            tag["label"]
+        );
+    }
     Ok(())
 }
 
+/// `taggers_id` is cut to `taggers_limit` after collecting, so without an order the
+/// kept taggers depend on graph storage order and can change between snapshots. The
+/// most trusted come first, ties by id, so a card's avatars are the people who put
+/// the label there. In hotpair the zero-trust Newcomer has the lowest id, so trust
+/// order differs from id order.
 #[tokio_shared_rt::test(shared)]
-async fn test_hot_tags_by_reach_taggers_in_id_order() -> Result<()> {
-    for reach in ["following", "followers", "friends"] {
-        let endpoint = format!("/v0/tags/hot?user_id={PEER_PUBKY}&reach={reach}");
-        let body = get_request(&endpoint).await?;
+async fn test_global_hot_tags_list_taggers_by_trust() -> Result<()> {
+    for endpoint in ["/v0/tags/hot", "/v0/tags/hot?timeframe=today"] {
+        let body = get_request(endpoint).await?;
         let tags = body.as_array().expect("Stream tags should be an array");
-        assert!(!tags.is_empty(), "{reach} returned no hot tags");
+        assert!(!tags.is_empty(), "{endpoint} returned no hot tags");
 
-        assert_taggers_in_id_order(tags);
+        assert_taggers_by_trust(endpoint, tags).await?;
     }
 
+    let body = get_request("/v0/tags/hot?timeframe=today").await?;
+    let hotpair = find_tag(body.as_array().unwrap(), "hotpair");
+    assert_eq!(tagger_ids(hotpair), [HOT_PEER, HOT_SECOND, HOT_NEWCOMER]);
+    // The global taggers route reads the same cached list
+    let taggers = get_request("/v0/tags/taggers/hotpair?timeframe=today").await?;
+    assert_eq!(taggers, json!([HOT_PEER, HOT_SECOND, HOT_NEWCOMER]));
+
     Ok(())
 }
 
-/// A truncated taggers list is the first `taggers_limit` ids of the full list.
 #[tokio_shared_rt::test(shared)]
-async fn test_hot_tags_by_reach_taggers_limit_keeps_lowest_ids() -> Result<()> {
+async fn test_hot_tags_by_reach_list_taggers_by_trust() -> Result<()> {
+    let hot_peer_following =
+        format!("/v0/tags/hot?user_id={HOT_PEER}&reach=following&timeframe=today");
+    let mut endpoints: Vec<String> = ["following", "followers", "friends"]
+        .iter()
+        .map(|reach| format!("/v0/tags/hot?user_id={PEER_PUBKY}&reach={reach}"))
+        .collect();
+    endpoints.push(hot_peer_following.clone());
+    for endpoint in &endpoints {
+        let body = get_request(endpoint).await?;
+        let tags = body.as_array().expect("Stream tags should be an array");
+        assert!(!tags.is_empty(), "{endpoint} returned no hot tags");
+
+        assert_taggers_by_trust(endpoint, tags).await?;
+    }
+
+    let body = get_request(&hot_peer_following).await?;
+    let hotpair = find_tag(body.as_array().unwrap(), "hotpair");
+    assert_eq!(tagger_ids(hotpair), [HOT_SECOND, HOT_NEWCOMER]);
+
+    Ok(())
+}
+
+/// A truncated taggers list is the first `taggers_limit` taggers of the full list.
+#[tokio_shared_rt::test(shared)]
+async fn test_hot_tags_by_reach_taggers_limit_keeps_most_trusted() -> Result<()> {
     let full = get_request(&format!(
         "/v0/tags/hot?user_id={PEER_PUBKY}&reach=following"
     ))
@@ -856,14 +912,125 @@ async fn test_hot_tags_by_reach_taggers_limit_keeps_lowest_ids() -> Result<()> {
     ))
     .await?;
 
-    let full_ids = tagger_ids(find_tag(full.as_array().unwrap(), "pubky"));
+    let full_tag = find_tag(full.as_array().unwrap(), "pubky");
+    let full_ids = tagger_ids(full_tag);
     let cut_ids = tagger_ids(find_tag(cut.as_array().unwrap(), "pubky"));
     assert_eq!(full_ids.len(), 4);
     assert_eq!(cut_ids, full_ids[..3]);
 
-    let mut sorted = full_ids.clone();
-    sorted.sort();
-    assert_eq!(full_ids, sorted);
+    assert_taggers_by_trust("following", std::slice::from_ref(full_tag)).await
+}
+
+/// hotthree and hotzero both have four posts from one tagger, but only Author
+/// has trust: 0.3 × (1 + 1/2 + 1/3 + 1/4) against nothing, so hotzero comes last.
+#[tokio_shared_rt::test(shared)]
+async fn test_global_hot_tags_weighs_taggers_by_trust() -> Result<()> {
+    let body = get_request("/v0/tags/hot?timeframe=today").await?;
+    let tags = body.as_array().expect("Stream tags should be an array");
+
+    let hot_tag = StreamTagMockup::new(String::from("hotthree"), 1, 4, 1);
+    compare_unit_hot_tag(find_tag(tags, "hotthree"), hot_tag);
+    let hot_tag = StreamTagMockup::new(String::from("hotzero"), 1, 4, 1);
+    compare_unit_hot_tag(tags.last().expect("hot tags"), hot_tag);
+
+    Ok(())
+}
+
+/// Repeat tags add less and less: Peer's two hotpair posts and Second's one,
+/// 0.3 × (1 + 1/2) + 0.3 = 0.75, outweigh Author's four hotthree posts,
+/// 0.3 × (1 + 1/2 + 1/3 + 1/4) = 0.625, which still outweigh tag2's two
+/// taggers on one post, 0.6. Without the bonus hotthree would score 0.3, after
+/// tag2; with a linear one 1.2, before hotpair; by post count it would lead.
+/// Newcomer's hotpair tag adds nothing.
+#[tokio_shared_rt::test(shared)]
+async fn test_global_hot_tags_gives_repeat_tags_a_diminishing_bonus() -> Result<()> {
+    let body = get_request("/v0/tags/hot?timeframe=today").await?;
+    let tags = body.as_array().expect("Stream tags should be an array");
+
+    let order = labels(tags);
+    let position = |label| order.iter().position(|listed| *listed == label);
+    assert!(
+        position("hotpair") < position("hotthree") && position("hotthree") < position("tag2"),
+        "hotthree should rank between hotpair and tag2: {order:?}"
+    );
+    let hot_tag = StreamTagMockup::new(String::from("hotpair"), 3, 3, 3);
+    compare_unit_hot_tag(find_tag(tags, "hotpair"), hot_tag);
+    let hot_tag = StreamTagMockup::new(String::from("hotthree"), 1, 4, 1);
+    compare_unit_hot_tag(find_tag(tags, "hotthree"), hot_tag);
+
+    Ok(())
+}
+
+/// Whale, at trust 0.4, is the only Today tagger above 0.3, so its trust counts
+/// capped at the third most trusted Today tagger's, 0.3: hotwhale scores
+/// 0.3 × (1 + 1/2) = 0.45, after tag2's 0.6. Uncapped, its 0.4 × 1.5 = 0.6 and
+/// two posts would place it before tag2.
+#[tokio_shared_rt::test(shared)]
+async fn test_global_hot_tags_cap_the_most_trusted_taggers() -> Result<()> {
+    let body = get_request("/v0/tags/hot?timeframe=today").await?;
+    let tags = body.as_array().expect("Stream tags should be an array");
+
+    let order = labels(tags);
+    let position = |label| order.iter().position(|listed| *listed == label);
+    assert!(
+        position("tag2") < position("hotwhale") && position("hotwhale") < position("hotone"),
+        "hotwhale should rank between tag2 and hotone: {order:?}"
+    );
+    let hot_tag = StreamTagMockup::new(String::from("hotwhale"), 1, 2, 1);
+    compare_unit_hot_tag(find_tag(tags, "hotwhale"), hot_tag);
+
+    Ok(())
+}
+
+/// The whole order of the global Today list: by score, a label on one post
+/// included. Peer's following list, without Peer's own hotpair tags, ranks
+/// hotpair at 0.3, after hotone by label. Its trusted taggers are Author and
+/// Second, so nothing is capped there; were Newcomer's zero trust counted as a
+/// third, the cap would be 0 and the list would fall back to post counts.
+#[tokio_shared_rt::test(shared)]
+async fn test_global_hot_tags_order_by_score() -> Result<()> {
+    let body = get_request("/v0/tags/hot?timeframe=today").await?;
+    let tags = body.as_array().expect("Stream tags should be an array");
+    assert_eq!(
+        labels(tags),
+        [
+            "today",
+            "tag1",
+            "hotpair",
+            "hotthree",
+            "tag2",
+            "hotwhale",
+            "hotone",
+            "hotsliver",
+            "hotzero"
+        ]
+    );
+    let hot_tag = StreamTagMockup::new(String::from("hotone"), 1, 1, 1);
+    compare_unit_hot_tag(find_tag(tags, "hotone"), hot_tag);
+
+    let endpoint = format!("/v0/tags/hot?user_id={HOT_PEER}&reach=following&timeframe=today");
+    let body = get_request(&endpoint).await?;
+    let tags = body.as_array().expect("Stream tags should be an array");
+    assert_eq!(labels(tags), ["hotthree", "hotone", "hotpair", "hotzero"]);
+    let hot_tag = StreamTagMockup::new(String::from("hotone"), 1, 1, 1);
+    compare_unit_hot_tag(find_tag(tags, "hotone"), hot_tag);
+
+    Ok(())
+}
+
+/// The known limit of a window with fewer than three trusted taggers: Lurker
+/// follows Whale (0.4), Second (0.3) and Sliver (0.001). Sliver is the third
+/// most trusted, so its 0.001 caps all three and the list becomes a count of
+/// tags: hotsliver, 0.001 × (1 + 1/2 + 1/3), passes hotwhale, 0.001 × 1.5.
+/// Without Sliver nothing would be capped and hotwhale, at 0.6, would lead.
+#[tokio_shared_rt::test(shared)]
+async fn test_hot_tags_by_reach_sliver_of_trust_caps_a_small_window() -> Result<()> {
+    let endpoint = format!("/v0/tags/hot?user_id={HOT_LURKER}&reach=following&timeframe=today");
+    let body = get_request(&endpoint).await?;
+    let tags = body.as_array().expect("Stream tags should be an array");
+    assert_eq!(labels(tags), ["hotsliver", "hotwhale", "hotone", "hotpair"]);
+    let hot_tag = StreamTagMockup::new(String::from("hotsliver"), 1, 3, 1);
+    compare_unit_hot_tag(find_tag(tags, "hotsliver"), hot_tag);
 
     Ok(())
 }

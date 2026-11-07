@@ -1253,85 +1253,96 @@ pub fn get_hot_tags_by_reach(
     reach: StreamReach,
     tags_query: &HotTagsInputDTO,
 ) -> Query {
-    let input_tagged_type = match &tags_query.tagged_type {
-        Some(tagged_type) => tagged_type.to_string(),
-        None => String::from("Post|User"),
-    };
-
     let (from, to) = tags_query.timeframe.to_timestamp_range();
     let cypher = format!(
         "
         {}
         WHERE user.id = $user_id
-        WITH DISTINCT reach
-        MATCH (reach)-[tag:TAGGED]->(tagged:{})
+        WITH DISTINCT reach AS tagger
+        MATCH (tagger)-[tag:TAGGED]->(tagged:{})
         WHERE tag.indexed_at >= $from AND tag.indexed_at < $to
-        // COLLECT keeps its input order, so the cut keeps the lowest tagger ids
-        WITH tag.label AS label, reach.id AS tagger_id, tagged
-        ORDER BY tagger_id ASC
-        WITH
-            label,
-            COLLECT(DISTINCT tagger_id)[..{}] AS taggers,
-            COUNT(DISTINCT tagged) AS uniqueTaggedCount,
-            COUNT(DISTINCT tagger_id) AS taggers_count
-        WITH {{
-            label: label,
-            taggers_id: taggers,
-            tagged_count: uniqueTaggedCount,
-            taggers_count: taggers_count
-        }} AS hot_tag
-        ORDER BY hot_tag.tagged_count DESC, hot_tag.label ASC
-        SKIP $skip LIMIT $limit
-        RETURN COLLECT(hot_tag) as hot_tags
-    ",
+        {}
+        ",
         stream_reach_to_graph_subquery(&reach),
-        input_tagged_type,
-        tags_query.taggers_limit
+        hot_tags_tagged_label(tags_query),
+        RANK_HOT_TAGS
     );
     reach_attrs(Query::new("get_hot_tags_by_reach", &cypher), &reach)
         .param("user_id", user_id)
         .param("skip", tags_query.skip as i64)
         .param("limit", tags_query.limit as i64)
+        .param("taggers_limit", tags_query.taggers_limit as i64)
         .param("from", from)
         .param("to", to)
 }
 
 pub fn get_global_hot_tags(tags_query: &HotTagsInputDTO) -> Query {
-    let input_tagged_type = match &tags_query.tagged_type {
-        Some(tagged_type) => tagged_type.to_string(),
-        None => String::from("Post|User"),
-    };
     let (from, to) = tags_query.timeframe.to_timestamp_range();
     let cypher = format!(
         "
-        MATCH (user: User)-[tag:TAGGED]->(tagged:{})
+        MATCH (tagger:User)-[tag:TAGGED]->(tagged:{})
         WHERE tag.indexed_at >= $from AND tag.indexed_at < $to
-        // COLLECT keeps its input order, so the cut keeps the lowest tagger ids
-        WITH tag.label AS label, user.id AS tagger_id, tagged
-        ORDER BY tagger_id ASC
-        WITH
-            label,
-            COLLECT(DISTINCT tagger_id)[..{}] AS taggers,
-            COUNT(DISTINCT tagged) AS uniqueTaggedCount,
-            COUNT(DISTINCT tagger_id) AS taggers_count
-        WITH {{
-            label: label,
-            taggers_id: taggers,
-            tagged_count: uniqueTaggedCount,
-            taggers_count: taggers_count
-        }} AS hot_tag
-        ORDER BY hot_tag.tagged_count DESC, hot_tag.label ASC
-        SKIP $skip LIMIT $limit
-        RETURN COLLECT(hot_tag) as hot_tags
-    ",
-        input_tagged_type, tags_query.taggers_limit
+        {}
+        ",
+        hot_tags_tagged_label(tags_query),
+        RANK_HOT_TAGS
     );
     Query::new("get_global_hot_tags", &cypher)
         .param("skip", tags_query.skip as i64)
         .param("limit", tags_query.limit as i64)
+        .param("taggers_limit", tags_query.taggers_limit as i64)
         .param("from", from)
         .param("to", to)
 }
+
+/// The node label a hot-tags query counts: the requested type, or posts and users.
+fn hot_tags_tagged_label(tags_query: &HotTagsInputDTO) -> String {
+    match &tags_query.tagged_type {
+        Some(tagged_type) => tagged_type.to_string(),
+        None => String::from("Post|User"),
+    }
+}
+
+/// Ranks the labels of the `(tagger)-[tag:TAGGED]->(tagged)` rows matched before
+/// it. Each tagger adds their trust times 1 + 1/2 + ... + 1/n, n being the
+/// distinct nodes they tagged with the label: repeats count, less and less.
+/// The trust counted is capped at the third most trusted tagger's in the rows,
+/// so the two most trusted weigh no more than the next. From three trusted
+/// taggers on, more can only raise the cap, so accounts with a sliver of trust
+/// cannot pull it down, and below it the weight is linear: splitting trust gains
+/// nothing. With fewer than three nothing is capped, so in such a window a third
+/// tagger with a sliver of trust caps the other two at its level.
+const RANK_HOT_TAGS: &str = "
+        // The label's distinct tagged nodes, and every tag behind them
+        WITH tag.label AS label, COLLECT([tagger, tagged]) AS tags, COUNT(DISTINCT tagged) AS tagged_count
+        UNWIND tags AS tagger_tagged
+        // One row per label and tagger: how many distinct nodes they tagged with it
+        WITH label, tagged_count, tagger_tagged[0] AS tagger, COUNT(DISTINCT tagger_tagged[1]) AS tagger_count
+        WITH COLLECT([label, tagged_count, tagger, tagger_count]) AS rows, COLLECT(DISTINCT tagger) AS taggers
+        // One row even with fewer than three trusted taggers: the cap is then null and caps nothing
+        CALL (taggers) {
+            UNWIND taggers AS tagger
+            WITH tagger.trust AS trust WHERE trust > 0
+            ORDER BY trust DESC
+            RETURN COLLECT(trust)[2] AS trust_cap
+        }
+        UNWIND rows AS row
+        WITH row[0] AS label, row[1] AS tagged_count, row[2] AS tagger, row[3] AS tagger_count, trust_cap
+        WITH label, tagged_count, tagger.id AS tagger_id, coalesce(tagger.trust, 0.0) AS trust,
+            reduce(bonus = 0.0, n IN range(1, tagger_count) | bonus + 1.0 / n) AS bonus, trust_cap
+        // COLLECT keeps its input order: the most trusted taggers first, ties by id
+        ORDER BY trust DESC, tagger_id ASC
+        WITH label, tagged_count, COLLECT(tagger_id) AS taggers,
+            sum(CASE WHEN trust > trust_cap THEN trust_cap ELSE trust END * bonus) AS score
+        ORDER BY score DESC, tagged_count DESC, label ASC
+        SKIP $skip LIMIT $limit
+        RETURN COLLECT({
+            label: label,
+            taggers_id: taggers[..$taggers_limit],
+            tagged_count: tagged_count,
+            taggers_count: size(taggers)
+        }) AS hot_tags
+        ";
 
 pub fn get_influencers_by_reach(
     user_id: &str,

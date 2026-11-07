@@ -35,13 +35,15 @@ impl AsRef<[String]> for Taggers {
     }
 }
 
-/// One label's cached taggers. `total` is the graph's distinct tagger count, which
-/// can exceed `taggers.len()`: the list is a sample capped at write time, so it
-/// cannot stand in for the count.
+/// One label's cached hot tag, all but its rank, which the sorted set beside it
+/// keeps. `total` is the graph's distinct tagger count, which can exceed
+/// `taggers.len()`: the list is a sample capped at write time, so it cannot
+/// stand in for the count.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CachedTaggers {
     pub taggers: Taggers,
     pub total: usize,
+    pub tagged_count: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
