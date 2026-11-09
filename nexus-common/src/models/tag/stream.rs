@@ -13,7 +13,10 @@ use super::global::{CachedTaggers, HotTagsTaggers, Taggers};
 use super::TaggedType;
 
 pub const HOT_TAGS_CACHE_PREFIX: &str = "Cache";
-pub const POST_HOT_TAGS: [&str; 3] = ["Tags", "Post", "Hot"];
+/// Apart from `Tags:Post:Hot`, where a build ranking by post count keeps the
+/// counts in the sorted set: neither build reads the other's keys, so neither
+/// serves the other's order or reads ranks as counts.
+pub const POST_HOT_TAGS: [&str; 4] = ["Tags", "Post", "Hot", "Trust"];
 /// Snapshot size per timeframe. A skip past this cannot be filled from cache.
 pub const GLOBAL_HOT_TAGS_CACHE_SIZE: usize = 100;
 const GLOBAL_HOT_TAGS_TAGGERS_LIMIT: usize = 20;
@@ -21,6 +24,7 @@ const GLOBAL_HOT_TAGS_TAGGERS_LIMIT: usize = 20;
 #[derive(Deserialize, Serialize, ToSchema, Debug, Clone)]
 pub struct HotTag {
     pub label: String,
+    /// The most trusted taggers first, ties by id.
     pub taggers_id: Taggers,
     pub tagged_count: u64,
     pub taggers_count: usize,
@@ -148,6 +152,7 @@ impl HotTags {
     }
 
     /// `None` if either key is missing. `Some([])` if both exist but this window is empty.
+    /// The order comes from the sorted set, everything else from the JSON.
     async fn get_from_global_cache(
         hot_tags_input: &HotTagsInputDTO,
         prefix: &str,
@@ -155,8 +160,8 @@ impl HotTags {
         let timeframe = hot_tags_input.timeframe.to_string();
         let key_parts = Self::build_hot_tags_key_parts(&timeframe);
 
-        let taggers_by_label = Taggers::get_from_index(&hot_tags_input.timeframe, prefix).await?;
-        let scores = HotTags::try_from_index_sorted_set(
+        let cached_by_label = Taggers::get_from_index(&hot_tags_input.timeframe, prefix).await?;
+        let ranking = HotTags::try_from_index_sorted_set(
             &key_parts,
             None,
             None,
@@ -167,14 +172,14 @@ impl HotTags {
         )
         .await?;
 
-        let (Some(scores), Some(taggers_by_label)) = (scores, taggers_by_label) else {
+        let (Some(ranking), Some(cached_by_label)) = (ranking, cached_by_label) else {
             return Ok(None);
         };
 
-        let hot_tags = scores
+        let hot_tags = ranking
             .into_iter()
-            .filter_map(|(label, score)| {
-                let cached = taggers_by_label.get(&label)?;
+            .filter_map(|(label, _)| {
+                let cached = cached_by_label.get(&label)?;
                 Some(HotTag {
                     label,
                     taggers_id: Taggers(Taggers::get_taggers_by_pagination(
@@ -182,7 +187,7 @@ impl HotTags {
                         0,
                         hot_tags_input.taggers_limit,
                     )),
-                    tagged_count: score as u64,
+                    tagged_count: cached.tagged_count,
                     taggers_count: cached.total,
                 })
             })
@@ -190,7 +195,10 @@ impl HotTags {
         Ok(Some(hot_tags))
     }
 
-    /// Overwrite taggers JSON and atomically replace the score set.
+    /// Overwrite the JSON and atomically replace the sorted set. Its member scores
+    /// are the ranks, first label highest: a sorted set orders equal scores by
+    /// label, descending, so storing the trust score would drop the graph's
+    /// tie-breaks, and every label without a trusted tagger ties at zero.
     async fn put_to_global_cache(
         hot_tags_list: HotTags,
         timeframe: &Timeframe,
@@ -198,11 +206,12 @@ impl HotTags {
     ) -> RedisResult<()> {
         let timeframe_str = timeframe.to_string();
         let key_parts = Self::build_hot_tags_key_parts(&timeframe_str);
-        let scores: Vec<(f64, &str)> = hot_tags_list
+        let ranking: Vec<(f64, &str)> = hot_tags_list
             .iter()
-            .map(|tag| (tag.tagged_count as f64, tag.label.as_str()))
+            .enumerate()
+            .map(|(rank, tag)| ((hot_tags_list.len() - rank) as f64, tag.label.as_str()))
             .collect();
-        let taggers: HashMap<String, CachedTaggers> = hot_tags_list
+        let cached_by_label: HashMap<String, CachedTaggers> = hot_tags_list
             .iter()
             .map(|tag| {
                 (
@@ -210,15 +219,16 @@ impl HotTags {
                     CachedTaggers {
                         taggers: tag.taggers_id.clone(),
                         total: tag.taggers_count,
+                        tagged_count: tag.tagged_count,
                     },
                 )
             })
             .collect();
 
-        Taggers::put_to_index(HotTagsTaggers(taggers), timeframe, prefix).await?;
+        Taggers::put_to_index(HotTagsTaggers(cached_by_label), timeframe, prefix).await?;
         HotTags::replace_index_sorted_set(
             &key_parts,
-            &scores,
+            &ranking,
             Some(prefix),
             Some(timeframe.to_cache_period()),
         )
@@ -315,7 +325,8 @@ mod tests {
     /// The graph caps `taggers_id` at `GLOBAL_HOT_TAGS_TAGGERS_LIMIT` but counts every
     /// distinct tagger, so `taggers_count` has to round-trip the cache on its own. Read
     /// back through `get_from_global_cache`, since deriving it from the stored sample is
-    /// the regression this guards.
+    /// the regression this guards. The sorted set holds only the ranks, so
+    /// `tagged_count` round-trips apart from it.
     #[tokio_shared_rt::test(shared)]
     async fn tagger_total_round_trips_the_cache_apart_from_the_sample() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await?;
@@ -351,7 +362,7 @@ mod tests {
         assert_eq!(read_back.taggers_id.len(), 2, "the sample is unchanged");
         assert_eq!(
             read_back.tagged_count, 42,
-            "the score survives the sorted set"
+            "the post count survives the sorted set"
         );
 
         clear_test_cache(&timeframe).await?;
