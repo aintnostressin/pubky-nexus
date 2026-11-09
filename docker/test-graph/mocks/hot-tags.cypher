@@ -272,3 +272,118 @@ MATCH (p1:Post {id: $post3}), (p2:Post {id: $reply_5}) MERGE (p2)-[:REPLIED]->(p
 MERGE (p:Post { id: $reply_6 }) SET p.content = "This is a 6 reply", p.kind = "short", p.indexed_at = 1737441201104340;
 MATCH (u:User { id: $user5 }), (p:Post {id: $reply_6}) MERGE (u)-[:AUTHORED]->(p) SET p.uri = "pubky://tkpeqpx3ywoawiw6q8e6kuo9o3egr7fnhx83rudznbrrmqgdmomo/pub/pubky.app/posts/0032BZ3YFDGM8";
 MATCH (p1:Post {id: $post3}), (p2:Post {id: $reply_6}) MERGE (p2)-[:REPLIED]->(p1);
+
+// ###################################################
+// ##### Trust-ranked hot tags #######################
+// ###################################################
+// Hot tags rank by tagger trust: each tagger adds their trust times
+// 1 + 1/2 + ... + 1/n for the n posts they tagged with a label, the trust capped
+// at the third most trusted tagger's, but never below a third of the most
+// trusted's. trust.cypher gives Author, Peer, Second, Lurker and Onlooker 0.3;
+// Newcomer holds 0.0, as accounts the trust run cannot reach do.
+// The tags are placed today, so every timeframe sees them; the posts and follows
+// are old, and nobody outside the block follows these users. The ids sort high,
+// out of the influencer suite's zero-score window; Newcomer's sorts lowest, so
+// trust order differs from id order.
+//   hotthree:  Author tags A, B, C, D              0.3 * H(4) = 0.625, 4 posts
+//   hotzero:   Newcomer tags A, B, C, D            0, 4 posts: same counts, no trust
+//   hotpair:   Peer tags A, B; Second C; Newcomer C, D  0.3 * H(2) + 0.3 = 0.75, 4 posts
+//   hotone:    Second tags A                       0.3, 1 post
+//   hotwhale:  Whale (trust 0.4) tags A, B         capped 0.3 * H(2) = 0.45, 2 posts
+//   hotmid:    Mid (trust 0.2) tags A, B, C        0.2 * H(3) = 0.367, 3 posts
+//   hotlow:    Low (trust 0.12) tags A, B          0.12 * H(2) = 0.18, 2 posts
+//   hotsliver: Sliver (trust 0.001) tags A, B, C   0.001 * H(3) = 0.0018, 3 posts
+// With tag1 (0.9) and tag2 (0.6) from the Today block at the top of this file,
+// the bonus places hotthree between hotpair and tag2: without it hotthree scores
+// 0.3, with a linear one 1.2; by post count it ties hotpair and follows it by
+// label, but the rest of the Today order rules post count out. Whale is
+// the only Today tagger above 0.3, so the third most trusted Today tagger caps
+// its trust at 0.3, placing hotwhale after tag2; uncapped, its 0.6 and two posts
+// would place it before tag2. Mid sits between a third of Whale's trust and 0.3,
+// so it keeps its 0.2 and hotmid follows hotwhale; capped at a third of Whale's
+// alone, 0.133, every trusted tagger but Low and Sliver would weigh alike and
+// hotmid would pass it.
+// Peer follows Author, Newcomer and Second, and Onlooker Whale, Peer and
+// Newcomer: two trusted taggers each, so nothing is capped there, Newcomer's
+// zero trust not counting as a third. Lurker follows Whale, Second, Low and
+// Sliver: Low is the third most trusted, but the cap stops at a third of Whale's
+// 0.4, 0.133, so hotwhale (0.2) leads Low's uncapped hotlow (0.18), and
+// hotsliver comes last.
+:param hot_author => 'zmtwun7yyb77rnx6phr9c5w3ceax5fhjboof4h6xypydo5ujjoby';
+:param hot_newcomer => 'z1yrrut7hwr3cnpsiu768qcj1yojuz54g4ecqz5ejjjzen1ppb4y';
+:param hot_peer => 'zp9hooj5djnji9py6td7qj13fju4ta9j1i67h618ps7bkjf6xr5o';
+:param hot_second => 'zwz9ek4dx65b8sw7xj78kucokissw1xh9m48jq7jzpwuf817ifky';
+:param hot_whale => 'zzkws7yrzsf9z6m9zt3soes8qgw1ucnuh7izrgu8mhq3oyqs7y4y';
+:param hot_sliver => 'zzns7rcfxz5gxd8xuhkhyia83emp93btqfxqkdkeg3yx7jw7rjno';
+:param hot_lurker => 'zzr77pcnyhbty8k8xhe5fd9h83tquur74uuyk71exbp4t6yemmey';
+:param hot_low => 'zznu1yy55wjad71fjhd5ec8d8ciaiwu3sxppazch3fuunucxctro';
+:param hot_mid => 'zzbt9y1pty41aai4npng6jumk1sqcyn779t5575u6oe4c5tw8x8o';
+:param hot_onlooker => 'zzos3ueqqzbw6p8a3f318w5d5ui66w6m5u5xxgjwny9piau91tro';
+
+UNWIND [
+  [$hot_author, "HotTag:Author"],
+  [$hot_newcomer, "HotTag:Newcomer"],
+  [$hot_peer, "HotTag:Peer"],
+  [$hot_second, "HotTag:Second"],
+  [$hot_whale, "HotTag:Whale"],
+  [$hot_sliver, "HotTag:Sliver"],
+  [$hot_lurker, "HotTag:Lurker"],
+  [$hot_onlooker, "HotTag:Onlooker"],
+  [$hot_mid, "HotTag:Mid"],
+  [$hot_low, "HotTag:Low"]
+] AS row
+MERGE (u:User {id: row[0]})
+SET u.name = row[1], u.bio = "", u.status = "undefined", u.indexed_at = 1724134095000, u.links = "[]",
+    u.uri = "pubky://" + row[0] + "/pub/pubky.app/profile.json";
+
+// Whale ties wot.cypher's D1 for the highest fixture trust; trust.cypher leaves these as set
+UNWIND [[$hot_whale, 0.4], [$hot_mid, 0.2], [$hot_low, 0.12], [$hot_sliver, 0.001], [$hot_newcomer, 0.0]] AS row
+MATCH (u:User {id: row[0]}) SET u.trust = row[1];
+
+UNWIND [["HOTPOSTA00001", "Post A", 1620000000001], ["HOTPOSTB00002", "Post B", 1620000000002], ["HOTPOSTC00003", "Post C", 1620000000003], ["HOTPOSTD00004", "Post D", 1620000000007]] AS row
+MATCH (u:User {id: $hot_author})
+MERGE (p:Post {id: row[0]}) SET p.content = row[1], p.kind = "short", p.indexed_at = row[2]
+MERGE (u)-[:AUTHORED]->(p) SET p.uri = "pubky://" + u.id + "/pub/pubky.app/posts/" + row[0];
+
+UNWIND [
+  [$hot_author, "HOTPOSTA00001", "hotthree", "HOTTAGTHREE01"],
+  [$hot_author, "HOTPOSTB00002", "hotthree", "HOTTAGTHREE02"],
+  [$hot_author, "HOTPOSTC00003", "hotthree", "HOTTAGTHREE03"],
+  [$hot_author, "HOTPOSTD00004", "hotthree", "HOTTAGTHREE04"],
+  [$hot_newcomer, "HOTPOSTA00001", "hotzero", "HOTTAGZERO001"],
+  [$hot_newcomer, "HOTPOSTB00002", "hotzero", "HOTTAGZERO002"],
+  [$hot_newcomer, "HOTPOSTC00003", "hotzero", "HOTTAGZERO003"],
+  [$hot_newcomer, "HOTPOSTD00004", "hotzero", "HOTTAGZERO004"],
+  [$hot_peer, "HOTPOSTA00001", "hotpair", "HOTTAGPAIR001"],
+  [$hot_peer, "HOTPOSTB00002", "hotpair", "HOTTAGPAIR002"],
+  [$hot_second, "HOTPOSTC00003", "hotpair", "HOTTAGPAIR003"],
+  [$hot_newcomer, "HOTPOSTC00003", "hotpair", "HOTTAGPAIR004"],
+  [$hot_newcomer, "HOTPOSTD00004", "hotpair", "HOTTAGPAIR005"],
+  [$hot_second, "HOTPOSTA00001", "hotone", "HOTTAGONE0001"],
+  [$hot_whale, "HOTPOSTA00001", "hotwhale", "HOTTAGWHALE01"],
+  [$hot_whale, "HOTPOSTB00002", "hotwhale", "HOTTAGWHALE02"],
+  [$hot_mid, "HOTPOSTA00001", "hotmid", "HOTTAGMID0001"],
+  [$hot_mid, "HOTPOSTB00002", "hotmid", "HOTTAGMID0002"],
+  [$hot_mid, "HOTPOSTC00003", "hotmid", "HOTTAGMID0003"],
+  [$hot_low, "HOTPOSTA00001", "hotlow", "HOTTAGLOW0001"],
+  [$hot_low, "HOTPOSTB00002", "hotlow", "HOTTAGLOW0002"],
+  [$hot_sliver, "HOTPOSTA00001", "hotsliver", "HOTTAGSLIVER1"],
+  [$hot_sliver, "HOTPOSTB00002", "hotsliver", "HOTTAGSLIVER2"],
+  [$hot_sliver, "HOTPOSTC00003", "hotsliver", "HOTTAGSLIVER3"]
+] AS row
+WITH row, datetime().epochMillis AS today_millis
+MATCH (u:User {id: row[0]}), (p:Post {id: row[1]})
+MERGE (u)-[rel:TAGGED {label: row[2], id: row[3], indexed_at: today_millis}]->(p)
+SET rel.uri = "pubky://" + row[0] + "/pub/pubky.app/tags/" + row[3];
+
+UNWIND [[$hot_author, "HOTFOLLOW0001", 1620000000004], [$hot_newcomer, "HOTFOLLOW0002", 1620000000005], [$hot_second, "HOTFOLLOW0003", 1620000000006]] AS row
+MATCH (peer:User {id: $hot_peer}), (u:User {id: row[0]})
+MERGE (peer)-[:FOLLOWS {indexed_at: row[2], id: row[1]}]->(u);
+
+UNWIND [[$hot_whale, "HOTFOLLOW0004", 1620000000008], [$hot_second, "HOTFOLLOW0005", 1620000000009], [$hot_sliver, "HOTFOLLOW0006", 1620000000010], [$hot_low, "HOTFOLLOW0010", 1620000000014]] AS row
+MATCH (lurker:User {id: $hot_lurker}), (u:User {id: row[0]})
+MERGE (lurker)-[:FOLLOWS {indexed_at: row[2], id: row[1]}]->(u);
+
+UNWIND [[$hot_whale, "HOTFOLLOW0007", 1620000000011], [$hot_peer, "HOTFOLLOW0008", 1620000000012], [$hot_newcomer, "HOTFOLLOW0009", 1620000000013]] AS row
+MATCH (onlooker:User {id: $hot_onlooker}), (u:User {id: row[0]})
+MERGE (onlooker)-[:FOLLOWS {indexed_at: row[2], id: row[1]}]->(u);
