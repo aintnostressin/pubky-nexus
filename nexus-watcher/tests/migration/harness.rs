@@ -15,8 +15,9 @@ use nexus_common::db::{
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::notification::Notification;
 use nexus_common::models::user::{
-    get_user_homeserver, HomeserverMapping, HomeserverRecheck, PkdnsHomeserverResolver,
-    StaleMapping, UserHsCursor, UserIngestor,
+    fresh_pkdns_record_of, get_user_homeserver, pkdns_record_of, HomeserverMapping,
+    HomeserverRecheck, PkdnsHomeserverResolver, PkdnsRecord, StaleMapping, UserHsCursor,
+    UserIngestor,
 };
 use nexus_common::types::Pagination;
 use nexus_common::utils::test_utils::default_ingestor_tests;
@@ -632,21 +633,20 @@ enum Lookup {
 
 #[async_trait::async_trait]
 impl PkdnsHomeserverResolver for TestLookup {
-    async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<Option<PubkyId>> {
+    async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
         if user_pk.to_z32() != self.user {
             return Err(PubkyClientError::RequestFailed {
                 message: "not the user under test".to_string(),
             });
         }
-        let homeserver = match &self.how {
+        let record = match &self.how {
             Lookup::Fresh => {
                 let pubky = PubkyConnector::get()?;
-                pubky.client().pkarr().resolve_most_recent(user_pk).await;
-                pubky.get_homeserver_of(user_pk).await
+                fresh_pkdns_record_of(&pubky, user_pk).await
             }
-            Lookup::Cached(client) => client.get_homeserver_of(user_pk).await,
+            Lookup::Cached(client) => pkdns_record_of(client, user_pk).await,
         };
-        Ok(homeserver.map(PubkyId::from))
+        Ok(record)
     }
 }
 
@@ -661,15 +661,12 @@ struct PausingClient {
 
 #[async_trait::async_trait]
 impl PkdnsHomeserverResolver for PausingClient {
-    async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<Option<PubkyId>> {
-        self.inner.resolve_homeserver(user_pk).await
+    async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        self.inner.resolve_record(user_pk).await
     }
 
-    async fn resolve_homeserver_fresh(
-        &self,
-        user_pk: &PublicKey,
-    ) -> PubkyClientResult<Option<PubkyId>> {
-        self.inner.resolve_homeserver_fresh(user_pk).await
+    async fn resolve_record_fresh(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        self.inner.resolve_record_fresh(user_pk).await
     }
 }
 
