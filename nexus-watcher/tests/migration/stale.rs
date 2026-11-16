@@ -140,25 +140,19 @@ async fn a_retry_queued_on_the_old_homeserver_restores_a_reply_deleted_on_the_ne
 }
 
 /// The recheck runs in the API process and the sweep in the watcher process,
-/// each with its own pkarr cache. The watcher's cache still holds the record
-/// its last sweep saw, and pkarr's `resolve` serves a cached packet even after
-/// it has expired, refreshing it in the background. So the first sweep visit
-/// after a recheck, one TTL later, reads the old record unless the entry was
-/// evicted, and with stale mapping disabled it moves the user back to A, which
-/// their record no longer names. The client wiped A once the recheck had
-/// confirmed the switch, so the next read of A applies the wipe: the posts are
-/// deleted and the user is tombstoned, read nowhere and never looked up again.
-/// Demonstrated, with a second client standing for the watcher's cache; the
-/// suite runs in seconds, so that cache holds the old packet unexpired, which
-/// is the same answer. With stale mapping enabled, the default, the same visit
-/// marks the binding stale instead, and the user is indexed nowhere until the
-/// visit after.
+/// each with its own pkarr cache, and pkarr's `resolve` serves a cached packet
+/// even after it has expired. So the first sweep visit after a recheck reads
+/// the old record unless the entry was evicted (a second client stands for
+/// the watcher's cache here; the suite runs in seconds, so it holds the old
+/// packet unexpired, which is the same answer).
 ///
 /// The sweep does not move a binding on a record older than the one the
 /// binding was set from: the recheck keeps the record's timestamp on the
 /// binding and the sweep ignores anything older (`MappingUpdate::IgnoredOlder`).
+/// The client wiped A once the recheck had confirmed the switch, and nothing
+/// reads A for the user any more.
 #[tokio_shared_rt::test(shared)]
-async fn the_watchers_sweep_moves_the_user_back_after_a_recheck_through_the_api() -> Result<()> {
+async fn the_watchers_cached_sweep_after_a_recheck_ignores_the_older_record() -> Result<()> {
     let t = MigrationTest::setup().await?;
     let mover = Keypair::random();
     let watcher = t.device()?;
