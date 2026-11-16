@@ -15,11 +15,9 @@ use crate::harness::{post_uri, MigrationTest};
 /// fetches the mover's events when it reaches them, finds the wipe and
 /// applies it: the posts are deleted, the profile is tombstoned, and the scout
 /// who replied is told the post was deleted. The runner reads homeservers one
-/// after another, so B's read comes after and finds the user tombstoned, and
-/// the copy on B is never read. Demonstrated. With deleted users kept on the
-/// read list, which fixes `wipe.rs`, B's read restores the data, but the scout
-/// is still told the post was deleted and then edited (demonstrated by
-/// patching the query).
+/// after another, so B's read comes after and, with deleted users kept on the
+/// read list (which fixed `wipe.rs`), restores the data — but the scout was
+/// still told the post was deleted and then edited. Demonstrated.
 ///
 /// The bulk stream checks each event's user against their binding; the
 /// per-user read never does. It should check, after the fetch, that the user

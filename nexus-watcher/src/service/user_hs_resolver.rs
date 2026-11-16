@@ -527,7 +527,7 @@ async fn resolve_user(
     Ok(Resolution::Applied(update))
 }
 
-/// Population counts over non-deleted users with a `HOSTED_BY` mapping.
+/// Population counts over users with a `HOSTED_BY` mapping, deleted or not.
 #[derive(Debug, Default)]
 struct MappingCounts {
     /// Users bound to a homeserver.
@@ -575,7 +575,8 @@ struct HsResolverMetrics {
     /// PKDNS records older than the one the mapping was applied from: replays
     /// or lagging answers, never applied.
     ignored_older_record: Counter<u64>,
-    /// Non-deleted users with a `HOSTED_BY` mapping; denominator for `stale_users`.
+    /// Users with a `HOSTED_BY` mapping, deleted ones included; denominator
+    /// for `stale_users`.
     mapped_users: Gauge<u64>,
     /// Subset of `mapped_users` whose mapping is currently stale. Refreshed
     /// after every run that processed users, which are the runs that can change it.

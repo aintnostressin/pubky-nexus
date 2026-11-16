@@ -53,10 +53,10 @@ async fn mirror_then_switch_then_wipe_the_old_homeserver() -> Result<()> {
 
 /// Switch, then wipe A before nexus has noticed: the deletes are indexed and
 /// the user tombstoned, the switch is still followed, and the read of B
-/// brings everything back. Counterparts see a delete and a re-create.
+/// brings everything back — a tombstoned user stays on their homeserver's
+/// read list, so the copy on B heals them. Counterparts see a delete and a
+/// re-create.
 #[tokio_shared_rt::test(shared)]
-#[ignore = "a tombstoned user is read on no homeserver, so the copy on B cannot heal them yet; \
-            needs a one-off read of a deleted user after a switch"]
 async fn wipe_before_nexus_notices_is_healed_by_the_switch() -> Result<()> {
     let t = MigrationTest::setup().await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
@@ -111,29 +111,22 @@ async fn wipe_before_nexus_notices_is_healed_by_the_switch() -> Result<()> {
 /// The mover leaves A for B and, once nexus has followed, wipes A. Later they
 /// come back: the record names A again and B's tree is copied back to A.
 /// Nexus reads A from the cursor where it left off, so it reads the wipe
-/// before the copy. When a read ends between the wipe's profile delete and the
-/// copy's profile write, the user is tombstoned at the end of that read, and a
-/// tombstoned user is read nowhere, so the copy is never indexed: the user is
-/// indexed nowhere while their record names a homeserver that holds all of
-/// it. Demonstrated with 99 posts, so that the wipe fills one read of 100
-/// events and the read ends on the profile delete. That is the narrowest
-/// window there is, since the copy writes the profile first and the wipe
-/// deletes it last; a copy in listing order writes the profile after the
-/// posts, and then any read that ends inside the copy does it (reasoned). When
-/// the wipe and the copy fit in one read, the end state is right, after delete
-/// notifications to the user's counterparts (reasoned).
+/// before the copy. A read can end between the wipe's profile delete and the
+/// copy's profile write, leaving the user tombstoned at the end of that read;
+/// a tombstoned user stays on the read list, so the next read indexes the
+/// copy and the profile write clears the tombstone. The 99 posts make the
+/// wipe fill one read of 100 events so the read ends exactly on the profile
+/// delete — the narrowest window there is, since the copy writes the profile
+/// first and the wipe deletes it last; a copy in listing order writes the
+/// profile after the posts, and then any read that ends inside the copy
+/// tombstones the same way (reasoned).
 ///
 /// Unlike the wipe before nexus notices, the tombstone comes from a read made
-/// after the switch, so reading a deleted user once on the homeserver they
-/// moved to does not cover it. The same should hold without a migration for
-/// any user of an external homeserver who deletes their profile and writes it
-/// again in a later read (reasoned). A tombstoned user has to keep being read
-/// on the homeserver they are bound to, since a profile write clears the
-/// tombstone.
+/// after the switch, so a one-off read of a deleted user after a switch would
+/// not have covered it: a tombstoned user has to keep being read on the
+/// homeserver they are bound to, since a profile write is the one thing that
+/// clears the tombstone.
 #[tokio_shared_rt::test(shared)]
-#[ignore = "a read that ends right after a profile delete leaves the user tombstoned, and a \
-            tombstoned user is never read again; needs deleted users kept on their homeserver's \
-            read list"]
 async fn returning_to_a_homeserver_wiped_after_leaving_it_replays_the_wipe() -> Result<()> {
     let t = MigrationTest::setup().await?;
     let mover = Keypair::random();
@@ -184,17 +177,15 @@ async fn returning_to_a_homeserver_wiped_after_leaving_it_replays_the_wipe() -> 
 
 /// No migration at all: a user of an external homeserver deletes their
 /// profile and writes it again after nexus has read the delete. The delete
-/// tombstones them, and a tombstoned user is left out of every per-user read,
-/// so the new profile is never read. Demonstrated; the read list's query is
-/// the one on `main`. This is what the two scenarios above come down to: with
-/// deleted users kept in `get_active_users_by_homeserver`, this test, the wipe
-/// before nexus notices and the return to a wiped homeserver all pass
-/// (demonstrated by patching the query). The sweep leaves deleted users out
-/// too, so without a recheck their switch is not followed either (reasoned).
+/// tombstones them, the tombstoned user stays on the per-user read list
+/// (`get_active_users_by_homeserver` keeps deleted users), so the new profile
+/// is read and clears the tombstone. This is what the two scenarios above
+/// come down to. The sweep keeps deleted users too, so a switch they publish
+/// is followed without a recheck (reasoned). The tombstone still hides the
+/// user from readers: every feed and search query filters on `u.deleted`;
+/// only the user's own record stops the watcher reading them.
 #[tokio_shared_rt::test(shared)]
-#[ignore = "a tombstoned user is left out of the per-user reads, so a profile written again is \
-            never read; needs deleted users kept on their homeserver's read list"]
-async fn a_profile_deleted_then_written_again_stays_deleted() -> Result<()> {
+async fn a_profile_deleted_then_written_again_is_read_again() -> Result<()> {
     let t = MigrationTest::setup().await?;
     let user = Keypair::random();
 

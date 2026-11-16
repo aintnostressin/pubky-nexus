@@ -241,6 +241,19 @@ answer and changes nothing, whatever it names. The same record seen again is
 applied again. No record at all says nothing: the mapping, its flag and its
 record stand and only `resolved_at` moves.
 
+### Deleted users
+
+A `profile.json` delete tombstones the user: the node keeps its edges,
+`deleted = true` hides it from every feed and search query, and the next
+profile write clears the flag. The tombstone does **not** stop the watcher: a
+deleted user stays on their homeserver's read list and in the resolver's
+sweep, because the profile write that clears a tombstone can only be seen by
+reading, and because a wipe of a homeserver's storage must not amount to the
+homeserver erasing a departed user from the index. Only the user's own signed
+record stops the indexing, by no longer naming the homeserver (the mapping
+goes stale, above). A deleted user with no new events costs one empty
+cursored read per cycle, the same as any inactive user.
+
 ### Monitoring stale mappings
 
 When a user's record names another homeserver or none, the resolver marks the
@@ -257,7 +270,7 @@ catch both:
 | `nexus.task.hs-resolver.marked_stale` | counter, label `reason` | Users whose mapping flipped from active to stale. `unresolved`: a record the key holder signed names no homeserver. `hs_changed`: it names a different HS. Already-stale users are not counted again. |
 | `nexus.task.hs-resolver.ignored_older_record` | counter | PKDNS records older than the one the mapping was applied from: replays or lagging answers, never applied. A steady trickle is normal on a DHT; a burst points at a node or relay serving old packets. |
 | `nexus.task.hs-resolver.switched` | counter | Users whose mapping moved to the homeserver their record names. Only counted with stale mapping disabled. |
-| `nexus.task.hs-resolver.mapped_users` | gauge | Non-deleted users with a `HOSTED_BY` mapping. Recorded on the first run after startup, then refreshed after every run that processed users. |
+| `nexus.task.hs-resolver.mapped_users` | gauge | Users with a `HOSTED_BY` mapping, deleted ones included. Recorded on the first run after startup, then refreshed after every run that processed users. |
 | `nexus.task.hs-resolver.stale_users` | gauge | Subset of `mapped_users` whose mapping is currently stale. |
 | `nexus.task.hs-resolver.heartbeat_timestamp` | gauge, unit `s` | Unix time of the resolver's most recent progress: a user handled or a run finished. |
 
