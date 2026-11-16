@@ -138,6 +138,31 @@ async fn test_bootstrap_user_not_indexed() -> Result<()> {
     Ok(())
 }
 
+/// A recheck of a user nexus does not know is a 404 with an `error` body: the
+/// route answers before any network lookup, so an unauthenticated caller
+/// cannot spend a DHT query per random id.
+#[tokio_shared_rt::test(shared)]
+async fn test_recheck_unknown_user_is_not_found() -> Result<()> {
+    use axum::http::StatusCode;
+    use pubky::Keypair;
+
+    crate::utils::server::TestServiceServer::get_test_server().await;
+
+    let unknown = Keypair::random().public_key().to_z32();
+    let body = crate::utils::invalid_put_request(
+        &format!("/v0/recheck/{unknown}"),
+        StatusCode::NOT_FOUND,
+    )
+    .await?;
+
+    let error = body
+        .get("error")
+        .and_then(|e| e.as_str())
+        .expect("404 body should carry an `error` string");
+    assert!(error.contains(&unknown), "error names the user: {error}");
+    Ok(())
+}
+
 /// Starting the API sets up the shared Pubky client, which the ingest-user route looks
 /// users' homeservers up with.
 #[tokio_shared_rt::test(shared)]

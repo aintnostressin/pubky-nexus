@@ -499,4 +499,73 @@ mod tests {
             );
         }
     }
+
+    /// The recheck's wire format: every update maps to an outcome, and each
+    /// outcome serializes to the snake_case string decentralization.md lists.
+    /// Clients switch on these strings, so a change here is a breaking change.
+    #[test]
+    fn recheck_outcome_covers_every_update_on_the_wire() {
+        use serde_json::json;
+
+        let hs = random_pubky_id().to_string();
+        let cases = [
+            (MappingUpdate::Unbound, RecheckOutcome::Unbound),
+            (
+                MappingUpdate::Bound { to: hs.clone() },
+                RecheckOutcome::Bound,
+            ),
+            (
+                MappingUpdate::Confirmed { was_stale: true },
+                RecheckOutcome::Confirmed,
+            ),
+            (
+                MappingUpdate::Switched {
+                    from: hs.clone(),
+                    to: hs.clone(),
+                    was_stale: false,
+                },
+                RecheckOutcome::Switched,
+            ),
+            (
+                MappingUpdate::Kept { was_stale: false },
+                RecheckOutcome::Kept,
+            ),
+            (
+                MappingUpdate::NoRecord { was_stale: false },
+                RecheckOutcome::Kept,
+            ),
+            (
+                MappingUpdate::IgnoredOlder {
+                    was_stale: false,
+                    names_homeserver: true,
+                },
+                RecheckOutcome::Kept,
+            ),
+            (
+                MappingUpdate::MarkedStale {
+                    reason: StaleReason::Unresolved,
+                    was_stale: false,
+                },
+                RecheckOutcome::Kept,
+            ),
+        ];
+        for (update, outcome) in cases {
+            assert_eq!(RecheckOutcome::from(&update), outcome, "{update:?}");
+        }
+
+        let on_the_wire = [
+            (RecheckOutcome::Unbound, json!("unbound")),
+            (RecheckOutcome::Bound, json!("bound")),
+            (RecheckOutcome::Confirmed, json!("confirmed")),
+            (RecheckOutcome::Switched, json!("switched")),
+            (RecheckOutcome::Kept, json!("kept")),
+        ];
+        for (outcome, expected) in on_the_wire {
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                expected,
+                "{outcome:?}"
+            );
+        }
+    }
 }
