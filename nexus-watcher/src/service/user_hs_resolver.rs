@@ -1803,8 +1803,9 @@ mod tests {
     }
 
     /// With stale mapping disabled, a lookup that finds no homeserver keeps the
-    /// mapping, and a stale flag left from before is cleared: the user is read
-    /// on the stored homeserver again.
+    /// mapping, and a stale flag left from before stands: both policies agree
+    /// on such a record, so a recheck cannot un-stale what the sweep marked
+    /// and flip the user back onto the read list.
     #[tokio_shared_rt::test(shared)]
     async fn test_resolve_user_keeps_mapping_without_homeserver_when_stale_mapping_disabled(
     ) -> Result<(), DynError> {
@@ -1834,11 +1835,11 @@ mod tests {
             get_user_homeserver(&user_id).await?,
             Some(HomeserverMapping {
                 hs_id: stored_hs.to_string(),
-                stale: false,
+                stale: true,
                 record_ts: Some(10),
             })
         );
-        assert!(get_user_ids_by_homeserver(&stored_hs)
+        assert!(!get_user_ids_by_homeserver(&stored_hs)
             .await?
             .contains(&user_id));
 

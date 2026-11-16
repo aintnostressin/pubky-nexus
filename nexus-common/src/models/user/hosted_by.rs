@@ -18,7 +18,8 @@ pub enum StaleMapping {
     Enabled,
     /// Follow the record: a record naming another homeserver moves the mapping
     /// there, a record naming none keeps it. A stale flag left from before is
-    /// cleared either way.
+    /// cleared when a homeserver is confirmed or switched to; a record naming
+    /// none leaves it as it is, agreeing with what [`Self::Enabled`] marks.
     Disabled,
 }
 
@@ -74,7 +75,8 @@ pub enum MappingUpdate {
         was_stale: bool,
     },
     /// The record names no homeserver; the mapping is kept and the stale flag
-    /// cleared ([`StaleMapping::Disabled`]).
+    /// left as it was ([`StaleMapping::Disabled`]): both policies agree on
+    /// such a record, so the flag cannot flip between the sweep and a recheck.
     Kept { was_stale: bool },
 }
 
@@ -178,9 +180,9 @@ impl MappingUpdate {
                     None => set_user_homeserver(user_id, to).await,
                 }
             }
-            Self::Kept { .. } => {
+            Self::Kept { was_stale } => {
                 debug!(%user_id, "Record names no homeserver; HS mapping kept");
-                set_user_homeserver_stale(user_id, false, stored_record.as_ref()).await
+                set_user_homeserver_stale(user_id, *was_stale, stored_record.as_ref()).await
             }
         }
     }

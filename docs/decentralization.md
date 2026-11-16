@@ -213,7 +213,8 @@ names:
 - **Recheck on demand.** `PUT /v0/recheck/{user_id}` (the counterpart of
   `PUT /v0/ingest/{user_id}`) asks every DHT node and relay for the user's
   newest record and follows it: a record naming another homeserver moves the
-  edge there, a record naming none keeps it. The response says what happened
+  edge there, a record naming none keeps it, along with any stale flag the
+  sweep left. The response says what happened
   (`bound`, `confirmed`, `switched`, `kept`, `unbound`) and which homeserver the
   user is bound to now. The client app should call it after a sign-in, so a
   user who migrated is indexed from the new homeserver within seconds. The same
