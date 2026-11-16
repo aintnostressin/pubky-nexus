@@ -588,9 +588,11 @@ impl MigrationTest {
     }
 
     /// The notification kinds of `user` with their times, oldest first. Two
-    /// notifications with the same body share one entry whose time is the
-    /// latest, so a notification issued again shows up here as a newer time,
-    /// not as a second entry.
+    /// notifications with the same body share one entry; for most kinds the
+    /// entry takes the latest time, so a notification issued again shows up
+    /// here as a newer time, not as a second entry. Replies, mentions and
+    /// reposts are written add-if-absent (`put_to_index_once`) and keep their
+    /// first time, so a re-issue of those is invisible here.
     pub async fn notification_times(&self, user: &Keypair) -> Result<Vec<(String, i64)>> {
         let pagination = Pagination {
             limit: Some(1000),

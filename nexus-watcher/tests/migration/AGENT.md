@@ -78,10 +78,12 @@ databases behind. If you must use the shared databases, rerun a failure on
 
 Assert outcomes, not mechanisms: what is indexed, which homeserver the user is
 bound to, cursors, notification kinds. Never the resolver's internal flags.
-Notifications with the same body share one entry in Redis and the entry takes
-the latest time, so a notification issued twice is one entry with a newer
-time: compare `notification_times`, not `notifications`, when the question is
-whether something was notified again.
+Notifications with the same body share one entry in Redis. For most kinds the
+entry takes the latest time, so a notification issued twice is one entry with
+a newer time: compare `notification_times`, not `notifications`, when the
+question is whether something was notified again. Replies, mentions and
+reposts are the exception: they are written add-if-absent and keep their
+first time, so a re-issue of those changes neither list.
 
 ## Where to push
 
