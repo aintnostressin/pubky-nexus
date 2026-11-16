@@ -156,12 +156,10 @@ async fn a_retry_queued_on_the_old_homeserver_restores_a_reply_deleted_on_the_ne
 /// marks the binding stale instead, and the user is indexed nowhere until the
 /// visit after.
 ///
-/// The sweep should not move a binding on a record older than the one the
-/// binding was set from (a record timestamp stored with the binding), or
-/// look again with `resolve_most_recent` before moving it.
+/// The sweep does not move a binding on a record older than the one the
+/// binding was set from: the recheck keeps the record's timestamp on the
+/// binding and the sweep ignores anything older (`MappingUpdate::IgnoredOlder`).
 #[tokio_shared_rt::test(shared)]
-#[ignore = "the watcher's cache-first sweep applies the record its cache held before the API's \
-            recheck; needs record timestamps on the binding or a fresh lookup before a move"]
 async fn the_watchers_sweep_moves_the_user_back_after_a_recheck_through_the_api() -> Result<()> {
     let t = MigrationTest::setup().await?;
     let mover = Keypair::random();
