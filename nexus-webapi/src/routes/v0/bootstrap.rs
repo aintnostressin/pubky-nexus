@@ -64,7 +64,7 @@ pub async fn ingest_user_handler(
 #[utoipa::path(
     put,
     path = RECHECK_USER_ROUTE,
-    description = "Re-check a known user's homeserver against the network now and follow the record: a record naming another homeserver moves the user there, so a user who migrated is indexed from the new homeserver without waiting for the periodic resolver. The client app should call it after a sign-in.",
+    description = "Re-check a known user's homeserver against the network now and follow the record: a record naming another homeserver moves the user there. The periodic resolver only marks a changed mapping stale, so this call is what follows a migration: a user who migrated is indexed from the new homeserver right away. The client app should call it after a sign-in.",
     tag = "Bootstrap",
     params(
         ("user_id" = PubkyId, Path, description = "User Pubky ID")

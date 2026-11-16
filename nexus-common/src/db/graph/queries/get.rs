@@ -854,9 +854,10 @@ pub fn get_all_homeservers_with_active_users() -> Query {
 /// Retrieves user IDs whose homeserver mapping is stale
 /// (`resolved_at` is older than `ttl_ms`) or missing (no `HOSTED_BY` edge).
 ///
-/// Deleted users are included: their record keeps being re-resolved, so a
-/// switch they publish after wiping the old homeserver is followed without an
-/// explicit recheck.
+/// Deleted users are included: their record keeps being re-resolved, so the
+/// sweep still notices a switch they publish after wiping the old homeserver.
+/// The default sweep marks the changed mapping stale; a recheck, or a sweep
+/// with stale mapping disabled, follows it.
 pub fn get_users_needing_hs_resolution(ttl_ms: u64) -> Query {
     Query::new(
         "get_users_needing_hs_resolution",

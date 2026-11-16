@@ -232,9 +232,11 @@ the old homeserver's answers after a switch.
 
 ### Record order
 
-A bound user whose record names another homeserver, or none, keeps the mapping,
-which is marked `stale`: the user is indexed nowhere until a record names the
-stored homeserver again. The mapping is never switched.
+With stale mapping enabled, the sweep's default, a bound user whose record
+names another homeserver, or none, keeps the mapping, which is marked `stale`:
+the user is indexed nowhere until a record names the stored homeserver again
+or a recheck follows the record. The sweep never switches the mapping in this
+mode; the recheck above, or a sweep with stale mapping disabled, does.
 
 A record older than the one the mapping was applied from, by its timestamp
 against the edge's `record_ts`, is ignored: it is a replay or a lagging node's

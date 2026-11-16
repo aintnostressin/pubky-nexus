@@ -180,8 +180,10 @@ async fn returning_to_a_homeserver_wiped_after_leaving_it_replays_the_wipe() -> 
 /// tombstones them, the tombstoned user stays on the per-user read list
 /// (`get_active_users_by_homeserver` keeps deleted users), so the new profile
 /// is read and clears the tombstone. This is what the two scenarios above
-/// come down to. The sweep keeps deleted users too, so a switch they publish
-/// is followed without a recheck (reasoned). The tombstone still hides the
+/// come down to. The sweep keeps deleted users too, so it still re-resolves
+/// their record: the default sweep marks a changed mapping stale, and a
+/// recheck, or a sweep with stale mapping disabled, follows it (reasoned).
+/// The tombstone still hides the
 /// user from readers: every feed and search query filters on `u.deleted`;
 /// only the user's own record stops the watcher reading them.
 #[tokio_shared_rt::test(shared)]
