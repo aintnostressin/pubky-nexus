@@ -823,11 +823,13 @@ mod tests {
         let user_fresh = "ttl_test_user_fresh";
         let user_stale = "ttl_test_user_stale";
         let user_no_hs = "ttl_test_user_no_hs";
+        let user_deleted = "ttl_test_user_deleted";
         let hs_id = "ttl_test_hs";
 
         create_test_user(user_fresh).await?;
         create_test_user(user_stale).await?;
         create_test_user(user_no_hs).await?;
+        create_test_user(user_deleted).await?;
 
         // Give user_fresh a recently resolved mapping
         set_user_homeserver(user_fresh, hs_id).await?;
@@ -846,6 +848,20 @@ mod tests {
 
         // user_no_hs has no HOSTED_BY at all
 
+        // user_deleted is tombstoned with an old resolved_at: the sweep keeps
+        // re-resolving deleted users, since only their record stops the watcher.
+        let deleted_query = Query::new(
+            "set_deleted_hs",
+            "MATCH (u:User {id: $user_id})
+             SET u.deleted = true
+             MERGE (hs:Homeserver {id: $hs_id})
+             MERGE (u)-[r:HOSTED_BY]->(hs)
+             SET r.resolved_at = timestamp() - 7200000",
+        )
+        .param("user_id", user_deleted)
+        .param("hs_id", hs_id);
+        exec_single_row(deleted_query).await?;
+
         // With a 1-hour TTL: user_fresh should be skipped, user_stale and user_no_hs returned
         let mut needing = get_users_needing_resolution(3_600_000).await?;
         needing.sort();
@@ -862,11 +878,16 @@ mod tests {
             needing.contains(&user_no_hs.to_string()),
             "User without HOSTED_BY should need resolution"
         );
+        assert!(
+            needing.contains(&user_deleted.to_string()),
+            "Tombstoned user should still need resolution"
+        );
 
         // Cleanup
         cleanup_test_user(user_fresh).await?;
         cleanup_test_user(user_stale).await?;
         cleanup_test_user(user_no_hs).await?;
+        cleanup_test_user(user_deleted).await?;
 
         Ok(())
     }
