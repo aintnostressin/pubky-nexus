@@ -18,7 +18,8 @@ use tracing::info;
 ///   every reader treats absent as live,
 ///   Cypher via `NOT coalesce(u.deleted, false)` and Rust via `deserialize_user_deleted`.
 ///   The filters keep their `coalesce()` — dropping it would make a missing property read
-///   as deleted, which silently hides the user from every feed and search query.
+///   as deleted, which silently drops the user from `get_active_users_by_homeserver` and
+///   stops the watcher indexing them.
 /// - Invalidates cached tombstone JSON per page. Live users' pre-migration entries lack
 ///   the key and deserialize to `false`, which is already correct.
 ///
