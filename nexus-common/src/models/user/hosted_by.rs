@@ -415,8 +415,18 @@ mod tests {
                     names_homeserver: false,
                 },
             ),
-            (Some(on_a(false)), naming(&user, Some(&b), 10), Disabled, switched(false)),
-            (Some(on_a(true)), naming(&user, Some(&b), 11), Disabled, switched(true)),
+            (
+                Some(on_a(false)),
+                naming(&user, Some(&b), 10),
+                Disabled,
+                switched(false),
+            ),
+            (
+                Some(on_a(true)),
+                naming(&user, Some(&b), 11),
+                Disabled,
+                switched(true),
+            ),
             (
                 Some(on_a(false)),
                 naming(&user, None, 10),

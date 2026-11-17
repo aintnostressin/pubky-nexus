@@ -1230,7 +1230,8 @@ mod tests {
         set_user_homeserver(&user_id, &stored_hs).await?;
         backdate_resolved_at(&user_id).await?;
 
-        let outcome = resolve_user(&MockResolver::missing(), &user_pk, StaleMapping::Enabled).await?;
+        let outcome =
+            resolve_user(&MockResolver::missing(), &user_pk, StaleMapping::Enabled).await?;
         assert_eq!(
             outcome,
             Resolution::Applied(MappingUpdate::NoRecord { was_stale: false })
