@@ -88,6 +88,14 @@ pub trait PkdnsHomeserverResolver: Send + Sync {
     /// Looks up the PKDNS record of `user_pk`.
     async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord>;
 
+    /// Like [`Self::resolve_record`], but asks every DHT node and relay for the newest
+    /// record instead of trusting a cache, which is what a check made because something
+    /// changed has to do. A resolver without a cache has nothing fresher to answer with, so
+    /// by default it answers as [`Self::resolve_record`] does.
+    async fn resolve_record_fresh(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        self.resolve_record(user_pk).await
+    }
+
     /// Looks up the PKDNS record of `user_pk`, refusing a packet nexus cannot
     /// apply:
     /// - One signed by another key fails the lookup. pkarr 6.0.1 on mainline
@@ -98,29 +106,50 @@ pub trait PkdnsHomeserverResolver: Send + Sync {
     ///   `seq` arrives with such a timestamp; its signature does not verify as a
     ///   pkarr packet, so it could not be kept as proof either.
     async fn resolve_own_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
-        let record = self.resolve_record(user_pk).await?;
-        let PkdnsRecord::Published(packet) = &record else {
-            return Ok(record);
-        };
-        if packet.public_key() != *user_pk.as_inner() {
-            return Err(PubkyClientError::RequestFailed {
-                message: format!(
-                    "PKDNS answer for {} is signed by {}",
-                    user_pk.z32(),
-                    packet.public_key().to_z32()
-                ),
-            });
-        }
-        if StoredRecord::try_from(packet).is_err() {
-            tracing::warn!(
-                user_id = %user_pk.z32(),
-                timestamp = packet.timestamp().as_u64(),
-                "PKDNS record timestamp does not fit the graph; taken as no record"
-            );
-            return Ok(PkdnsRecord::Missing);
-        }
-        Ok(record)
+        own_record(self.resolve_record(user_pk).await?, user_pk)
     }
+
+    /// [`Self::resolve_own_record`] on the newest record on the network, see
+    /// [`Self::resolve_record_fresh`].
+    async fn resolve_own_record_fresh(
+        &self,
+        user_pk: &PublicKey,
+    ) -> PubkyClientResult<PkdnsRecord> {
+        own_record(self.resolve_record_fresh(user_pk).await?, user_pk)
+    }
+}
+
+/// The checks of [`PkdnsHomeserverResolver::resolve_own_record`], applied to a
+/// record however it was looked up.
+fn own_record(record: PkdnsRecord, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+    let PkdnsRecord::Published(packet) = &record else {
+        return Ok(record);
+    };
+    if packet.public_key() != *user_pk.as_inner() {
+        return Err(PubkyClientError::RequestFailed {
+            message: format!(
+                "PKDNS answer for {} is signed by {}",
+                user_pk.z32(),
+                packet.public_key().to_z32()
+            ),
+        });
+    }
+    if StoredRecord::try_from(packet).is_err() {
+        tracing::warn!(
+            user_id = %user_pk.z32(),
+            timestamp = packet.timestamp().as_u64(),
+            "PKDNS record timestamp does not fit the graph; taken as no record"
+        );
+        return Ok(PkdnsRecord::Missing);
+    }
+    Ok(record)
+}
+
+/// The newest PKDNS record of `user_pk` on the network: `pubky`'s pkarr cache is
+/// refreshed with the newest packet every DHT node and relay answers with, then read.
+pub async fn fresh_pkdns_record_of(pubky: &Pubky, user_pk: &PublicKey) -> PkdnsRecord {
+    pubky.client().pkarr().resolve_most_recent(user_pk).await;
+    pkdns_record_of(pubky, user_pk).await
 }
 
 /// Looks up the PKDNS record of `user_pk` through `pubky`: the lookup behind
@@ -156,6 +185,11 @@ impl PkdnsHomeserverResolver for PubkyConnectorResolver {
     async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
         let pubky = PubkyConnector::get()?;
         Ok(pkdns_record_of(&pubky, user_pk).await)
+    }
+
+    async fn resolve_record_fresh(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        let pubky = PubkyConnector::get()?;
+        Ok(fresh_pkdns_record_of(&pubky, user_pk).await)
     }
 }
 
