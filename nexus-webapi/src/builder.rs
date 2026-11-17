@@ -94,9 +94,9 @@ impl NexusApiBuilder {
     /// - `shutdown_rx`: optional shutdown signal. If none is provided, a default one will be created, listening for Ctrl-C.
     pub async fn start(self, shutdown_rx: Option<Receiver<bool>>) -> Result<NexusApi, DynError> {
         StackManager::setup(&self.api_context.api_config.stack).await?;
-        // The ingest route looks users up on PKDNS through the shared client. Serving
-        // reads does not depend on it, so a client that cannot be built keeps that
-        // route failing rather than the whole API down.
+        // The ingest and recheck routes look users up on PKDNS through the shared
+        // client. Serving reads does not depend on it, so a client that cannot be
+        // built keeps those two routes failing rather than the whole API down.
         let net = &self.api_context.api_config.stack.net;
         if let Err(e) = PubkyConnector::initialise(
             net.pubky_client_testnet_host(),
@@ -104,7 +104,7 @@ impl NexusApiBuilder {
         )
         .await
         {
-            warn!(error = %e, "Pubky client not initialised; ingest will fail");
+            warn!(error = %e, "Pubky client not initialised; ingest and recheck will fail");
         }
         let mut shutdown_rx = shutdown_rx.unwrap_or_else(create_shutdown_rx);
 

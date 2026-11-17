@@ -1,12 +1,17 @@
+use std::future::Future;
 use std::sync::Arc;
 
 use pubky_app_specs::{ParsedUri, PubkyId};
 
-use super::{PkdnsHomeserverResolver, StoredRecord};
+use super::{PkdnsHomeserverResolver, PkdnsRecord, StoredRecord};
+use crate::db::PubkyClientResult;
 use crate::models::error::{ModelError, ModelResult};
 use crate::models::homeserver::HsBlacklist;
 use crate::models::traits::Collection;
-use crate::models::user::{set_user_homeserver_from_record, UserDetails, UserHsCursor};
+use crate::models::user::{
+    get_user_homeserver, set_user_homeserver_from_record, HomeserverRecheck, MappingUpdate,
+    RecheckOutcome, StaleMapping, UserDetails, UserHsCursor,
+};
 use crate::StackConfig;
 
 /// Ingests previously-unknown users unless their HS is blacklisted.
@@ -78,6 +83,23 @@ impl UserIngestor {
         &self,
         user_id: &PubkyId,
     ) -> ModelResult<Option<(String, StoredRecord)>> {
+        let user_pk = user_id.to_public_key();
+        let record = self
+            .resolve_record_unless_blacklisted(user_id, self.resolver.resolve_own_record(&user_pk))
+            .await?;
+        let (Some(stored), Some(hs_pk)) = (record.stored(), record.homeserver()) else {
+            return Ok(None);
+        };
+        Ok(Some((hs_pk.to_string(), stored)))
+    }
+
+    /// `lookup`'s record for `user_id`, refused when the user's own key or the
+    /// homeserver the record names is blacklisted.
+    async fn resolve_record_unless_blacklisted(
+        &self,
+        user_id: &PubkyId,
+        lookup: impl Future<Output = PubkyClientResult<PkdnsRecord>>,
+    ) -> ModelResult<PkdnsRecord> {
         // `user_id` may itself be an HS PK (e.g. a file `src` of the form
         // `pubky://<hs_pk>/...` that addresses the HS directly). The resolver
         // returns no HS for an HS PK, so without this self-check a blacklisted HS
@@ -88,21 +110,17 @@ impl UserIngestor {
             });
         }
 
-        let record = self
-            .resolver
-            .resolve_own_record(&user_id.to_public_key())
-            .await
-            .map_err(ModelError::from_generic)?;
-        let (Some(stored), Some(hs_pk)) = (record.stored(), record.homeserver()) else {
-            return Ok(None);
-        };
+        let record = lookup.await.map_err(ModelError::from_generic)?;
 
-        let hs_id = hs_pk.to_string();
-        if self.hs_blacklist.is_blacklisted(&hs_id) {
-            return Err(ModelError::HsBlacklisted { hs_id });
+        if let Some(hs_id) = record.homeserver() {
+            if self.hs_blacklist.is_blacklisted(hs_id.as_ref()) {
+                return Err(ModelError::HsBlacklisted {
+                    hs_id: hs_id.to_string(),
+                });
+            }
         }
 
-        Ok(Some((hs_id, stored)))
+        Ok(record)
     }
 
     /// Resolves and persists a previously-unknown user.
@@ -140,9 +158,50 @@ impl UserIngestor {
         set_user_homeserver_from_record(&user_id_str, &hs_id, &record).await?;
 
         // Seed the user's HS cursor floor (no-op if we're already tracking them).
-        UserHsCursor::init(user_id, &hs_id).await?;
+        UserHsCursor::init(user_id, hs_id.as_ref()).await?;
 
         Ok(())
+    }
+
+    /// Re-checks a known user's homeserver against the network now and follows
+    /// the record: a record naming another homeserver moves the mapping there,
+    /// a record naming none keeps it. The lookup is the resolver's fresh one
+    /// ([`PkdnsHomeserverResolver::resolve_own_record_fresh`]): the network's
+    /// newest packet, not a cache. This is the programmatic way to switch a
+    /// user's homeserver; the periodic resolver only follows records when its
+    /// stale mapping is disabled.
+    ///
+    /// Returns `None` for a user nexus does not know; ingest them instead.
+    ///
+    /// Returns [`ModelError::HsBlacklisted`] if the published HS is blacklisted.
+    #[tracing::instrument(name = "user.recheck", skip_all)]
+    pub async fn recheck_user(&self, user_id: &PubkyId) -> ModelResult<Option<HomeserverRecheck>> {
+        let user_id_str = user_id.to_string();
+        if UserDetails::get_by_id(&user_id_str).await?.is_none() {
+            tracing::debug!("Skipping recheck: {user_id_str} unknown");
+            return Ok(None);
+        }
+
+        let user_pk = user_id.to_public_key();
+        let record = self
+            .resolve_record_unless_blacklisted(
+                user_id,
+                self.resolver.resolve_own_record_fresh(&user_pk),
+            )
+            .await
+            .inspect_err(|e| tracing::warn!("Aborting recheck of {user_id}: {e}"))?;
+
+        let stored = get_user_homeserver(&user_id_str).await?;
+        let update = MappingUpdate::decide(stored.as_ref(), &record, StaleMapping::Disabled);
+        update.apply(&user_id_str, &record).await?;
+        if let Some(hs_id) = update.bound_to() {
+            UserHsCursor::init(user_id, hs_id).await?;
+        }
+
+        Ok(Some(HomeserverRecheck {
+            homeserver: update.homeserver_after(stored.as_ref()),
+            outcome: RecheckOutcome::from(&update),
+        }))
     }
 }
 
@@ -173,6 +232,30 @@ mod tests {
                 7,
             )))
         }
+    }
+
+    /// Fails the test if any lookup reaches it. Every trait method routes
+    /// through [`PkdnsHomeserverResolver::resolve_record`], so this catches
+    /// them all.
+    struct UnreachableResolver;
+
+    #[async_trait::async_trait]
+    impl PkdnsHomeserverResolver for UnreachableResolver {
+        async fn resolve_record(&self, _: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+            panic!("the record was looked up");
+        }
+    }
+
+    /// The recheck answers for an unknown user before any network lookup, so
+    /// an unauthenticated caller cannot spend a DHT query per random id. That
+    /// ordering is what keeps the open, any-id route affordable.
+    #[tokio_shared_rt::test(shared)]
+    async fn recheck_of_an_unknown_user_makes_no_lookup() -> Result<(), DynError> {
+        StackManager::setup(&StackConfig::default()).await?;
+        let ingestor = UserIngestor::new([], Arc::new(UnreachableResolver));
+
+        assert!(ingestor.recheck_user(&random_pubky_id()).await?.is_none());
+        Ok(())
     }
 
     /// A newly seen user is bound from the record just resolved, which stays on
