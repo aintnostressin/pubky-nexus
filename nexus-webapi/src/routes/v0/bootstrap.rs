@@ -71,6 +71,7 @@ pub async fn ingest_user_handler(
     ),
     responses(
         (status = 200, description = "The user's homeserver after the check and what the check did", body = HomeserverRecheck),
+        (status = 400, description = "Invalid parameters"),
         (status = 403, description = "User is hosted on a blacklisted HS"),
         (status = 404, description = "User not known to Nexus; ingest first"),
         (status = 429, description = "Rate limit exceeded", headers(("Retry-After" = u64, description = "Seconds until retry"))),
