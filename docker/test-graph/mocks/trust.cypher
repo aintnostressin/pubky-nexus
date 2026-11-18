@@ -2,7 +2,9 @@
 // ##### Trust ranking ##########
 // ##############################
 // Runs last. Ranks every fixture user at 0.3, between the wot endorsers (D1 0.4,
-// D2 0.2, D1B 0.1), except the wot on-ramp accounts, which stay unranked.
+// D2 0.2, D1B 0.1) and hot-tags.cypher's Whale (0.4), except the wot on-ramp
+// accounts, which stay unranked. hot-tags.cypher's Whale, Mid (0.2), Low
+// (0.12), Sliver (0.001) and Newcomer (0.0) keep the trust that file sets.
 // recommended.cypher's deleted account (z48xiqc4...) is scored on purpose: its
 // deletion alone must hide it. A GDS recompute rewrites `trust` for every user,
 // so run the nexusd suite last and reseed.
