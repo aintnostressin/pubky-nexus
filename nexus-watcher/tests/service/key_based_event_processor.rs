@@ -46,14 +46,44 @@ async fn key_based_processor_skips_unrecognized_events() -> Result<(), DynError>
     ]]));
 
     let handler = create_mock_handler(Ok(()), None);
+    let hs_id = homeserver.id.to_string();
     let processor = processor(homeserver, handler.clone(), source.clone());
 
     processor.run().await?;
 
     // The unrecognized event is skipped, while the valid event is handled.
     assert_eq!(handler.get_handle_count(), 1);
+    // As read from this homeserver, whose key the handler stores with the line.
+    assert_eq!(handler.get_handled_homeserver_ids(), vec![hs_id]);
 
     // The processor fetched events only for the hosted user.
+    assert_eq!(source.calls().await, vec![user_id]);
+
+    Ok(())
+}
+
+/// The per-user read keeps tombstoned users: the profile write that clears a
+/// tombstone can only be seen by reading them, so dropping them here would
+/// make tombstoning a one-way door.
+#[tokio_shared_rt::test(shared)]
+async fn key_based_processor_reads_tombstoned_users() -> Result<(), DynError> {
+    setup().await?;
+
+    let (_hs_keypair, homeserver) = create_homeserver().await?;
+    let user_id = create_user_on_homeserver(&homeserver).await?;
+    UserDetails::tombstone(&PubkyId::try_from(user_id.as_str())?)
+        .put_to_graph()
+        .await?;
+
+    let source = Arc::new(MockHomeserverClient::default());
+    let processor = processor(
+        homeserver,
+        create_mock_handler(Ok(()), None),
+        source.clone(),
+    );
+
+    processor.run().await?;
+
     assert_eq!(source.calls().await, vec![user_id]);
 
     Ok(())
@@ -437,7 +467,11 @@ struct CountingHandler {
 
 #[async_trait::async_trait]
 impl EventHandler for CountingHandler {
-    async fn handle(&self, _event: &Event) -> Result<(), EventProcessorError> {
+    async fn handle(
+        &self,
+        _event: &Event,
+        _homeserver_id: &PubkyId,
+    ) -> Result<(), EventProcessorError> {
         self.handled.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -747,9 +781,9 @@ async fn key_based_processor_continues_after_retryable_client_error() -> Result<
     Ok(())
 }
 
-/// Verifies retryable fetch errors skip only the affected user.
+/// Verifies a stream request the homeserver rejects skips only that user.
 #[tokio_shared_rt::test(shared)]
-async fn key_based_processor_continues_after_retryable_fetch_error() -> Result<(), DynError> {
+async fn key_based_processor_continues_after_rejected_stream_request() -> Result<(), DynError> {
     setup().await?;
 
     let (_hs_keypair, homeserver) = create_homeserver().await?;
@@ -1321,7 +1355,11 @@ impl ShutdownOnFirstHandle {
 
 #[async_trait::async_trait]
 impl EventHandler for ShutdownOnFirstHandle {
-    async fn handle(&self, _event: &Event) -> Result<(), EventProcessorError> {
+    async fn handle(
+        &self,
+        _event: &Event,
+        _homeserver_id: &PubkyId,
+    ) -> Result<(), EventProcessorError> {
         if self.handle_count.fetch_add(1, Ordering::SeqCst) == 0 {
             let _ = self.shutdown_tx.send(true);
         }
