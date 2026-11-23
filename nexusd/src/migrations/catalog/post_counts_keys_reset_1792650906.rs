@@ -13,8 +13,12 @@ const SCAN_COUNT: usize = 1000;
 /// Keys written before the read-through cache carried a TTL never expire, and
 /// the watcher no longer invalidates any, so without this they would serve
 /// their counts forever. The next read of a post recomputes its counts from
-/// the graph and caches them with `POST_COUNTS_TTL_SECS`. Run it after this
-/// change's watcher and API are deployed. Safe to re-run.
+/// the graph and caches them with `POST_COUNTS_TTL_SECS`.
+///
+/// Run it once no instance of the previous build is running: that build writes
+/// the JSON and its TTL in two steps, so a key it writes afterwards can be left
+/// without a TTL, and nothing would remove it. A stop, migrate, start cutover
+/// meets this, and so does running it after this build is live. Safe to re-run.
 pub struct PostCountsKeysReset1792650906;
 
 #[async_trait]
