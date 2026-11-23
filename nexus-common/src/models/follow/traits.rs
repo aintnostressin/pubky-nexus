@@ -63,14 +63,6 @@ pub trait UserFollows: Sized + RedisOps + AsRef<[String]> + Default {
         Ok(user_follows)
     }
 
-    async fn get_from_index(
-        user_id: &str,
-        skip: Option<usize>,
-        limit: Option<usize>,
-    ) -> RedisResult<Option<Vec<String>>> {
-        Self::try_from_index_set(&[user_id], skip, limit, None).await
-    }
-
     async fn put_to_index(&self, user_id: &str) -> RedisResult<()> {
         let user_list_ref: Vec<&str> = self.as_ref().iter().map(|id| id.as_str()).collect();
         Self::put_index_set(&[user_id], &user_list_ref, None, None).await
