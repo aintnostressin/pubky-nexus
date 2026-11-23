@@ -15,11 +15,9 @@ use crate::harness::{post_uri, MigrationTest};
 /// fetches the mover's events when it reaches them, finds the wipe and
 /// applies it: the posts are deleted, the profile is tombstoned, and the scout
 /// who replied is told the post was deleted. The runner reads homeservers one
-/// after another, so B's read comes after and finds the user tombstoned, and
-/// the copy on B is never read. Demonstrated. With deleted users kept on the
-/// read list, which fixes `wipe.rs`, B's read restores the data, but the scout
-/// is still told the post was deleted and then edited (demonstrated by
-/// patching the query).
+/// after another, so B's read comes after. Deleted users stay on the read
+/// list, so it restores the profile and the posts, but the scout has been
+/// told the post was deleted and is now told it was edited. Demonstrated.
 ///
 /// The bulk stream checks each event's user against their binding; the
 /// per-user read never does. It should check, after the fetch, that the user
@@ -149,12 +147,11 @@ async fn a_retry_queued_on_the_old_homeserver_restores_a_reply_deleted_on_the_ne
 /// evicted, and with stale mapping disabled it moves the user back to A, which
 /// their record no longer names. The client wiped A once the recheck had
 /// confirmed the switch, so the next read of A applies the wipe: the posts are
-/// deleted and the user is tombstoned, read nowhere and never looked up again.
-/// Demonstrated, with a second client standing for the watcher's cache; the
-/// suite runs in seconds, so that cache holds the old packet unexpired, which
-/// is the same answer. With stale mapping enabled, the default, the same visit
-/// marks the binding stale instead, and the user is indexed nowhere until the
-/// visit after.
+/// deleted and the user is tombstoned. Demonstrated, with a second client
+/// standing for the watcher's cache; the suite runs in seconds, so that cache
+/// holds the old packet unexpired, which is the same answer. With stale
+/// mapping enabled, the default, the same visit marks the binding stale
+/// instead, and the user is indexed nowhere until the visit after.
 ///
 /// The sweep does not move a binding on a record older than the one the
 /// binding was set from: the recheck keeps the record's timestamp on the
