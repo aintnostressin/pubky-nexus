@@ -9,8 +9,10 @@
 //   A -> HUB [3001]     HUB -> A [3011]
 //   LONER               no follows either way
 // B and C follow HUB in the same millisecond, and HUB follows C and D in the same
-// one. Each pair is written against its id order, and the oldest follow belongs to
-// the lowest id, so only "newest first, then the id" gives the expected lists:
+// one. The follows are created in an order that is none of the expected lists, read
+// forwards or backwards (B, D, A, C into HUB, then HUB to D, E, A, C), with one tie
+// written in id order and the other against it. So the order the graph happens to
+// return the edges in cannot stand in for "newest first, then the id":
 //   followers of HUB: D, B, C, A
 //   HUB follows:      E, C, D, A
 //   friends of HUB:   C, D, A      (B only follows HUB, E is only followed)
@@ -37,11 +39,11 @@ MERGE (u:User {id: $loner}) SET u.name = "follows_loner", u.bio = "", u.status =
 // ##############################
 // ##### Create follows #########
 // ##############################
-MATCH (u1:User {id: $a}), (u2:User {id: $hub}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003001, id: "FOLFOLLOW0001"}]->(u2);
-MATCH (u1:User {id: $c}), (u2:User {id: $hub}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003003, id: "FOLFOLLOW0002"}]->(u2);
 MATCH (u1:User {id: $b}), (u2:User {id: $hub}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003003, id: "FOLFOLLOW0003"}]->(u2);
 MATCH (u1:User {id: $d}), (u2:User {id: $hub}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003004, id: "FOLFOLLOW0004"}]->(u2);
-MATCH (u1:User {id: $hub}), (u2:User {id: $a}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003011, id: "FOLFOLLOW0005"}]->(u2);
+MATCH (u1:User {id: $a}), (u2:User {id: $hub}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003001, id: "FOLFOLLOW0001"}]->(u2);
+MATCH (u1:User {id: $c}), (u2:User {id: $hub}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003003, id: "FOLFOLLOW0002"}]->(u2);
 MATCH (u1:User {id: $hub}), (u2:User {id: $d}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003012, id: "FOLFOLLOW0006"}]->(u2);
-MATCH (u1:User {id: $hub}), (u2:User {id: $c}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003012, id: "FOLFOLLOW0007"}]->(u2);
 MATCH (u1:User {id: $hub}), (u2:User {id: $e}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003014, id: "FOLFOLLOW0008"}]->(u2);
+MATCH (u1:User {id: $hub}), (u2:User {id: $a}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003011, id: "FOLFOLLOW0005"}]->(u2);
+MATCH (u1:User {id: $hub}), (u2:User {id: $c}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003012, id: "FOLFOLLOW0007"}]->(u2);

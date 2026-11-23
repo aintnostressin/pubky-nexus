@@ -348,8 +348,9 @@ async fn relationship(user_id: &str, viewer_id: &str) -> Result<(bool, bool)> {
 
 #[tokio_shared_rt::test(shared)]
 async fn test_follow_lists_newest_first() -> Result<()> {
-    // The fixture's oldest follow belongs to the lowest id and its ties are written
-    // against id order, so neither insertion order nor id order alone gives these.
+    // The fixture creates its follows in an order that matches none of these lists,
+    // forwards or backwards, and its oldest follow belongs to the lowest id: only
+    // the query's own ordering gives them.
     assert_eq!(
         follow_ids(&format!("/v0/user/{HUB}/followers")).await?,
         HUB_FOLLOWERS,
