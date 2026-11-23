@@ -36,14 +36,69 @@ impl Relationship {
         let rows =
             fetch_all_rows_from_graph(queries::get::user_relationships(&ids, viewer_id)).await?;
 
-        let mut by_id: HashMap<String, Self> = HashMap::with_capacity(rows.len());
+        let mut found = Vec::with_capacity(rows.len());
         for row in rows {
             let relationship = Self {
                 following: row.get("following")?,
                 followed_by: row.get("followed_by")?,
             };
-            by_id.insert(row.get("id")?, relationship);
+            found.push((row.get("id")?, relationship));
         }
-        Ok(ids.iter().map(|id| by_id.get(*id).cloned()).collect())
+        Ok(match_to_ids(&ids, found))
+    }
+}
+
+/// Gives each id the relationship of the row that carries it, as the query
+/// keeps no order: `None` where no row came back, and the same relationship in
+/// every slot of a repeated id.
+fn match_to_ids(ids: &[&str], found: Vec<(String, Relationship)>) -> Vec<Option<Relationship>> {
+    let by_id: HashMap<String, Relationship> = found.into_iter().collect();
+    ids.iter().map(|id| by_id.get(*id).cloned()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FOLLOWING: Relationship = Relationship {
+        following: true,
+        followed_by: false,
+    };
+    const FOLLOWED_BY: Relationship = Relationship {
+        following: false,
+        followed_by: true,
+    };
+
+    /// Rows in any order: each id gets the relationship whose row carries it.
+    #[test]
+    fn match_to_ids_follows_the_ids_not_the_rows() {
+        let rows = vec![("b".to_string(), FOLLOWED_BY), ("a".to_string(), FOLLOWING)];
+
+        let slots = match_to_ids(&["a", "b"], rows);
+
+        assert_eq!(slots, vec![Some(FOLLOWING), Some(FOLLOWED_BY)]);
+    }
+
+    /// An id the query returned no row for, a user without a node, stays empty.
+    #[test]
+    fn match_to_ids_leaves_a_missing_id_empty() {
+        let rows = vec![("b".to_string(), FOLLOWED_BY)];
+
+        let slots = match_to_ids(&["a", "b", "c"], rows);
+
+        assert_eq!(slots, vec![None, Some(FOLLOWED_BY), None]);
+    }
+
+    /// The query returns one row for an id asked for twice: both slots get it.
+    #[test]
+    fn match_to_ids_fills_each_slot_of_a_repeated_id() {
+        let rows = vec![("a".to_string(), FOLLOWING), ("b".to_string(), FOLLOWED_BY)];
+
+        let slots = match_to_ids(&["a", "b", "a"], rows);
+
+        assert_eq!(
+            slots,
+            vec![Some(FOLLOWING), Some(FOLLOWED_BY), Some(FOLLOWING)]
+        );
     }
 }
