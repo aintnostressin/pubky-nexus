@@ -102,8 +102,8 @@ async fn test_get_relationship() -> Result<()> {
     assert_eq!(res["followed_by"], true, "Aldert should follow Flavio");
     assert_eq!(res["following"], false, "Flavio should not follow Aldert");
 
-    // The stream path resolves the viewer once per page and the row from its
-    // counts slot, so it must agree with the single route.
+    // The stream path reads the page's relationships in one query, so it must
+    // agree with the single route.
     let page = post_request(
         "/v0/stream/users/by_ids",
         serde_json::json!({ "user_ids": [user_id], "viewer_id": viewer_id }),

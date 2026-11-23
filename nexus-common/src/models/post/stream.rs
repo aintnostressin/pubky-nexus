@@ -706,6 +706,7 @@ impl PostStream {
         skip: Option<usize>,
         limit: Option<usize>,
     ) -> ModelResult<PostKeyStream> {
+        // The first page of the source's list: its 200 most recent follows
         let custom_limit = Some(200);
         let observer_id = source.get_observer();
         let user_ids = match &source {
@@ -786,7 +787,7 @@ impl PostStream {
     }
 
     // Streams for followers / followings / friends are expensive.
-    // We are truncating to the first 200 user_ids. We could also random draw 200.
+    // We are truncating to the first 200 user_ids.
     // TODO rethink, we could also fallback to graph
     async fn get_posts_for_user_ids(
         user_ids: &[&str],

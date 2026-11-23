@@ -27,6 +27,10 @@ impl UserFollows for Following {
         queries::get::get_user_following(user_id)
     }
 
+    fn get_page_query(user_id: &str, skip: usize, limit: usize) -> Query {
+        queries::get::get_user_following_page(user_id, skip, limit)
+    }
+
     fn get_ids_field_name() -> &'static str {
         "following_ids"
     }
