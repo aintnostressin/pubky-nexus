@@ -1,6 +1,6 @@
 //! Reads, retries and lookups that start before a switch and land after nexus
 //! has followed the user: what they bring from the old homeserver, or about
-//! it, is applied on top of the new one.
+//! it, must not be applied on top of the new one.
 
 use anyhow::Result;
 use nexus_common::models::user::RecheckOutcome;
@@ -12,20 +12,18 @@ use crate::harness::{post_uri, MigrationTest};
 /// in turn, minutes apart on a homeserver with many users. In between, the
 /// mover signs up on B and copies, the recheck moves them to B, and the client
 /// wipes A once the recheck has confirmed the switch. The read of A still
-/// fetches the mover's events when it reaches them, finds the wipe and
-/// applies it: the posts are deleted, the profile is tombstoned, and the scout
-/// who replied is told the post was deleted. The runner reads homeservers one
-/// after another, so B's read comes after. Deleted users stay on the read
-/// list, so it restores the profile and the posts, but the scout has been
-/// told the post was deleted and is now told it was edited. Demonstrated.
+/// fetches the mover's events when it reaches them and finds the wipe. Like
+/// the bulk stream, it checks the user's binding before applying anything,
+/// sees the mover is bound to B and leaves the fetched events unread. B's read
+/// follows and finds everything already indexed: the posts and the profile
+/// stay, and the scout who replied is told nothing.
 ///
-/// The bulk stream checks each event's user against their binding; the
-/// per-user read never does. It should check, after the fetch, that the user
-/// is still bound to the homeserver it reads.
+/// Without that check the wipe was applied: the posts were deleted, the
+/// profile tombstoned, the scout told the post was deleted and, after B's
+/// read restored it, that it was edited.
 #[tokio_shared_rt::test(shared)]
-#[ignore = "a per-user read applies what it fetched from a homeserver the user was switched away \
-            from during the read; needs a binding check after the fetch"]
-async fn a_read_of_the_old_homeserver_started_before_the_switch_applies_the_wipe() -> Result<()> {
+async fn a_read_of_the_old_homeserver_started_before_the_switch_leaves_the_wipe_unread(
+) -> Result<()> {
     let t = MigrationTest::setup().await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
 
