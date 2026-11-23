@@ -137,8 +137,7 @@ async fn switching_back_and_forth_keeps_a_cursor_per_homeserver() -> Result<()> 
     assert_eq!(t.live_posts(&mover).await?, 1);
 
     // Back to A: the read finds nothing new there, both cursors stand.
-    t.switch_record(&device_a, &mover, &t.hs_a.to_public_key())
-        .await?;
+    t.switch_record(&device_a, &mover, &t.hs_a).await?;
     t.recheck(&mover).await?;
     assert_eq!(t.bound_to(&mover).await?.as_deref(), Some(t.hs_a.as_ref()));
     t.index_external(&t.hs_a).await?;
@@ -151,8 +150,7 @@ async fn switching_back_and_forth_keeps_a_cursor_per_homeserver() -> Result<()> 
     assert_eq!(t.live_posts(&mover).await?, 2);
 
     // And to B once more.
-    t.switch_record(&device_b, &mover, &t.hs_b.to_public_key())
-        .await?;
+    t.switch_record(&device_b, &mover, &t.hs_b).await?;
     t.recheck(&mover).await?;
     t.index_external(&t.hs_b).await?;
     assert_eq!(t.bound_to(&mover).await?.as_deref(), Some(t.hs_b.as_ref()));

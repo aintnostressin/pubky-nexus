@@ -15,8 +15,9 @@ use nexus_common::db::{
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::notification::Notification;
 use nexus_common::models::user::{
-    get_user_homeserver, HomeserverMapping, HomeserverRecheck, PkdnsHomeserverResolver,
-    StaleMapping, UserHsCursor, UserIngestor,
+    fresh_pkdns_record_of, get_user_homeserver, pkdns_record_of, HomeserverMapping,
+    HomeserverRecheck, PkdnsHomeserverResolver, PkdnsRecord, StaleMapping, UserHsCursor,
+    UserIngestor,
 };
 use nexus_common::types::Pagination;
 use nexus_common::utils::test_utils::default_ingestor_tests;
@@ -38,16 +39,22 @@ use nexus_watcher::EventProcessorError;
 use pubky::pkarr::dns::rdata::TXT;
 use pubky::pkarr::dns::Name;
 use pubky::pkarr::SignedPacket;
-use pubky::{Keypair, Pubky, PubkyResource, PubkySession, PublicKey};
-use pubky_app_specs::traits::{HasIdPath, HasPath, HashId, TimestampId};
-use pubky_app_specs::{
+use pubky::{ClientId, Keypair, Pubky, PubkyResource, PubkySession, PublicKey};
+use pubky_social_specs::legacy_v0::traits::{HasIdPath, HasPath, HashId, TimestampId};
+use pubky_social_specs::legacy_v0::{
     post_uri_builder, PubkyAppFollow, PubkyAppPost, PubkyAppPostKind, PubkyAppTag, PubkyAppUser,
-    PubkyId,
 };
+use pubky_social_specs::PubkyId;
 use pubky_testnet::Testnet;
 use tempfile::TempDir;
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
+
+/// Client ID the suite's devices sign in with: since pubky 0.10 a session is a grant issued
+/// to a client.
+fn test_client_id() -> ClientId {
+    ClientId::new("nexus-watcher.migration").expect("static test client id is valid")
+}
 
 /// A user's public tree: owner-relative paths and their bytes.
 pub type Tree = Vec<(String, Vec<u8>)>;
@@ -100,14 +107,15 @@ impl MigrationTest {
             tags: Vec::new(),
         });
         let ingestor = default_ingestor_tests();
+        let retry_queue = Arc::new(RetryQueue::default());
+        let store: Arc<dyn RetryStore> = retry_queue.clone();
         let handler: Arc<dyn EventHandler> = Arc::new(DefaultEventHandler::new(
             moderation,
             ingestor.clone(),
             client.clone(),
             files.path().to_path_buf(),
+            store.clone(),
         ));
-        let retry_queue = Arc::new(RetryQueue::default());
-        let store: Arc<dyn RetryStore> = retry_queue.clone();
         let retry = Arc::new(RetryScheduler::new(
             store,
             InitialBackoff {
@@ -323,7 +331,7 @@ impl MigrationTest {
         Ok(self.testnet.sdk()?)
     }
 
-    /// Signs `user` up on `hs` through `device` and writes a profile. The SDK
+    /// Signs `user` up on `hs` through `device`, signs in and writes a profile. The SDK
     /// publishes the record naming `hs`.
     pub async fn signup(
         &self,
@@ -332,10 +340,10 @@ impl MigrationTest {
         hs: &PubkyId,
         name: &str,
     ) -> Result<PubkySession> {
-        let session = device
-            .signer(user.clone())
-            .signup(&hs.to_public_key(), None)
-            .await?;
+        let hs_pk = hs.to_public_key().map_err(anyhow::Error::msg)?;
+        let signer = device.signer(user.clone());
+        signer.signup(&hs_pk, None).await?;
+        let session = signer.signin(test_client_id()).await?;
         self.write_profile(&session, name).await?;
         Ok(session)
     }
@@ -368,7 +376,7 @@ impl MigrationTest {
 
     /// A session on the homeserver `device` currently resolves for `user`.
     pub async fn session(&self, device: &Pubky, user: &Keypair) -> Result<PubkySession> {
-        Ok(device.signer(user.clone()).signin().await?)
+        Ok(device.signer(user.clone()).signin(test_client_id()).await?)
     }
 
     /// Writes a short post, a reply when `parent` is given. Returns the post id.
@@ -464,12 +472,8 @@ impl MigrationTest {
     }
 
     /// Publishes the user's record naming `hs`, from `device`.
-    pub async fn switch_record(
-        &self,
-        device: &Pubky,
-        user: &Keypair,
-        hs: &PublicKey,
-    ) -> Result<()> {
+    pub async fn switch_record(&self, device: &Pubky, user: &Keypair, hs: &PubkyId) -> Result<()> {
+        let hs = &hs.to_public_key().map_err(anyhow::Error::msg)?;
         device
             .signer(user.clone())
             .pkdns()
@@ -491,7 +495,7 @@ impl MigrationTest {
         device
             .client()
             .pkarr()
-            .publish(&packet, None)
+            .publish(&packet)
             .await
             .context("publishing the packet")?;
         Ok(())
@@ -632,21 +636,19 @@ enum Lookup {
 
 #[async_trait::async_trait]
 impl PkdnsHomeserverResolver for TestLookup {
-    async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<Option<PubkyId>> {
+    async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
         if user_pk.to_z32() != self.user {
             return Err(PubkyClientError::RequestFailed {
                 message: "not the user under test".to_string(),
             });
         }
-        let homeserver = match &self.how {
+        match &self.how {
             Lookup::Fresh => {
                 let pubky = PubkyConnector::get()?;
-                pubky.client().pkarr().resolve_most_recent(user_pk).await;
-                pubky.get_homeserver_of(user_pk).await
+                fresh_pkdns_record_of(&pubky, user_pk).await
             }
-            Lookup::Cached(client) => client.get_homeserver_of(user_pk).await,
-        };
-        Ok(homeserver.map(PubkyId::from))
+            Lookup::Cached(client) => pkdns_record_of(client, user_pk).await,
+        }
     }
 }
 
@@ -661,15 +663,12 @@ struct PausingClient {
 
 #[async_trait::async_trait]
 impl PkdnsHomeserverResolver for PausingClient {
-    async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<Option<PubkyId>> {
-        self.inner.resolve_homeserver(user_pk).await
+    async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        self.inner.resolve_record(user_pk).await
     }
 
-    async fn resolve_homeserver_fresh(
-        &self,
-        user_pk: &PublicKey,
-    ) -> PubkyClientResult<Option<PubkyId>> {
-        self.inner.resolve_homeserver_fresh(user_pk).await
+    async fn resolve_record_fresh(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        self.inner.resolve_record_fresh(user_pk).await
     }
 }
 

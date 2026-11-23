@@ -23,8 +23,7 @@ async fn mirror_then_switch_then_wipe_the_old_homeserver() -> Result<()> {
     // right away. B's device keeps writing to B from its own cache.
     let device_b = t.device()?;
     let session_b = t.signup(&device_b, &mover, &t.hs_b, "mover").await?;
-    t.switch_record(&device_a, &mover, &t.hs_a.to_public_key())
-        .await?;
+    t.switch_record(&device_a, &mover, &t.hs_a).await?;
     let tree = t.public_tree(&device_a, &mover).await?;
     t.write_tree(&session_b, &tree).await?;
     t.recheck(&mover).await?;
@@ -34,8 +33,7 @@ async fn mirror_then_switch_then_wipe_the_old_homeserver() -> Result<()> {
     assert_eq!(t.cursor(&mover, &t.hs_b).await?, 0, "B is not read");
 
     // Switch.
-    t.switch_record(&device_b, &mover, &t.hs_b.to_public_key())
-        .await?;
+    t.switch_record(&device_b, &mover, &t.hs_b).await?;
     t.recheck(&mover).await?;
     assert_eq!(t.bound_to(&mover).await?.as_deref(), Some(t.hs_b.as_ref()));
     t.index_external(&t.hs_b).await?;
@@ -160,8 +158,7 @@ async fn returning_to_a_homeserver_wiped_after_leaving_it_replays_the_wipe() -> 
     t.delete_tree(&session_a, &tree).await?;
 
     // Back to A with B's tree.
-    t.switch_record(&device_a, &mover, &t.hs_a.to_public_key())
-        .await?;
+    t.switch_record(&device_a, &mover, &t.hs_a).await?;
     t.write_tree(&session_a, &t.public_tree(&device_b, &mover).await?)
         .await?;
     t.recheck(&mover).await?;

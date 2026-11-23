@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use pubky::Keypair;
-use pubky_app_specs::PubkyId;
+use pubky_social_specs::PubkyId;
 
 use crate::harness::MigrationTest;
 
@@ -20,7 +20,8 @@ async fn opting_out_to_a_dead_key_and_returning() -> Result<()> {
     assert_eq!(t.live_posts(&mover).await?, 1);
 
     let dead = Keypair::random().public_key();
-    t.switch_record(&device_a, &mover, &dead).await?;
+    t.switch_record(&device_a, &mover, &PubkyId::from(dead.clone()))
+        .await?;
     t.recheck(&mover).await?;
     assert_eq!(
         t.bound_to(&mover).await?.as_deref(),
@@ -37,8 +38,7 @@ async fn opting_out_to_a_dead_key_and_returning() -> Result<()> {
     assert_eq!(t.profile_state(&mover).await?, (false, "mover".to_string()));
 
     // Back on the record: the read resumes where it stopped.
-    t.switch_record(&device_a, &mover, &t.hs_a.to_public_key())
-        .await?;
+    t.switch_record(&device_a, &mover, &t.hs_a).await?;
     t.recheck(&mover).await?;
     assert_eq!(t.bound_to(&mover).await?.as_deref(), Some(t.hs_a.as_ref()));
     t.index_external(&t.hs_a).await?;
@@ -70,8 +70,7 @@ async fn record_without_homeserver_keeps_the_binding() -> Result<()> {
         "the user is still read on A"
     );
 
-    t.switch_record(&device_a, &mover, &t.hs_b.to_public_key())
-        .await?;
+    t.switch_record(&device_a, &mover, &t.hs_b).await?;
     t.recheck(&mover).await?;
     assert_eq!(t.bound_to(&mover).await?.as_deref(), Some(t.hs_b.as_ref()));
     Ok(())

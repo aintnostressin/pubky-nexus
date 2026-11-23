@@ -7,7 +7,7 @@ use anyhow::Result;
 use nexus_common::models::error::ModelError;
 use nexus_common::models::user::{PubkyConnectorResolver, RecheckOutcome, UserIngestor};
 use pubky::Keypair;
-use pubky_app_specs::PubkyId;
+use pubky_social_specs::PubkyId;
 
 use crate::harness::{post_uri, MigrationTest};
 
@@ -35,8 +35,7 @@ async fn writes_to_the_homeserver_the_record_left_wait_for_a_return() -> Result<
     assert_eq!(t.live_posts(&mover).await?, 1, "A is not read any more");
 
     // Only a return to A brings it in, from the cursor where A was left.
-    t.switch_record(&device_a, &mover, &t.hs_a.to_public_key())
-        .await?;
+    t.switch_record(&device_a, &mover, &t.hs_a).await?;
     t.recheck(&mover).await?;
     t.index_external(&t.hs_a).await?;
     assert_eq!(t.live_posts(&mover).await?, 2);
@@ -53,8 +52,7 @@ async fn record_naming_a_homeserver_without_an_account() -> Result<()> {
 
     let (device_a, _, _) = t.resident(&mover, &t.hs_a, "mover", &["first"]).await?;
 
-    t.switch_record(&device_a, &mover, &t.hs_b.to_public_key())
-        .await?;
+    t.switch_record(&device_a, &mover, &t.hs_b).await?;
     assert_eq!(t.recheck(&mover).await?.outcome, RecheckOutcome::Switched);
     t.index_external(&t.hs_b).await?;
     assert_eq!(t.cursor(&mover, &t.hs_b).await?, 0);
@@ -257,9 +255,9 @@ async fn an_edit_on_the_old_homeserver_after_the_copy_is_reverted_by_the_switch(
     // Copy to B, then edit on A.
     t.signup_and_copy(&mover, &t.hs_b, "mover", &device_a)
         .await?;
-    let edited = pubky_app_specs::PubkyAppPost::new(
+    let edited = pubky_social_specs::legacy_v0::PubkyAppPost::new(
         "second draft".to_string(),
-        pubky_app_specs::PubkyAppPostKind::Short,
+        pubky_social_specs::legacy_v0::PubkyAppPostKind::Short,
         None,
         None,
         None,

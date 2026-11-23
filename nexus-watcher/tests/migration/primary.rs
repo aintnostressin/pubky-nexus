@@ -93,8 +93,7 @@ async fn primary_to_external_and_back() -> Result<()> {
     let session_p = t.session(&device_p, &mover).await?;
     t.write_tree(&session_p, &t.public_tree(&device_a, &mover).await?)
         .await?;
-    t.switch_record(&device_p, &mover, &t.primary.to_public_key())
-        .await?;
+    t.switch_record(&device_p, &mover, &t.primary).await?;
     t.index_primary().await?;
     assert_eq!(
         t.live_posts(&mover).await?,
