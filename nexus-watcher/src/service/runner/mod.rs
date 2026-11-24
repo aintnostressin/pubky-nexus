@@ -69,6 +69,15 @@ pub trait TEventProcessorRunner: Send + Sync {
         usize::MAX
     }
 
+    /// Whether running `hs_id` counts towards [`Self::poll_limit`]. One that does not is run
+    /// whatever the limit, and has to come before the ones that do in [`Self::pre_run`]: the
+    /// cycle ends at the first HS ID the limit refuses.
+    ///
+    /// Every HS ID counts by default.
+    fn counts_towards_poll_limit(&self, _hs_id: &str) -> bool {
+        true
+    }
+
     /// Post-processing of the run results.
     ///
     /// No-op default implementation. Callers that perform post-processing should overwrite this.
@@ -87,7 +96,8 @@ pub trait TEventProcessorRunner: Send + Sync {
         let mut run_stats = RunAllProcessorsStats::default();
 
         for hs_id in hs_ids {
-            if polled >= poll_limit {
+            let counted = self.counts_towards_poll_limit(&hs_id);
+            if counted && polled >= poll_limit {
                 break;
             }
 
@@ -102,7 +112,7 @@ pub trait TEventProcessorRunner: Send + Sync {
                 continue;
             }
 
-            polled += 1;
+            polled += usize::from(counted);
             let t0 = Instant::now();
             let status = match self.build(&hs_id).await {
                 Ok(event_processor) => status_from_run_result(event_processor.run().await),

@@ -7,11 +7,13 @@ use crate::service::stats::{ProcessedStats, ProcessorRunStatus, RunAllProcessors
 use crate::service::KEY_BASED_RUN_BUDGET;
 use crate::METER_NAME;
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
+use nexus_common::models::user::PerUserRead;
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
 use opentelemetry::global;
 use opentelemetry::metrics::{Gauge, Meter};
 use pubky_social_specs::PubkyId;
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
@@ -76,7 +78,8 @@ pub struct KeyBasedEventProcessorRunner {
     pub client: Arc<dyn HomeserverClient>,
     pub shutdown_rx: Receiver<bool>,
 
-    /// Primary homeserver ID, excluded from the external targets list
+    /// Primary homeserver ID. Read in bulk by its own loop, so this one reads it only for the
+    /// users its bulk read left to the per-user read, and lists it only while there are any.
     pub primary_homeserver: PubkyId,
 
     /// HS PKs that must never be indexed. Excluded from `pre_run` and re-checked
@@ -124,18 +127,29 @@ impl KeyBasedEventProcessorRunner {
     }
 
     /// Returns the HS IDs relevant for this run, ordered by their priority.
+    ///
+    /// The primary HS is processed separately, so it is listed only while its bulk read has
+    /// left users to the per-user read. It comes first: those users have no other reader, so
+    /// its run is not subject to the cap on the external ones.
     async fn hs_by_priority(&self) -> Result<Vec<String>, DynError> {
+        let primary: &str = self.primary_homeserver.as_ref();
         let active_hs_ids = Homeserver::get_all_active_from_graph().await?;
-
-        let result_hs_ids: Vec<String> = active_hs_ids
+        let (primary_hs_id, external_hs_ids): (Vec<String>, Vec<String>) = active_hs_ids
             .into_iter()
-            // Exclude the primary HS, as it is processed separately
-            .filter(|hs_id| hs_id != self.primary_homeserver.as_ref())
             // Exclude any blacklisted HS
             .filter(|hs_id| !self.hs_blacklist.is_blacklisted(hs_id))
-            .collect();
+            .partition(|hs_id| hs_id == primary);
 
-        Ok(result_hs_ids)
+        if self.left_by_primary_bulk_read().await?.is_empty() {
+            return Ok(external_hs_ids);
+        }
+        Ok(primary_hs_id.into_iter().chain(external_hs_ids).collect())
+    }
+
+    /// The users the primary homeserver's bulk read left to its per-user read, each with the
+    /// cursor to start after.
+    async fn left_by_primary_bulk_read(&self) -> Result<HashMap<String, u64>, DynError> {
+        Ok(PerUserRead::starts(&self.primary_homeserver).await?)
     }
 }
 
@@ -147,9 +161,15 @@ impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
 
     async fn build(&self, hs_id: &str) -> Result<Arc<dyn TEventProcessor>, DynError> {
         let homeserver_id = PubkyId::try_from(hs_id)?;
+        let left_by_bulk_read = if homeserver_id == self.primary_homeserver {
+            Some(self.left_by_primary_bulk_read().await?)
+        } else {
+            None
+        };
 
         Ok(Arc::new(KeyBasedEventProcessor {
             homeserver_id,
+            left_by_bulk_read,
             limit: self.limit,
             event_handler: self.event_handler.clone(),
             client: self.client.clone(),
@@ -168,6 +188,10 @@ impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
 
     fn poll_limit(&self) -> usize {
         self.monitored_hs_limit
+    }
+
+    fn counts_towards_poll_limit(&self, hs_id: &str) -> bool {
+        hs_id != self.primary_homeserver.as_ref()
     }
 
     async fn backoff_hs_should_skip(&self, hs_id: &str) -> bool {
@@ -195,7 +219,10 @@ impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
 
         // Recorded on every run, including an empty one, so the saturation ratio
         // always has a denominator in force.
-        EXTERNAL_HS_METRICS.record_run(self.monitored_hs_limit, stats.stats.len() - count_skipped);
+        EXTERNAL_HS_METRICS.record_run(
+            self.monitored_hs_limit,
+            external_indexed(&stats, &self.primary_homeserver),
+        );
 
         let had_issues = count_error + count_panic + count_budget_spent + count_failed_to_build > 0;
 
@@ -225,6 +252,16 @@ impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
     }
 }
 
+/// The external homeservers a run selected for indexing: the ones it ran, so not the ones it
+/// skipped for backoff, and not the primary, whose run does not count towards the cap.
+fn external_indexed(stats: &RunAllProcessorsStats, primary: &str) -> usize {
+    stats
+        .stats
+        .iter()
+        .filter(|run| run.status != ProcessorRunStatus::Skipped && run.hs_id != primary)
+        .count()
+}
+
 /// Records a run's status in the homeserver's backoff: only an `Ok` run resets it, and every
 /// other status, a spent budget included, backs the homeserver off further.
 fn record_run_status(backoff: &HomeserverBackoff, hs_id: &str, status: &ProcessorRunStatus) {
@@ -238,11 +275,12 @@ fn record_run_status(backoff: &HomeserverBackoff, hs_id: &str, status: &Processo
 #[cfg(test)]
 mod tests {
     use super::HomeserverBackoff;
-    use super::{record_run_status, ExternalHsMetrics};
-    use crate::service::stats::ProcessorRunStatus;
+    use super::{external_indexed, record_run_status, ExternalHsMetrics};
+    use crate::service::stats::{ProcessorRunStatus, RunAllProcessorsStats};
     use opentelemetry::metrics::MeterProvider;
     use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
+    use std::time::Duration;
 
     /// Builds the metrics against an in-memory exporter.
     fn metered_metrics() -> (ExternalHsMetrics, SdkMeterProvider, InMemoryMetricExporter) {
@@ -292,6 +330,23 @@ mod tests {
             Some(47),
             "the homeservers the run selected must be exported"
         );
+    }
+
+    /// The gauge counts the external homeservers the run read: not the ones in backoff, and not
+    /// the primary, which is read outside the cap.
+    #[test]
+    fn external_indexed_leaves_out_skipped_runs_and_the_primary() {
+        let mut stats = RunAllProcessorsStats::default();
+        for (hs_id, status) in [
+            ("primary", ProcessorRunStatus::Ok),
+            ("in-backoff", ProcessorRunStatus::Skipped),
+            ("ok", ProcessorRunStatus::Ok),
+            ("failed", ProcessorRunStatus::Error),
+        ] {
+            stats.add_run_result(hs_id.into(), Duration::ZERO, status);
+        }
+
+        assert_eq!(external_indexed(&stats, "primary"), 2);
     }
 
     /// An `Ok` run ends a homeserver's backoff, so it is polled again at once.
