@@ -699,18 +699,18 @@ impl HomeserverClient for PausingClient {
 
     async fn get_resource(
         &self,
+        hs: &PubkyId,
         resource: &PubkyResource,
-        from: Option<&PubkyId>,
     ) -> Result<Vec<u8>, HsError> {
-        self.inner.get_resource(resource, from).await
+        self.inner.get_resource(hs, resource).await
     }
 
     async fn get_blob(
         &self,
+        hs: Option<&PubkyId>,
         resource: &PubkyResource,
-        from: Option<&PubkyId>,
     ) -> Result<Vec<u8>, HsError> {
-        self.inner.get_blob(resource, from).await
+        self.inner.get_blob(hs, resource).await
     }
 }
 
