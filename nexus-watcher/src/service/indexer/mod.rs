@@ -179,8 +179,9 @@ pub trait TEventProcessor: Send + Sync + 'static {
     /// Called at the start of [`Self::handle_event`], before the event is handed
     /// to the event handler. The default always processes the event;
     /// [`HsEventProcessor`](crate::service::indexer::HsEventProcessor) overrides
-    /// this to skip events from users bound to a different homeserver, or who
-    /// have no `HOSTED_BY` edge and publish a different homeserver.
+    /// this to skip events from users bound to a different homeserver, who
+    /// have no `HOSTED_BY` edge and publish a different homeserver, or whom it
+    /// left to the homeserver's per-user read.
     async fn should_process_event(&self, _event: &Event) -> Result<bool, EventProcessorError> {
         Ok(true)
     }

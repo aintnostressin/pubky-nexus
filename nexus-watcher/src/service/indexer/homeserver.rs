@@ -7,6 +7,7 @@ use nexus_common::db::kv::RedisError;
 use nexus_common::db::{fetch_row_from_graph, queries, GraphResult};
 use nexus_common::models::error::ModelError;
 use nexus_common::models::homeserver::Homeserver;
+use nexus_common::models::user::PerUserRead;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky_social_specs::PubkyId;
@@ -151,6 +152,16 @@ enum CursorRejection {
     Stalled,
 }
 
+/// How a run of the bulk read treats a user's events, decided at the first one it meets.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BulkRead {
+    /// The user's mapping relative to the homeserver read.
+    mapping: HsMapping,
+    /// Whether the user's events are left to the homeserver's per-user read
+    /// ([`PerUserRead`]), so this read applies none of them.
+    per_user: bool,
+}
+
 /// Event processor for the primary homeserver
 pub struct HsEventProcessor {
     /// The primary HS endpoint this processor fetches events from
@@ -165,14 +176,15 @@ pub struct HsEventProcessor {
     /// Scheduler used to enqueue failed events onto the retry queue
     pub retry_scheduler: Arc<RetryScheduler>,
 
-    /// Per-run cache of users' homeserver mappings. For a given user's events in the events
-    /// list, only the 1st one results in a graph lookup (and, for a user without a `HOSTED_BY`
-    /// edge, a homeserver lookup), the rest read from this cache.
+    /// Per-run cache of how the run reads each user, decided from their homeserver mapping. For
+    /// a given user's events in the events list, only the 1st one results in a graph lookup
+    /// (and, for a user without a `HOSTED_BY` edge, a homeserver lookup), the rest read from
+    /// this cache.
     ///
     /// Entries are deliberately never refreshed within a run: once a user's mapping
     /// is resolved, the same decision is reused for the rest of the batch even if the
     /// resolver realigns the underlying edge mid-run. The cache is dropped when the run ends.
-    pub hs_mapping_cache: Mutex<HashMap<String, HsMapping>>,
+    pub hs_mapping_cache: Mutex<HashMap<String, BulkRead>>,
 }
 
 #[async_trait::async_trait]
@@ -193,7 +205,8 @@ impl TEventProcessor for HsEventProcessor {
         &self.homeserver.id
     }
 
-    /// Skips events from users that are not actively bound to this homeserver.
+    /// Skips events from users that are not actively bound to this homeserver, or that are
+    /// left to its per-user read.
     ///
     /// Before an event is processed we inspect the user's `HOSTED_BY` edge:
     /// - A non-stale edge to this processor's homeserver: process.
@@ -206,11 +219,25 @@ impl TEventProcessor for HsEventProcessor {
     /// - A stale edge to this homeserver (the user's published homeserver has
     ///   diverged): log a warning and skip until the resolver realigns it.
     /// - An edge to a different homeserver: log a warning and skip.
+    ///
+    /// This read never sees a skipped event again, so skipping one leaves the user to the
+    /// per-user read ([`PerUserRead`]), which reads them from their own cursor once they are
+    /// mapped here. From then on this read skips their events while they have an edge,
+    /// whatever it says.
     async fn should_process_event(&self, event: &Event) -> Result<bool, EventProcessorError> {
         let user_id = event.target.user_id();
+        let read = self.bulk_read(user_id).await?;
 
-        match self.user_hs_mapping(user_id).await? {
-            HsMapping::Unresolved | HsMapping::Current { stale: false } => Ok(true),
+        match read.mapping {
+            HsMapping::Unresolved | HsMapping::Current { stale: false } => {
+                if read.per_user {
+                    debug!(
+                        event.uri = %event.uri,
+                        user_id = %user_id,
+                        "User is left to the per-user read; skipping event"
+                    );
+                }
+            }
 
             // Bound here but the mapping is stale: skip until the resolver realigns it.
             HsMapping::Current { stale: true } => {
@@ -219,7 +246,6 @@ impl TEventProcessor for HsEventProcessor {
                     user_id = %user_id,
                     "User's homeserver mapping is stale; skipping event"
                 );
-                Ok(false)
             }
 
             // Bound to a different homeserver: skip.
@@ -230,9 +256,10 @@ impl TEventProcessor for HsEventProcessor {
                     user_homeserver = %hs_id,
                     "User is hosted on a different homeserver; skipping event"
                 );
-                Ok(false)
             }
         }
+
+        Ok(!read.per_user)
     }
 
     async fn run_internal(self: Arc<Self>) -> Result<RunOutcome, EventProcessorError> {
@@ -253,24 +280,55 @@ impl TEventProcessor for HsEventProcessor {
 }
 
 impl HsEventProcessor {
-    /// Resolves and caches a user's mapping relative to this processor's HS. A user without a
-    /// `HOSTED_BY` edge is classified by the homeserver they publish.
-    async fn user_hs_mapping(&self, user_id: &PubkyId) -> GraphResult<HsMapping> {
-        if let Some(hs_mapping) = self.hs_mapping_cache.lock().await.get(user_id.as_ref()) {
-            return Ok(hs_mapping.clone());
+    /// Decides and caches how this run reads `user_id`. A user without a `HOSTED_BY` edge is
+    /// classified by the homeserver they publish.
+    async fn bulk_read(&self, user_id: &PubkyId) -> Result<BulkRead, EventProcessorError> {
+        if let Some(read) = self.hs_mapping_cache.lock().await.get(user_id.as_ref()) {
+            return Ok(read.clone());
         }
 
-        let mapping = match HsMapping::stored(user_id.as_ref(), &self.homeserver.id).await? {
+        let stored = HsMapping::stored(user_id.as_ref(), &self.homeserver.id).await?;
+        let has_edge = stored.is_some();
+        let mapping = match stored {
             Some(stored) => stored,
             None => self.published_hs_mapping(user_id).await,
         };
+        let per_user = self
+            .leaves_to_per_user_read(user_id, &mapping, has_edge)
+            .await?;
+        let read = BulkRead { mapping, per_user };
 
         self.hs_mapping_cache
             .lock()
             .await
-            .insert(user_id.as_ref().to_string(), mapping.clone());
+            .insert(user_id.as_ref().to_string(), read.clone());
 
-        Ok(mapping)
+        Ok(read)
+    }
+
+    /// Whether this run leaves the events of `user_id` to the per-user read.
+    ///
+    /// A user whose `mapping` makes the run skip their events is left to it now, starting
+    /// after the cursor the batch was requested from: every event of theirs up to that cursor
+    /// was applied, and none in this batch is, since a run decides once per user. A user
+    /// left earlier stays left while they have an edge. Without one the per-user read, which
+    /// lists the users mapped to the homeserver, cannot reach them, so this read applies
+    /// their events as it does for any user without an edge.
+    async fn leaves_to_per_user_read(
+        &self,
+        user_id: &PubkyId,
+        mapping: &HsMapping,
+        has_edge: bool,
+    ) -> Result<bool, EventProcessorError> {
+        let hs_id: &str = self.homeserver.id.as_ref();
+        if !matches!(
+            mapping,
+            HsMapping::Unresolved | HsMapping::Current { stale: false }
+        ) {
+            PerUserRead::leave(hs_id, user_id, self.homeserver.cursor).await?;
+            return Ok(true);
+        }
+        Ok(has_edge && PerUserRead::start(hs_id, user_id).await?.is_some())
     }
 
     /// Classifies the homeserver `user_id` publishes relative to this processor's HS.

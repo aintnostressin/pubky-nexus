@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -5,7 +6,7 @@ use chrono::Utc;
 use nexus_common::db::{exec_single_row, queries, PubkyClientError};
 use nexus_common::models::event::EventLine;
 use nexus_common::models::homeserver::Homeserver;
-use nexus_common::models::user::{Epoch, UserDetails};
+use nexus_common::models::user::{Epoch, PerUserRead, UserDetails};
 use nexus_common::utils::test_utils::{default_ingestor_tests, random_pk, random_pubky_id};
 use nexus_common::WatcherConfig;
 use nexus_watcher::errors::EventProcessorError;
@@ -411,6 +412,96 @@ async fn test_skips_event_when_user_mapping_to_this_homeserver_is_stale() -> Res
     );
 
     let _ = shutdown_tx.send(true);
+    Ok(())
+}
+
+// ============================================================================
+// Per-user read: a user whose event the bulk read passes over is left to the
+// homeserver's per-user read, which starts after the cursor the batch was
+// requested from. From then on the bulk read applies none of their events.
+// ============================================================================
+
+#[tokio_shared_rt::test(shared)]
+async fn test_passing_over_an_event_leaves_its_user_to_the_per_user_read() -> Result<()> {
+    setup().await?;
+    let store = new_in_memory_store();
+    let handler = create_mock_handler(Ok(()), None);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor_at_cursor(7, store, handler.clone(), shutdown_rx).await?;
+    let hs_id = processor.homeserver.id.to_string();
+
+    let stale = random_user_id();
+    create_user_hosted_on(&stale, Some(&hs_id)).await;
+    exec_single_row(queries::put::set_user_homeserver_stale(&stale, true, None)).await?;
+    let hosted_elsewhere = random_user_id();
+    create_user_hosted_on(&hosted_elsewhere, Some(random_pubky_id().as_ref())).await;
+    let hosted_here = random_user_id();
+    create_user_hosted_on(&hosted_here, Some(&hs_id)).await;
+
+    let lines = [&stale, &hosted_elsewhere, &hosted_here]
+        .map(|user_id| format!("PUT {}", post_uri_builder(user_id.clone(), "post".into())));
+    processor
+        .process_event_lines(lines.into_iter().chain(["cursor: 9".to_string()]).collect())
+        .await?;
+
+    assert_eq!(handler.get_handle_count(), 1, "only the user hosted here");
+    assert_eq!(
+        PerUserRead::starts(&hs_id).await?,
+        HashMap::from([(stale, 7), (hosted_elsewhere, 7)]),
+        "each user passed over starts after the cursor the batch was requested from"
+    );
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_events_of_a_user_left_to_the_per_user_read_are_passed_over() -> Result<()> {
+    setup().await?;
+    let store = new_in_memory_store();
+    let handler = create_mock_handler(Ok(()), None);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor_at_cursor(7, store, handler.clone(), shutdown_rx).await?;
+    let hs_id = processor.homeserver.id.to_string();
+
+    // Passed over by an earlier run, and mapped here since.
+    let user_id = random_user_id();
+    create_user_hosted_on(&user_id, Some(&hs_id)).await;
+    PerUserRead::leave(&hs_id, &user_id, 3).await?;
+
+    let uri = post_uri_builder(user_id.clone(), "post".into());
+    processor
+        .process_event_lines(vec![format!("PUT {uri}"), "cursor: 9".to_string()])
+        .await?;
+
+    assert_eq!(handler.get_handle_count(), 0);
+    assert_eq!(
+        PerUserRead::starts(&hs_id).await?,
+        HashMap::from([(user_id, 3)]),
+        "the user keeps the start they were left with"
+    );
+    Ok(())
+}
+
+/// The per-user read lists the users mapped to the homeserver, so it cannot read a user with
+/// no mapping: one who deleted their profile since they were left, say. The bulk read keeps
+/// applying such a user's events, or a new profile of theirs would never be indexed.
+#[tokio_shared_rt::test(shared)]
+async fn test_events_of_a_left_user_without_a_mapping_are_processed() -> Result<()> {
+    setup().await?;
+    let store = new_in_memory_store();
+    let handler = create_mock_handler(Ok(()), None);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor_at_cursor(7, store, handler.clone(), shutdown_rx).await?;
+    let hs_id = processor.homeserver.id.to_string();
+
+    let user_id = random_user_id();
+    PerUserRead::leave(&hs_id, &user_id, 3).await?;
+
+    let uri = post_uri_builder(user_id, "post".into());
+    processor
+        .process_event_lines(vec![format!("PUT {uri}"), "cursor: 9".to_string()])
+        .await?;
+
+    assert_eq!(handler.get_handle_count(), 1);
     Ok(())
 }
 
