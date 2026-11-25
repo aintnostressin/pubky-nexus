@@ -650,6 +650,22 @@ pub async fn get_user_ids_by_homeserver(hs_id: &str) -> GraphResult<Vec<String>>
     Ok(maybe_user_ids.unwrap_or_default())
 }
 
+/// How many user IDs [`get_hosted_user_ids_among`] asks about per query.
+const USER_IDS_PER_QUERY: usize = 10_000;
+
+/// Returns the IDs among `user_ids` of the users hosted on a given homeserver: what
+/// [`get_user_ids_by_homeserver`] returns of them, at the cost of the IDs asked about and not
+/// of every user of the homeserver.
+pub async fn get_hosted_user_ids_among(hs_id: &str, user_ids: &[&str]) -> GraphResult<Vec<String>> {
+    let mut hosted = Vec::new();
+    for user_ids in user_ids.chunks(USER_IDS_PER_QUERY) {
+        let query = queries::get::get_active_users_among_by_homeserver(hs_id, user_ids);
+        let found: Option<Vec<String>> = fetch_key_from_graph(query, "user_ids").await?;
+        hosted.extend(found.unwrap_or_default());
+    }
+    Ok(hosted)
+}
+
 struct HsResolverMetrics {
     run_total: Histogram<u64>,
     run_failed: Histogram<u64>,
@@ -1012,6 +1028,48 @@ mod tests {
         cleanup_test_user(user_b).await?;
         cleanup_test_user(user_c).await?;
 
+        Ok(())
+    }
+
+    /// Of the ids asked about, only the users with a mapping to the homeserver that is not
+    /// stale are returned, wherever they are in a list longer than one query takes.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_get_hosted_user_ids_among() -> Result<(), DynError> {
+        setup().await?;
+
+        let (first, last) = ("hs_among_test_first", "hs_among_test_last");
+        let (stale, elsewhere) = ("hs_among_test_stale", "hs_among_test_elsewhere");
+        let not_asked = "hs_among_test_not_asked";
+        let (hs_one, hs_two) = ("hs_among_test_hs_one", "hs_among_test_hs_two");
+        for (user_id, hs_id) in [
+            (first, hs_one),
+            (last, hs_one),
+            (stale, hs_one),
+            (elsewhere, hs_two),
+            (not_asked, hs_one),
+        ] {
+            create_test_user(user_id).await?;
+            set_user_homeserver(user_id, hs_id).await?;
+        }
+        set_user_homeserver_stale(stale, true, None).await?;
+
+        let unknown: Vec<String> = (0..USER_IDS_PER_QUERY)
+            .map(|i| format!("hs_among_test_unknown_{i}"))
+            .collect();
+        let asked: Vec<&str> = [first, stale, elsewhere]
+            .into_iter()
+            .chain(unknown.iter().map(String::as_str))
+            .chain([last])
+            .collect();
+
+        let mut hosted = get_hosted_user_ids_among(hs_one, &asked).await?;
+        hosted.sort();
+        assert_eq!(hosted, vec![first, last]);
+        assert!(get_hosted_user_ids_among(hs_one, &[]).await?.is_empty());
+
+        for user_id in [first, last, stale, elsewhere, not_asked] {
+            cleanup_test_user(user_id).await?;
+        }
         Ok(())
     }
 

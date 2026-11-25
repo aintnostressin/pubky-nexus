@@ -1296,6 +1296,8 @@ async fn key_based_runner_reads_the_primary_for_the_users_its_bulk_read_left(
     PerUserRead::leave(&primary_id, &left, 5).await?;
     PerUserRead::leave(&primary_id, &left_and_read_since, 5).await?;
     UserHsCursor::write(&left_and_read_since, &primary_id, 42).await?;
+    // Left by the primary's bulk read, but hosted elsewhere: not the primary's to read.
+    PerUserRead::leave(&primary_id, &hosted_externally, 5).await?;
 
     let listed = runner.pre_run().await?;
     assert!(listed.contains(&primary_id), "{listed:?}");

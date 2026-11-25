@@ -203,10 +203,13 @@ impl KeyBasedEventProcessor {
         &self,
     ) -> Result<Vec<(PublicKey, EventCursor)>, EventProcessorError> {
         let hs_id: &str = self.homeserver_id.as_ref();
-        let mut user_ids = user_hs_resolver::get_user_ids_by_homeserver(hs_id).await?;
-        if let Some(left) = &self.left_by_bulk_read {
-            user_ids.retain(|user_id| left.contains_key(user_id));
-        }
+        let user_ids = match &self.left_by_bulk_read {
+            Some(left) => {
+                let left: Vec<&str> = left.keys().map(String::as_str).collect();
+                user_hs_resolver::get_hosted_user_ids_among(hs_id, &left).await?
+            }
+            None => user_hs_resolver::get_user_ids_by_homeserver(hs_id).await?,
+        };
         debug!(user_count = user_ids.len(), "Resolved users");
 
         let mut valid_users: Vec<(PublicKey, &str)> = Vec::with_capacity(user_ids.len());
