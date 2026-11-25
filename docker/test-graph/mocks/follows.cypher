@@ -11,7 +11,7 @@
 // B and C follow HUB in the same millisecond, and HUB follows D and E in the same
 // one. Neither list, read oldest first or newest first, is in id order, and the
 // follows are created in an order that is none of them either, forwards or backwards
-// (B, D, A, C into HUB, then HUB to A, D, C, E), with one tie written in id order and
+// (B, D, A, C into HUB, then HUB to A, E, C, D), with one tie written in id order and
 // the other against it. So neither the ids nor the order the graph happens to return
 // the edges in can stand in for "by the time of the follow, then the id":
 //                     oldest first    newest first
@@ -46,6 +46,6 @@ MATCH (u1:User {id: $d}), (u2:User {id: $hub}) MERGE (u1)-[:FOLLOWS {indexed_at:
 MATCH (u1:User {id: $a}), (u2:User {id: $hub}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003002, id: "FOLFOLLOW0002"}]->(u2);
 MATCH (u1:User {id: $c}), (u2:User {id: $hub}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003003, id: "FOLFOLLOW0004"}]->(u2);
 MATCH (u1:User {id: $hub}), (u2:User {id: $a}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003012, id: "FOLFOLLOW0006"}]->(u2);
-MATCH (u1:User {id: $hub}), (u2:User {id: $d}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003013, id: "FOLFOLLOW0007"}]->(u2);
-MATCH (u1:User {id: $hub}), (u2:User {id: $c}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003011, id: "FOLFOLLOW0005"}]->(u2);
 MATCH (u1:User {id: $hub}), (u2:User {id: $e}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003013, id: "FOLFOLLOW0008"}]->(u2);
+MATCH (u1:User {id: $hub}), (u2:User {id: $c}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003011, id: "FOLFOLLOW0005"}]->(u2);
+MATCH (u1:User {id: $hub}), (u2:User {id: $d}) MERGE (u1)-[:FOLLOWS {indexed_at: 1230000003013, id: "FOLFOLLOW0007"}]->(u2);
