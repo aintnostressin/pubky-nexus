@@ -8,6 +8,7 @@ use anyhow::Result;
 use axum::http::StatusCode;
 use nexus_common::db::RedisOps;
 use nexus_common::models::follow::{Followers, Following, Friends, UserFollows};
+use nexus_common::models::post::{PostStream, StreamSource};
 
 const NON_EXISTING_USER_ID: &str = "qca6wzjg4okp6g1hwr9g8hmx1po1jpoirjfau9ejsws1qz3t7iiy";
 
@@ -413,6 +414,45 @@ async fn test_most_recent_follows() -> Result<()> {
     let missing = NON_EXISTING_USER_ID;
     assert!(Followers::get_most_recent(missing, 10).await?.is_none());
     assert!(Friends::get_most_recent(missing, 10).await?.is_none());
+
+    Ok(())
+}
+
+/// A post stream by a follow source reads the posts of the follows made last:
+/// its cut keeps the newest of the list, and leaves the observer out.
+#[tokio_shared_rt::test(shared)]
+async fn test_post_stream_source_users_are_the_newest_follows() -> Result<()> {
+    // Ensure the server is running, so the graph connection is initialized
+    TestServiceServer::get_test_server().await;
+
+    let observer_id = HUB.to_string();
+    let following = StreamSource::Following {
+        observer_id: observer_id.clone(),
+    };
+    let followers = StreamSource::Followers {
+        observer_id: observer_id.clone(),
+    };
+    let friends = StreamSource::Friends { observer_id };
+
+    // A cut below each list: the oldest follows are the ones left out
+    assert_eq!(
+        PostStream::source_user_ids(&following, 2).await?,
+        ids(&HUB_FOLLOWING_NEWEST[..2])
+    );
+    assert_eq!(
+        PostStream::source_user_ids(&followers, 2).await?,
+        ids(&HUB_FOLLOWERS_NEWEST[..2])
+    );
+    assert_eq!(
+        PostStream::source_user_ids(&friends, 2).await?,
+        ids(&HUB_FRIENDS_NEWEST[..2])
+    );
+
+    // A source that is not a follow list has no users to read
+    let author = StreamSource::Author {
+        author_id: HUB.to_string(),
+    };
+    assert!(PostStream::source_user_ids(&author, 2).await?.is_empty());
 
     Ok(())
 }
