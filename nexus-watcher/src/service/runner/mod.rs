@@ -229,6 +229,8 @@ mod tests {
     struct RecordingRunner {
         hs_ids: Vec<String>,
         poll_limit: usize,
+        /// HS IDs that do not count towards the poll limit.
+        uncounted: Vec<&'static str>,
         backoff: HomeserverBackoff,
         built: Mutex<Vec<String>>,
         /// The processor every build returns. Builds fail unless it is set.
@@ -241,6 +243,7 @@ mod tests {
             Self {
                 hs_ids: hs_ids.iter().map(|id| id.to_string()).collect(),
                 poll_limit,
+                uncounted: vec![],
                 backoff: HomeserverBackoff::default(),
                 built: Mutex::new(vec![]),
                 processor: None,
@@ -276,6 +279,10 @@ mod tests {
             self.poll_limit
         }
 
+        fn counts_towards_poll_limit(&self, hs_id: &str) -> bool {
+            !self.uncounted.contains(&hs_id)
+        }
+
         async fn backoff_hs_should_skip(&self, hs_id: &str) -> bool {
             self.backoff.should_skip(hs_id)
         }
@@ -288,6 +295,16 @@ mod tests {
         runner.run().await.unwrap();
 
         assert_eq!(*runner.built.lock().await, ["hs1", "hs2"]);
+    }
+
+    #[tokio::test]
+    async fn a_homeserver_that_does_not_count_takes_none_of_the_poll_limit() {
+        let mut runner = RecordingRunner::new(&["primary", "hs1", "hs2"], 1);
+        runner.uncounted = vec!["primary"];
+
+        runner.run().await.unwrap();
+
+        assert_eq!(*runner.built.lock().await, ["primary", "hs1"]);
     }
 
     #[tokio::test]
