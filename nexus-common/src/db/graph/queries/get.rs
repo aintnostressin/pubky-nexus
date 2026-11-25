@@ -1249,7 +1249,9 @@ pub fn get_user_friends_page(user_id: &str, order: &SortOrder, skip: usize, limi
 /// end of the list, and no row when the user has no node. The page is cut inside
 /// the subquery, before the ids are collected. The order is `f.indexed_at` in
 /// `order`, then the id ascending either way, so follows indexed in the same
-/// millisecond keep their place from one page to the next.
+/// millisecond keep their place from one page to the next. `indexed_at` is the
+/// time the follow was last indexed: `create_follow` sets it again on every
+/// PUT of a follow that exists, which moves that follow to the newest end.
 fn follow_page(
     name: &'static str,
     follows_match: &str,
