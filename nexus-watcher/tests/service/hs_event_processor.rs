@@ -617,7 +617,8 @@ async fn test_skips_event_when_user_without_edge_publishes_another_homeserver() 
     setup().await?;
 
     let user = Keypair::random();
-    let uri = post_uri_builder(user.public_key().z32(), "elsewhere".to_string());
+    let user_id = user.public_key().z32();
+    let uri = post_uri_builder(user_id.clone(), "elsewhere".to_string());
 
     let store = new_in_memory_store();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -641,6 +642,12 @@ async fn test_skips_event_when_user_without_edge_publishes_another_homeserver() 
     assert!(
         store.get(&IndexKey::for_uri(&uri)).await?.is_none(),
         "A skipped event must not be queued for retry"
+    );
+    assert_eq!(
+        PerUserRead::start(TEST_HS_ID, &user_id).await?,
+        Some(0),
+        "A user passed over is left to the per-user read, with or without an edge, \
+         from the cursor the batch was requested from"
     );
 
     let _ = shutdown_tx.send(true);
