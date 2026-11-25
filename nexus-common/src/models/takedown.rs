@@ -11,7 +11,8 @@
 //! Each takedown is a `:Takedown {uri, tag_uri}` node: the canonical address taken down,
 //! and the address of the moderator tag that took it down. A takedown is permanent for
 //! now: lifting one is not implemented. `tag_uri` is kept so it can be, by matching the
-//! DEL of that moderator tag to its takedown.
+//! DEL of that moderator tag to its takedown. A `Resource`'s takedown deletes every tag on
+//! it, so lifting one would also have to read those tags again from their homeservers.
 
 use crate::db::{exec_single_row, fetch_key_from_graph, queries};
 use crate::models::error::ModelResult;
