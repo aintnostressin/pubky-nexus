@@ -12,7 +12,7 @@ mod view;
 
 pub use bookmark::Bookmark;
 pub use collection::{collection_item_keys, sync_collected_edges};
-pub use counts::PostCounts;
+pub use counts::{PostCounts, POST_COUNTS_TTL_SECS};
 pub use details::PostDetails;
 pub use kind::PostKind;
 pub use relationships::{PostParent, PostParents, PostRelationships};

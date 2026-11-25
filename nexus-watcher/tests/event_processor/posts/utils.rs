@@ -17,12 +17,12 @@ use pubky_social_specs::legacy_v0::{
 use pubky_social_specs::{PubkyId, PubkySocialPost, PubkySocialPostKind, PubkySocialUser};
 
 pub async fn find_post_counts(user_id: &str, post_id: &str) -> PostCounts {
-    // Read-through: counts are invalidated on write and recomputed from the
-    // graph on read, so go through get_by_id, not the index directly.
-    PostCounts::get_by_id(user_id, post_id)
+    // The graph, not the read-through cache: the watcher never refreshes a cached entry.
+    PostCounts::get_from_graph(user_id, post_id)
         .await
         .unwrap()
         .expect("The post count was not found")
+        .0
 }
 
 pub async fn find_post_details(user_id: &str, post_id: &str) -> Result<PostDetails> {

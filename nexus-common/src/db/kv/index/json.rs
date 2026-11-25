@@ -88,10 +88,13 @@ async fn handle_put_json<T: Serialize + Send + Sync>(
     let mut redis_conn = get_redis_conn().await?;
 
     let json_path = path.unwrap_or("$");
-    let _: () = redis_conn.json_set(key, json_path, value).await?;
+    // One MULTI/EXEC, so a dropped future never leaves the key without its TTL.
+    let mut pipe = redis::pipe();
+    pipe.atomic().json_set(key, json_path, value)?.ignore();
     if let Some(exp) = expiration {
-        let _: () = redis_conn.expire(key, exp).await?;
+        pipe.expire(key, exp).ignore();
     }
+    let _: () = pipe.query_async(&mut redis_conn).await?;
     Ok(())
 }
 
@@ -357,6 +360,37 @@ mod tests {
 
         let retrieved: Option<TestPayload> = get(TEST_PREFIX, key, None).await?;
         assert_eq!(retrieved, Some(TestPayload { value: 42 }));
+
+        del_multiple(TEST_PREFIX, &[key]).await?;
+        Ok(())
+    }
+
+    /// A write with a TTL lands in one MULTI/EXEC, so dropping it midway never
+    /// leaves the key without its expiry.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_put_with_expiration_is_never_visible_without_ttl() -> Result<(), DynError> {
+        StackManager::setup(&StackConfig::default()).await?;
+
+        let key = "expiring";
+        let full_key = format!("{TEST_PREFIX}:{key}");
+        del_multiple(TEST_PREFIX, &[key]).await?;
+        let mut conn = get_redis_conn().await?;
+
+        let payload = TestPayload { value: 7 };
+        let mut write = Box::pin(put(TEST_PREFIX, key, &payload, None, Some(600)));
+        for _ in 0..1000 {
+            if conn.exists::<_, bool>(&full_key).await? {
+                break;
+            }
+            if futures::poll!(write.as_mut()).is_ready() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        drop(write);
+
+        let ttl: i64 = conn.ttl(&full_key).await?;
+        assert!(ttl > 0, "the key must appear with its TTL, got {ttl}");
 
         del_multiple(TEST_PREFIX, &[key]).await?;
         Ok(())

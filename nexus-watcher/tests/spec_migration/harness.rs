@@ -14,7 +14,7 @@ use nexus_common::media::file_folder;
 use nexus_common::models::follow::{Followers, Following, UserFollows};
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::notification::Notification;
-use nexus_common::models::post::{PostStream, PostView};
+use nexus_common::models::post::{PostCounts, PostStream, PostView};
 use nexus_common::models::tag::TagDetails;
 use nexus_common::models::user::{Epoch, UserIngestor, UserView};
 use nexus_common::types::Pagination;
@@ -499,6 +499,16 @@ pub async fn served_post(author: &User, post_id: &str) -> Result<PostView> {
     post(author, post_id, None)
         .await?
         .ok_or_else(|| anyhow!("post {}:{post_id} is not served", author.id()))
+}
+
+/// The author's post's reply count, read from the graph. The served counts are a cache the
+/// watcher never refreshes, so they trail a new reply until the entry expires.
+pub async fn reply_count(author: &User, post_id: &str) -> Result<u32> {
+    let (counts, _) = PostCounts::get_from_graph(&author.id(), post_id)
+        .await
+        .map_err(|e| anyhow!("{e}"))?
+        .ok_or_else(|| anyhow!("post {}:{post_id} is not in the graph", author.id()))?;
+    Ok(counts.replies)
 }
 
 /// The ids of the author's root posts, newest first.

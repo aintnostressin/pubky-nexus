@@ -12,10 +12,14 @@ use crate::{
 };
 use anyhow::Result;
 use axum::http::StatusCode;
-use nexus_common::db::{exec_single_row, queries};
-use nexus_common::models::post::{PostCounts, PostDetails, PostRelationships};
+use deadpool_redis::redis::AsyncCommands;
+use nexus_common::db::{exec_single_row, get_redis_conn, queries, RedisOps};
+use nexus_common::models::post::{
+    PostCounts, PostDetails, PostRelationships, POST_COUNTS_TTL_SECS,
+};
 use nexus_common::models::tag::TagDetails;
 use nexus_webapi::models::PostKind;
+use std::time::Duration;
 
 #[tokio_shared_rt::test(shared)]
 async fn test_get_post_view() -> Result<()> {
@@ -116,6 +120,58 @@ async fn test_get_post_counts() -> Result<()> {
     assert_eq!(body["replies"], 0);
     assert_eq!(body["reposts"], 0);
     assert_eq!(body["collections"], 0);
+
+    Ok(())
+}
+
+/// The watcher never refreshes cached counts, so a read trails a graph change
+/// until the entry cached by an earlier miss expires, at most
+/// `POST_COUNTS_TTL_SECS` later. The planted entries stand in for counts cached
+/// before such a change; a cached `tags: 0` hides the post's tag list too.
+#[tokio_shared_rt::test(shared)]
+async fn test_post_counts_cache_trails_graph_until_ttl() -> Result<()> {
+    TestServiceServer::get_test_server().await;
+    let path = format!("{ROOT_PATH}/{CAIRO_USER}/{POST_H}/counts");
+    let key = format!("Post:Counts:{CAIRO_USER}:{POST_H}");
+    let mut redis_conn = get_redis_conn().await?;
+
+    let _: () = redis_conn.del(&key).await?;
+    let fresh = get_request(&path).await?;
+    assert_eq!(fresh["tags"], 6, "a miss reads the graph");
+    let ttl: i64 = redis_conn.ttl(&key).await?;
+    assert!(
+        (1..=POST_COUNTS_TTL_SECS).contains(&ttl),
+        "a miss caches the counts for at most {POST_COUNTS_TTL_SECS}s, got {ttl}"
+    );
+
+    let stale = PostCounts {
+        tags: 99,
+        ..Default::default()
+    };
+    stale.cache_json(CAIRO_USER, POST_H).await?;
+    assert_eq!(
+        get_request(&path).await?["tags"],
+        99,
+        "a cached entry is served while it lives"
+    );
+    let view = get_request(&format!("{ROOT_PATH}/{CAIRO_USER}/{POST_H}")).await?;
+    assert_eq!(view["counts"]["tags"], 99, "the post view serves it too");
+
+    PostCounts::default().cache_json(CAIRO_USER, POST_H).await?;
+    let view = get_request(&format!("{ROOT_PATH}/{CAIRO_USER}/{POST_H}")).await?;
+    assert_eq!(
+        view["tags"],
+        serde_json::json!([]),
+        "a cached tags: 0 hides the tags the post has"
+    );
+
+    let _: bool = redis_conn.pexpire(&key, 1).await?;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(
+        get_request(&path).await?,
+        fresh,
+        "once the entry expires the next read recomputes from the graph"
+    );
 
     Ok(())
 }
@@ -358,7 +414,7 @@ async fn test_get_post_view_with_v1_attachment_has_empty_metadata() -> Result<()
     // The read indexed the post on its miss: its details, its counts and its relationships.
     // Take them out of the index, then the post out of the graph.
     PostDetails::delete_from_index(author, post_id, None).await?;
-    PostCounts::delete(author, post_id, false).await?;
+    PostCounts::remove_from_index_multiple_json(&[&[author, post_id]]).await?;
     PostRelationships::delete(author, post_id).await?;
     exec_single_row(queries::del::delete_post(author, post_id)).await?;
     outcome

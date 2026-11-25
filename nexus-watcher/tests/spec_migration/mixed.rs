@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 
 use crate::fixtures::Neighbourhood;
 use crate::harness::{
-    epoch, followers, notifications, post_tags, profile_tags, served_post, v0_post_uri,
-    v0_profile_uri, v1_post_uri, v1_profile_uri, SpecMigrationTest, User,
+    epoch, followers, notifications, post_tags, profile_tags, reply_count, served_post,
+    v0_post_uri, v0_profile_uri, v1_post_uri, v1_profile_uri, SpecMigrationTest, User,
 };
 use crate::migrator::ensure_clean;
 
@@ -31,8 +31,8 @@ async fn both_epochs_keep_reaching_each_other() -> Result<()> {
     ensure_clean(&n.alice.migrate().await?)?;
     test.index().await?;
     assert_eq!(epoch(&n.alice).await?, Epoch::V1);
-    let note = served_post(&n.alice, &n.note).await?;
-    let bob_post = served_post(&n.bob, &n.bob_post).await?;
+    let note_replies = reply_count(&n.alice, &n.note).await?;
+    let bob_post_replies = reply_count(&n.bob, &n.bob_post).await?;
     let alice_notified = notifications(&n.alice).await?.len();
     let bob_notified = notifications(&n.bob).await?.len();
 
@@ -53,8 +53,8 @@ async fn both_epochs_keep_reaching_each_other() -> Result<()> {
     let (alice, bob) = (n.alice.id(), n.bob.id());
 
     // Bob reaches Alice. A post's parent is served at the parent's own address, her new one.
-    let after = served_post(&n.alice, &n.note).await?;
-    assert_eq!(after.counts.replies, note.counts.replies + 1);
+    served_post(&n.alice, &n.note).await?;
+    assert_eq!(reply_count(&n.alice, &n.note).await?, note_replies + 1);
     let reply = served_post(&n.bob, &bob_reply).await?;
     assert_eq!(
         reply.relationships.replied,
@@ -69,8 +69,11 @@ async fn both_epochs_keep_reaching_each_other() -> Result<()> {
         [tagged("friend", &bob), tagged("neighbour", &bob)]
     );
     // Alice reaches Bob, whose post keeps its pubky.app address
-    let after = served_post(&n.bob, &n.bob_post).await?;
-    assert_eq!(after.counts.replies, bob_post.counts.replies + 1);
+    served_post(&n.bob, &n.bob_post).await?;
+    assert_eq!(
+        reply_count(&n.bob, &n.bob_post).await?,
+        bob_post_replies + 1
+    );
     let reply = served_post(&n.alice, &alice_reply).await?;
     assert_eq!(
         reply.relationships.replied,
