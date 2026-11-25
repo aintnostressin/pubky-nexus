@@ -76,20 +76,16 @@ async fn a_read_of_the_old_homeserver_started_before_the_switch_leaves_the_wipe_
 /// waits in the retry queue with A as the homeserver it came from. The parent
 /// is indexed, the mover moves to B with a copy, and the reply is indexed from
 /// B. The mover deletes the reply on B and nexus indexes the delete. When the
-/// retry runs, it fetches the reply from A, which still holds it, and indexes
-/// it again: a reply the user deleted is back, and the scout's reply
-/// notification is issued again, as the newest. Demonstrated.
+/// retry runs, the mover is bound to another homeserver than the one the
+/// entry came from, so the entry is dropped and nothing is fetched: the reply
+/// stays deleted and the scout is told nothing.
 ///
-/// The window is the retry backoff, up to an hour between attempts. Before
-/// content was fetched from the delivering homeserver, the retry fetched
-/// through the user's record and found nothing on B. A retry should be
-/// dropped, or fetched from the user's homeserver, once the user is bound to
-/// another homeserver than the one it came from.
+/// Without the drop the retry fetched the reply from A, which still holds it,
+/// and indexed it again: a reply the user deleted was back, and the scout's
+/// reply notification was issued again, as the newest. The window was the
+/// retry backoff, up to an hour between attempts.
 #[tokio_shared_rt::test(shared)]
-#[ignore = "a retry fetches from the homeserver its event came from even after the user left it; \
-            needs retries of a user bound elsewhere dropped or fetched from where they are now"]
-async fn a_retry_queued_on_the_old_homeserver_restores_a_reply_deleted_on_the_new_one() -> Result<()>
-{
+async fn a_retry_queued_on_the_old_homeserver_is_dropped_once_the_user_left_it() -> Result<()> {
     let t = MigrationTest::setup().await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
 
