@@ -2,9 +2,10 @@
 //! with one global cursor.
 
 use anyhow::Result;
+use nexus_common::models::user::RecheckOutcome;
 use pubky::Keypair;
 
-use crate::harness::MigrationTest;
+use crate::harness::{post_uri, MigrationTest};
 
 /// External to primary. The bulk stream skips the user's events while the
 /// edge still names the old homeserver, which leaves the user to the primary's
@@ -120,5 +121,116 @@ async fn primary_to_external_and_back() -> Result<()> {
     assert_eq!(t.live_posts(&mover).await?, 3, "left to the per-user read");
     t.catch_up().await?;
     assert_eq!(t.live_posts(&mover).await?, 4);
+    Ok(())
+}
+
+/// The scout replies to a post the mover wrote on the primary before nexus
+/// noticed the switch. The bulk stream passes the mover's post over and reads
+/// the scout's reply, whose parent it does not know: the reply waits in the
+/// retry queue. The per-user read indexes the post after the switch and the
+/// retry then applies the reply, once.
+#[tokio_shared_rt::test(shared)]
+async fn a_reply_to_a_post_the_bulk_stream_passed_over_waits_for_the_per_user_read() -> Result<()> {
+    let t = MigrationTest::setup().await?;
+    let (mover, scout) = (Keypair::random(), Keypair::random());
+
+    let device_scout = t.device()?;
+    let session_scout = t.signup(&device_scout, &scout, &t.primary, "scout").await?;
+    let (device_a, _, _) = t.resident(&mover, &t.hs_a, "mover", &["first"]).await?;
+
+    let (_, session_p) = t
+        .signup_and_copy(&mover, &t.primary, "mover", &device_a)
+        .await?;
+    let only_p = t
+        .post(&session_p, "second, only on the primary", None)
+        .await?;
+    t.post(&session_scout, "hi", Some(post_uri(&mover, &only_p)))
+        .await?;
+    t.index_primary().await?;
+    assert_eq!(
+        (t.live_posts(&scout).await?, t.queued_retries().await?),
+        (0, 1),
+        "the reply waits for its parent"
+    );
+
+    assert_eq!(t.recheck(&mover).await?.outcome, RecheckOutcome::Switched);
+    t.catch_up().await?;
+    t.retry().await?;
+    let indexed = (
+        t.live_posts(&mover).await?,
+        t.live_posts(&scout).await?,
+        t.notification_times(&mover).await?,
+    );
+    assert_eq!(
+        (indexed.0, indexed.1, indexed.2.len()),
+        (2, 1, 1),
+        "(the mover's posts, the scout's reply, the mover's notifications)"
+    );
+
+    t.retry().await?;
+    t.index_primary().await?;
+    t.catch_up().await?;
+    assert_eq!(
+        (
+            t.live_posts(&mover).await?,
+            t.live_posts(&scout).await?,
+            t.notification_times(&mover).await?
+        ),
+        indexed
+    );
+    Ok(())
+}
+
+/// External to primary, noticed before the bulk stream reads the copy: the
+/// mover is bound to the primary by then, so the bulk stream applies the copy
+/// itself and the mover is never left to the per-user read. A read of A that
+/// had listed the mover before the switch reaches them after A was wiped and
+/// leaves the wipe unread. Nothing is counted or notified twice.
+#[tokio_shared_rt::test(shared)]
+async fn a_copy_the_bulk_stream_reads_after_the_switch_changes_nothing() -> Result<()> {
+    let t = MigrationTest::setup().await?;
+    let (mover, scout) = (Keypair::random(), Keypair::random());
+
+    let device_scout = t.device()?;
+    let session_scout = t.signup(&device_scout, &scout, &t.primary, "scout").await?;
+    let (device_a, session_a, posts) = t
+        .resident(&mover, &t.hs_a, "mover", &["first", "second"])
+        .await?;
+    t.post(&session_scout, "hi", Some(post_uri(&mover, &posts[0])))
+        .await?;
+    t.index_primary().await?;
+    let before = (
+        t.post_times(&mover).await?,
+        t.counts(&mover).await?,
+        t.notification_times(&mover).await?,
+    );
+
+    let read_a = t.index_external_paused(&t.hs_a, &mover).await?;
+    let device_p = t.device()?;
+    let session_p = t.signup(&device_p, &mover, &t.primary, "mover").await?;
+    let tree = t.public_tree(&device_a, &mover).await?;
+    t.write_tree(&session_p, &tree).await?;
+    assert_eq!(t.recheck(&mover).await?.outcome, RecheckOutcome::Switched);
+    t.index_primary().await?;
+    t.delete_tree(&session_a, &tree).await?;
+    read_a.resume().await?;
+    t.catch_up().await?;
+
+    assert_eq!(
+        (
+            t.bound_name(&mover).await?,
+            t.cursor(&mover, &t.primary).await?
+        ),
+        ("primary", 0),
+        "read by the bulk stream, not per user"
+    );
+    assert_eq!(
+        (
+            t.post_times(&mover).await?,
+            t.counts(&mover).await?,
+            t.notification_times(&mover).await?
+        ),
+        before
+    );
     Ok(())
 }

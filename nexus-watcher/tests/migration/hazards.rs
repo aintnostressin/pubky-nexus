@@ -301,6 +301,47 @@ async fn an_edit_on_the_old_homeserver_after_the_copy_is_reverted_by_the_switch(
     Ok(())
 }
 
+/// The mover deletes a post on A after copying it to B, then switches. B
+/// still holds the post and B is where the user lives now, so nexus takes it
+/// back: the post is live again and the scout who replied, already told it
+/// was deleted, is told it was edited. The delete made on A after the copy is
+/// gone from nexus, as it is gone from the user's new homeserver. The twin of
+/// the edit above.
+#[tokio_shared_rt::test(shared)]
+async fn a_delete_on_the_old_homeserver_after_the_copy_is_undone_by_the_switch() -> Result<()> {
+    let t = MigrationTest::setup().await?;
+    let (mover, scout) = (Keypair::random(), Keypair::random());
+
+    let device_scout = t.device()?;
+    let session_scout = t.signup(&device_scout, &scout, &t.primary, "scout").await?;
+    let (device_a, session_a, posts) = t.resident(&mover, &t.hs_a, "mover", &["first"]).await?;
+    t.post(&session_scout, "hi", Some(post_uri(&mover, &posts[0])))
+        .await?;
+    t.index_primary().await?;
+
+    // Copy to B, then delete on A.
+    t.signup_and_copy(&mover, &t.hs_b, "mover", &device_a)
+        .await?;
+    session_a
+        .storage()
+        .delete(format!("/pub/pubky.app/posts/{}", posts[0]).as_str())
+        .await?;
+    t.index_external(&t.hs_a).await?;
+    assert_eq!(t.live_posts(&mover).await?, 0);
+    let mut told = t.notifications(&scout).await?;
+    assert_eq!(told.last().map(String::as_str), Some("post_deleted"));
+
+    t.recheck(&mover).await?;
+    t.index_external(&t.hs_b).await?;
+    told.push("post_edited".to_string());
+    assert_eq!(
+        (t.live_posts(&mover).await?, t.notifications(&scout).await?),
+        (1, told),
+        "(live posts, scout's notifications)"
+    );
+    Ok(())
+}
+
 /// Content never copied to the new homeserver stays indexed: nexus removes
 /// nothing on a switch, and the old homeserver is not read any more. The
 /// ghost lives until a reconciliation against the new homeserver exists.
