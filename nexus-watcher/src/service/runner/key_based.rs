@@ -13,7 +13,6 @@ use nexus_common::WatcherConfig;
 use opentelemetry::global;
 use opentelemetry::metrics::{Gauge, Meter};
 use pubky_social_specs::PubkyId;
-use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
@@ -140,16 +139,10 @@ impl KeyBasedEventProcessorRunner {
             .filter(|hs_id| !self.hs_blacklist.is_blacklisted(hs_id))
             .partition(|hs_id| hs_id == primary);
 
-        if self.left_by_primary_bulk_read().await?.is_empty() {
+        if !PerUserRead::any(primary).await? {
             return Ok(external_hs_ids);
         }
         Ok(primary_hs_id.into_iter().chain(external_hs_ids).collect())
-    }
-
-    /// The users the primary homeserver's bulk read left to its per-user read, each with the
-    /// cursor to start after.
-    async fn left_by_primary_bulk_read(&self) -> Result<HashMap<String, u64>, DynError> {
-        Ok(PerUserRead::starts(&self.primary_homeserver).await?)
     }
 }
 
@@ -162,7 +155,7 @@ impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
     async fn build(&self, hs_id: &str) -> Result<Arc<dyn TEventProcessor>, DynError> {
         let homeserver_id = PubkyId::try_from(hs_id)?;
         let left_by_bulk_read = if homeserver_id == self.primary_homeserver {
-            Some(self.left_by_primary_bulk_read().await?)
+            Some(PerUserRead::starts(hs_id).await?)
         } else {
             None
         };

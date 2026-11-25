@@ -7,6 +7,10 @@ use crate::db::RedisOps;
 
 const PER_USER_READ: [&str; 2] = ["Homeservers", "PerUserRead"];
 
+/// How many users [`PerUserRead::starts`] reads per reply. The set only grows, and a reply
+/// with every member of a very large one would outlast the time a Redis client waits for it.
+const STARTS_PAGE: usize = 10_000;
+
 /// Redis key parts of the sorted set of `hs_id`: `["Homeservers", "PerUserRead", <hs_id>]`.
 fn key(hs_id: &str) -> [&str; 3] {
     [PER_USER_READ[0], PER_USER_READ[1], hs_id]
@@ -51,25 +55,42 @@ impl PerUserRead {
         Ok(start.map(|start| start as u64))
     }
 
+    /// Whether any user is left to the per-user read of `hs_id`.
+    pub async fn any(hs_id: &str) -> RedisResult<bool> {
+        let (left, _) = Self::index_sorted_set_card_and_members(&key(hs_id), &[], None).await?;
+        Ok(left > 0)
+    }
+
     /// The users left to the per-user read of `hs_id`, each with the cursor they start after.
     pub async fn starts(hs_id: &str) -> RedisResult<HashMap<String, u64>> {
-        // Redis takes the count as a signed integer, so this is "every member".
-        let every = Some(isize::MAX as usize);
-        let starts = Self::try_from_index_sorted_set(
-            &key(hs_id),
-            None,
-            None,
-            None,
-            every,
-            SortOrder::Ascending,
-            None,
-        )
-        .await?;
-        Ok(starts
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(user_id, start)| (user_id, start as u64))
-            .collect())
+        Self::starts_by_page(hs_id, STARTS_PAGE).await
+    }
+
+    /// [`Self::starts`], read `page` users per reply. A user left between two replies moves
+    /// the ones after them in the set one place on, so a user can be read twice but none is
+    /// missed.
+    async fn starts_by_page(hs_id: &str, page: usize) -> RedisResult<HashMap<String, u64>> {
+        let mut starts = HashMap::new();
+        let mut read = 0;
+        loop {
+            let users = Self::try_from_index_sorted_set(
+                &key(hs_id),
+                None,
+                None,
+                Some(read),
+                Some(page),
+                SortOrder::Ascending,
+                None,
+            )
+            .await?
+            .unwrap_or_default();
+            let last_page = users.len() < page;
+            read += users.len();
+            starts.extend(users.into_iter().map(|(id, start)| (id, start as u64)));
+            if last_page {
+                return Ok(starts);
+            }
+        }
     }
 }
 
@@ -91,6 +112,7 @@ mod tests {
         let second = random_pubky_id().to_string();
 
         assert!(PerUserRead::starts(&hs_id).await?.is_empty());
+        assert!(!PerUserRead::any(&hs_id).await?);
 
         PerUserRead::leave(&hs_id, &first, 42).await?;
         PerUserRead::leave(&hs_id, &second, 0).await?;
@@ -102,6 +124,27 @@ mod tests {
         let expected = HashMap::from([(first, 42), (second, 0)]);
         assert_eq!(PerUserRead::starts(&hs_id).await?, expected);
         assert!(PerUserRead::starts(&other_hs_id).await?.is_empty());
+        assert!(PerUserRead::any(&hs_id).await?);
+        assert!(!PerUserRead::any(&other_hs_id).await?);
+        Ok(())
+    }
+
+    /// Every user is read once, whether the last reply is short, full or empty.
+    #[tokio_shared_rt::test(shared)]
+    async fn test_the_starts_are_read_whole_over_several_replies() -> Result<(), DynError> {
+        StackManager::setup(&StackConfig::default()).await?;
+        let hs_id = random_pubky_id().to_string();
+        let mut expected = HashMap::new();
+        for start in 0..5 {
+            let user_id = random_pubky_id().to_string();
+            PerUserRead::leave(&hs_id, &user_id, start).await?;
+            expected.insert(user_id, start);
+        }
+
+        for page in [1, 2, 5, 6] {
+            let starts = PerUserRead::starts_by_page(&hs_id, page).await?;
+            assert_eq!(starts, expected, "{page} per reply");
+        }
         Ok(())
     }
 }
