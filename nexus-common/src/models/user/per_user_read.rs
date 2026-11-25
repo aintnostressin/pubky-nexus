@@ -26,9 +26,10 @@ fn key(hs_id: &str) -> [&str; 3] {
 /// which has a cursor per user, reads them from there once they are mapped to the homeserver.
 ///
 /// A user is never taken back. While they have a mapping the bulk read applies none of their
-/// events, so the two reads do not interleave. The per-user read cannot list a user without
-/// one, so the bulk read applies that user's events, and the per-user read replays them from
-/// its cursor once the user is mapped again.
+/// events, so the two reads do not interleave. The per-user read finds its users by their
+/// mapping, so it cannot reach a user left before they were ever mapped (a mapping is never
+/// removed, so no other left user is without one). The bulk read applies that user's events
+/// until they are mapped, and the per-user read then replays them from its cursor.
 ///
 /// Both endpoints count in the homeserver's event ids, so a bulk cursor is a valid per-user one.
 ///

@@ -481,9 +481,10 @@ async fn test_events_of_a_user_left_to_the_per_user_read_are_passed_over() -> Re
     Ok(())
 }
 
-/// The per-user read lists the users mapped to the homeserver, so it cannot read a user with
-/// no mapping: one who deleted their profile since they were left, say. The bulk read keeps
-/// applying such a user's events, or a new profile of theirs would never be indexed.
+/// The per-user read finds its users by their mapping to the homeserver, so it cannot read a
+/// user left before they were ever mapped (no mapping is removed later, a deleted profile's
+/// included). The bulk read keeps applying such a user's events, or their first profile
+/// would never be indexed.
 #[tokio_shared_rt::test(shared)]
 async fn test_events_of_a_left_user_without_a_mapping_are_processed() -> Result<()> {
     setup().await?;

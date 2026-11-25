@@ -56,16 +56,20 @@ with the cursor the batch was requested from. From then on:
 - The bulk read applies none of that user's events while they have a `HOSTED_BY`
   edge, whatever it says.
 - `KeyBasedEventProcessorRunner` lists the primary, first, while it has such
-  users, and reads only them, each from the later of their own cursor and the one
-  they were left with. Both endpoints count in the HS's event ids, so nothing is
+  users, and reads only them (it looks them up by id, so its cost follows their
+  number and not the primary's users), each from the later of their own cursor and
+  the one they were left with. Both endpoints count in the HS's event ids, so nothing is
   replayed and nothing is missed.
 - A user is never handed back to the bulk read, so there is no handover to get
   wrong: no event is left unread between the two.
 
-A user with no edge (their profile was deleted, say) cannot be listed by the
-per-user read, so the bulk read applies their events as for any user without one.
-Once they have an edge again the per-user read replays those events from its own
-cursor, in order, which the handlers tolerate.
+A user skipped before they were ever mapped has no edge, and the per-user read,
+which looks its users up by their edge to the HS, cannot reach them. The bulk read
+applies their events as for any user without an edge, and checks at each one
+whether they have an edge by now. Once they do it stops, and the per-user read
+replays those events from its own cursor, in order, which the handlers tolerate.
+No other user gets into this state: an edge is never removed, and a user who has
+one is tombstoned, not deleted, when their profile is.
 
 ### `events_limit`
 
