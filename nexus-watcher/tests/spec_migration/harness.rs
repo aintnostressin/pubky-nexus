@@ -153,6 +153,7 @@ impl SpecMigrationTest {
             .map_err(|e| anyhow!("{e:?}"))?;
         Arc::new(KeyBasedEventProcessor {
             homeserver_id: self.external.clone(),
+            left_by_bulk_read: None,
             limit: 100,
             event_handler: self.handler.clone(),
             client: self.client.clone(),

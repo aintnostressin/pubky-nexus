@@ -986,6 +986,24 @@ pub fn get_active_users_by_homeserver(hs_id: &str) -> Query {
     .param("hs_id", hs_id.to_string())
 }
 
+/// [`get_active_users_by_homeserver`], of the users in `user_ids` only: each is looked up by
+/// its id, so the cost follows the ids asked about and not the users the homeserver hosts.
+///
+/// The index hint is what makes that so. Without it the planner starts from the homeserver
+/// and expands every user it hosts once per id asked about.
+pub fn get_active_users_among_by_homeserver(hs_id: &str, user_ids: &[&str]) -> Query {
+    Query::new(
+        "get_active_users_among_by_homeserver",
+        "UNWIND $user_ids AS id
+         MATCH (u:User {id: id})-[r:HOSTED_BY]->(:Homeserver {id: $hs_id})
+         USING INDEX u:User(id)
+         WHERE NOT coalesce(r.stale, false)
+         RETURN collect(u.id) AS user_ids",
+    )
+    .param("hs_id", hs_id.to_string())
+    .param("user_ids", user_ids)
+}
+
 /// Tags on a user applied by users in the viewer's Web of Trust (transitive
 /// FOLLOWS, 1..=depth). A follow cycle that reaches the viewer again does not add
 /// the viewer to the trusted tagger set. User existence is the anchor: the user

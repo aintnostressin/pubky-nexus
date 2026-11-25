@@ -69,6 +69,15 @@ pub trait TEventProcessorRunner: Send + Sync {
         usize::MAX
     }
 
+    /// Whether running `hs_id` counts towards [`Self::poll_limit`]. One that does not is run
+    /// whatever the limit, and has to come before the ones that do in [`Self::pre_run`]: the
+    /// cycle ends at the first HS ID the limit refuses.
+    ///
+    /// Every HS ID counts by default.
+    fn counts_towards_poll_limit(&self, _hs_id: &str) -> bool {
+        true
+    }
+
     /// Post-processing of the run results.
     ///
     /// No-op default implementation. Callers that perform post-processing should overwrite this.
@@ -87,7 +96,8 @@ pub trait TEventProcessorRunner: Send + Sync {
         let mut run_stats = RunAllProcessorsStats::default();
 
         for hs_id in hs_ids {
-            if polled >= poll_limit {
+            let counted = self.counts_towards_poll_limit(&hs_id);
+            if counted && polled >= poll_limit {
                 break;
             }
 
@@ -102,7 +112,7 @@ pub trait TEventProcessorRunner: Send + Sync {
                 continue;
             }
 
-            polled += 1;
+            polled += usize::from(counted);
             let t0 = Instant::now();
             let status = match self.build(&hs_id).await {
                 Ok(event_processor) => status_from_run_result(event_processor.run().await),
@@ -219,6 +229,8 @@ mod tests {
     struct RecordingRunner {
         hs_ids: Vec<String>,
         poll_limit: usize,
+        /// HS IDs that do not count towards the poll limit.
+        uncounted: Vec<&'static str>,
         backoff: HomeserverBackoff,
         built: Mutex<Vec<String>>,
         /// The processor every build returns. Builds fail unless it is set.
@@ -231,6 +243,7 @@ mod tests {
             Self {
                 hs_ids: hs_ids.iter().map(|id| id.to_string()).collect(),
                 poll_limit,
+                uncounted: vec![],
                 backoff: HomeserverBackoff::default(),
                 built: Mutex::new(vec![]),
                 processor: None,
@@ -266,6 +279,10 @@ mod tests {
             self.poll_limit
         }
 
+        fn counts_towards_poll_limit(&self, hs_id: &str) -> bool {
+            !self.uncounted.contains(&hs_id)
+        }
+
         async fn backoff_hs_should_skip(&self, hs_id: &str) -> bool {
             self.backoff.should_skip(hs_id)
         }
@@ -278,6 +295,16 @@ mod tests {
         runner.run().await.unwrap();
 
         assert_eq!(*runner.built.lock().await, ["hs1", "hs2"]);
+    }
+
+    #[tokio::test]
+    async fn a_homeserver_that_does_not_count_takes_none_of_the_poll_limit() {
+        let mut runner = RecordingRunner::new(&["primary", "hs1", "hs2"], 1);
+        runner.uncounted = vec!["primary"];
+
+        runner.run().await.unwrap();
+
+        assert_eq!(*runner.built.lock().await, ["primary", "hs1"]);
     }
 
     #[tokio::test]

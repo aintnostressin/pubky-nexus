@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::{Arc, LazyLock},
     time::Duration,
 };
@@ -36,11 +37,19 @@ static OUT_OF_ORDER_CURSOR_EXTERNAL_HS: LazyLock<Counter<u64>> = LazyLock::new(|
         .build()
 });
 
-/// Event processor for third-party (external) HSs, where the user-specific `/events-stream`
-/// endpoint is used
+/// Event processor reading a homeserver per user, through the user-specific `/events-stream`
+/// endpoint: every user of a third-party (external) HS, and the users of the primary HS that
+/// its bulk read left to this one
 pub struct KeyBasedEventProcessor {
     /// The HS endpoint this processor fetches events from
     pub homeserver_id: PubkyId,
+
+    /// For a homeserver that is also read in bulk: the users its bulk read left to this read,
+    /// each with the cursor to start after
+    /// ([`PerUserRead`](nexus_common::models::user::PerUserRead)). Only they are read, as the
+    /// bulk read applies the events of the rest. `None` for a homeserver that is not read in
+    /// bulk, where every hosted user is read.
+    pub left_by_bulk_read: Option<HashMap<String, u64>>,
 
     /// Max events the homeserver will send before closing the stream.
     /// Bounds execution time per user, preventing timeout and starvation.
@@ -194,7 +203,13 @@ impl KeyBasedEventProcessor {
         &self,
     ) -> Result<Vec<(PublicKey, EventCursor)>, EventProcessorError> {
         let hs_id: &str = self.homeserver_id.as_ref();
-        let user_ids = user_hs_resolver::get_user_ids_by_homeserver(hs_id).await?;
+        let user_ids = match &self.left_by_bulk_read {
+            Some(left) => {
+                let left: Vec<&str> = left.keys().map(String::as_str).collect();
+                user_hs_resolver::get_hosted_user_ids_among(hs_id, &left).await?
+            }
+            None => user_hs_resolver::get_user_ids_by_homeserver(hs_id).await?,
+        };
         debug!(user_count = user_ids.len(), "Resolved users");
 
         let mut valid_users: Vec<(PublicKey, &str)> = Vec::with_capacity(user_ids.len());
@@ -212,10 +227,20 @@ impl KeyBasedEventProcessor {
         let users = valid_users
             .into_iter()
             .zip(cursors)
-            .map(|((pk, _), cursor)| (pk, EventCursor::new(cursor)))
+            .map(|((pk, user_id), cursor)| (pk, EventCursor::new(self.start(user_id, cursor))))
             .collect();
 
         Ok(users)
+    }
+
+    /// The cursor to read `user_id` from: their `stored` one, or the one the bulk read left
+    /// them with while that is later, which is until their first event here is read.
+    fn start(&self, user_id: &str, stored: u64) -> u64 {
+        let left_at = self
+            .left_by_bulk_read
+            .as_ref()
+            .and_then(|left| left.get(user_id));
+        left_at.map_or(stored, |left_at| stored.max(*left_at))
     }
 
     /// Subscribes to the event stream for a single user and processes incoming events.

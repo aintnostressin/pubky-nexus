@@ -247,6 +247,37 @@ impl WatcherTest {
         Ok(())
     }
 
+    /// One pass of the external loop over the primary homeserver alone: its per-user read,
+    /// run only when the loop lists the primary. Returns whether it did.
+    pub async fn process_per_user_read_of_primary(&self) -> Result<bool> {
+        let config = WatcherConfig {
+            homeserver: self.homeserver_id.clone(),
+            ..WatcherConfig::default()
+        };
+        let runner = KeyBasedEventProcessorRunner::new(
+            &config,
+            self.event_processor_runner.client.clone(),
+            self.event_processor_runner.event_handler.clone(),
+            self.event_processor_runner.retry_scheduler.clone(),
+            self.event_processor_runner.shutdown_rx.clone(),
+        );
+        let listed = runner.pre_run().await.map_err(|e| anyhow!(e))?;
+        if !listed
+            .iter()
+            .any(|hs_id| hs_id == self.homeserver_id.as_ref())
+        {
+            return Ok(false);
+        }
+        runner
+            .build(self.homeserver_id.as_ref())
+            .await
+            .map_err(|e| anyhow!(e))?
+            .run()
+            .await
+            .map_err(|e| anyhow!(e))?;
+        Ok(true)
+    }
+
     /// Sends a PUT request to the homeserver with the provided object of data.
     ///
     /// This function performs the following steps:

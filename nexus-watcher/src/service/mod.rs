@@ -65,8 +65,10 @@ impl NexusWatcher {
     /// Starts the Nexus Watcher with parallel periodic task loops.
     ///
     /// Currently runs four tasks, each on its own tick interval:
-    /// 1. **Primary homeserver** ([`WatcherConfig::primary_hs_monitoring_interval_ms`]).
-    /// 2. **External homeservers** ([`WatcherConfig::external_hs_monitoring_interval_ms`]).
+    /// 1. **Primary homeserver** ([`WatcherConfig::primary_hs_monitoring_interval_ms`]): its
+    ///    bulk read.
+    /// 2. **External homeservers** ([`WatcherConfig::external_hs_monitoring_interval_ms`]):
+    ///    their per-user reads, and the primary's for the users its bulk read left to it.
     /// 3. **User HS resolver** ([`WatcherConfig::hs_resolver_interval_ms`]).
     /// 4. **Retry processor** ([`WatcherConfig::retry_processor_interval_ms`]).
     ///

@@ -36,10 +36,40 @@ The primary HS is trusted, which implies a different event validation model.
 
 > The single primary, prioritized HS. Its events are bulk-ingested.
 
-It is explicitly *excluded* from the third-party (`KeyBasedEventProcessorRunner`)
-list so it is never double-indexed (`hs_by_priority`). Changing this re-points
-the entire primary-HS pipeline; the HS is persisted to the graph on startup
-(`Homeserver::persist_if_unknown`).
+It is *excluded* from the third-party (`KeyBasedEventProcessorRunner`) list
+(`hs_by_priority`), except for the users its bulk read left to the per-user read
+(see [below](#users-the-bulk-read-leaves-to-the-per-user-read)), so no user is
+indexed by both. Changing this re-points the entire primary-HS pipeline; the HS
+is persisted to the graph on startup (`Homeserver::persist_if_unknown`).
+
+### Users the bulk read leaves to the per-user read
+
+The bulk read has one cursor for every user. It skips the events of a user whose
+`HOSTED_BY` mapping is stale or points to another HS, and the cursor moves past
+them, so it can never deliver them again. A user who comes back to the primary
+would lose whatever they wrote there before Nexus noticed.
+
+The first time the bulk read skips an event of a user, it leaves that user to
+the primary's **per-user read** (`PerUserRead`, a Redis sorted set per HS),
+with the cursor the batch was requested from. From then on:
+
+- The bulk read applies none of that user's events while they have a `HOSTED_BY`
+  edge, whatever it says.
+- `KeyBasedEventProcessorRunner` lists the primary, first, while it has such
+  users, and reads only them (it looks them up by id, so its cost follows their
+  number and not the primary's users), each from the later of their own cursor and
+  the one they were left with. Both endpoints count in the HS's event ids, so nothing is
+  replayed and nothing is missed.
+- A user is never handed back to the bulk read, so there is no handover to get
+  wrong: no event is left unread between the two.
+
+A user skipped before they were ever mapped has no edge, and the per-user read,
+which looks its users up by their edge to the HS, cannot reach them. The bulk read
+applies their events as for any user without an edge, and checks at each one
+whether they have an edge by now. Once they do it stops, and the per-user read
+replays those events from its own cursor, in order, which the handlers tolerate.
+No other user gets into this state: an edge is never removed, and a user who has
+one is tombstoned, not deleted, when their profile is.
 
 ### `events_limit`
 
@@ -67,14 +97,16 @@ The core of decentralization. Driven by `KeyBasedEventProcessorRunner`, which
 indexes users hosted on **third-party** HSs — any HS other than the primary
 (also called "external" or "secondary"). For every monitored HS *except* the
 primary, it pulls each hosted user's events per user from the HS `/events-stream`
-endpoint (hence "key-based" — keyed on each user's pubky). Configured in
-`KeyBasedEventProcessorRunner::new`.
+endpoint (hence "key-based" — keyed on each user's pubky). It reads the primary
+the same way for the users its bulk read left to the per-user read, and only
+them. Configured in `KeyBasedEventProcessorRunner::new`.
 
 ### `monitored_homeservers_limit`
 
 > Bounds the number of **third-party** HSs monitored.
 
-`0` disables third-party-HS indexing; `1` monitors one third-party HS.
+`0` disables third-party-HS indexing; `1` monitors one third-party HS. The
+primary's per-user read does not count towards it and runs whatever its value.
 
 *Tuning:* each additional monitored HS adds HS requests (and, upstream, PKDNS
 resolutions) per tick. Raise deliberately as the network of indexed HSs grows.
