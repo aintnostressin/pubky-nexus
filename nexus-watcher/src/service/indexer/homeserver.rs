@@ -299,14 +299,27 @@ impl TEventProcessor for HsEventProcessor {
 }
 
 impl HsEventProcessor {
-    /// Decides how this run reads `user_id`, and caches the decision unless it is made again
-    /// at each event ([`AppliedBy::BulkReadUntilMapped`]).
-    /// A user without a `HOSTED_BY` edge is classified by the homeserver they publish.
+    /// How this run reads `user_id`: the decision cached for them, or a new one, cached unless
+    /// it is made again at each event ([`AppliedBy::BulkReadUntilMapped`]).
     async fn bulk_read(&self, user_id: &PubkyId) -> Result<BulkRead, EventProcessorError> {
         if let Some(read) = self.bulk_read_cache.lock().await.get(user_id.as_ref()) {
             return Ok(read.clone());
         }
 
+        let read = self.decide_bulk_read(user_id).await?;
+        if read.applied_by != AppliedBy::BulkReadUntilMapped {
+            self.bulk_read_cache
+                .lock()
+                .await
+                .insert(user_id.as_ref().to_string(), read.clone());
+        }
+
+        Ok(read)
+    }
+
+    /// Decides how this run reads `user_id`. A user without a `HOSTED_BY` edge is classified
+    /// by the homeserver they publish.
+    async fn decide_bulk_read(&self, user_id: &PubkyId) -> Result<BulkRead, EventProcessorError> {
         let stored = HsMapping::stored(user_id.as_ref(), &self.homeserver.id).await?;
         let has_edge = stored.is_some();
         let mapping = match stored {
@@ -323,19 +336,11 @@ impl HsEventProcessor {
             (true, false) => AppliedBy::BulkReadUntilMapped,
             (true, true) => AppliedBy::PerUserRead,
         };
-        let read = BulkRead {
+
+        Ok(BulkRead {
             mapping,
             applied_by,
-        };
-
-        if applied_by != AppliedBy::BulkReadUntilMapped {
-            self.bulk_read_cache
-                .lock()
-                .await
-                .insert(user_id.as_ref().to_string(), read.clone());
-        }
-
-        Ok(read)
+        })
     }
 
     /// Whether `user_id` is left to the homeserver's per-user read, leaving them now when this
