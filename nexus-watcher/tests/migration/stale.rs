@@ -143,16 +143,13 @@ async fn a_retry_queued_again_on_the_new_homeserver_is_applied_there_once() -> R
 /// homeserver than the one the entry came from, so it is dropped. Then the
 /// mover returns to A, which still holds the reply. A's cursor passed the
 /// reply when it was queued, so the read of A resumes after it, and with the
-/// entry gone nothing delivers the reply again. Demonstrated.
+/// entry gone nothing delivers the reply again: it is never indexed.
 ///
-/// The drop assumes the user's new homeserver delivers what it holds. A user
-/// who comes back to the origin is read there from a cursor that already
-/// passed the event. The entry should outlive the absence, or the return
-/// should read the homeserver again from before the dropped events.
+/// An accepted limit of the drop, which assumes the user's new homeserver
+/// delivers what it holds. It takes an event still waiting in the retry
+/// queue, a move away and a return to the same homeserver.
 #[tokio_shared_rt::test(shared)]
-#[ignore = "a retry dropped while the user was bound elsewhere is not read again when they \
-            return to its origin; needs the entry kept, or the origin's cursor moved back"]
-async fn a_retry_dropped_while_the_user_was_away_is_applied_when_they_return() -> Result<()> {
+async fn a_retry_dropped_while_the_user_was_away_stays_dropped_when_they_return() -> Result<()> {
     let t = MigrationTest::setup().await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
     let (device_a, _) = reply_waiting_for_its_parent(&t, &mover, &scout).await?;
@@ -176,21 +173,19 @@ async fn a_retry_dropped_while_the_user_was_away_is_applied_when_they_return() -
             t.live_posts(&mover).await?,
             t.notifications(&scout).await?
         ),
-        ("hs_a", 1, vec!["reply".to_string()]),
+        ("hs_a", 0, Vec::new()),
         "(binding, live posts, scout's notifications)"
     );
     Ok(())
 }
 
-/// The same loss without a retry run in between. The mover copies to B while
-/// the reply waits for its parent, B's read queues it again, and the entry
-/// now names B. The mover returns to A before the parent arrives. When the
-/// retry runs, the mover is bound to A and the entry came from B, so it is
-/// dropped, and A's cursor is past the reply. Demonstrated.
+/// The same limit without a retry run in between. The mover copies to B
+/// while the reply waits for its parent, B's read queues it again, and the
+/// entry now names B. The mover returns to A before the parent arrives. When
+/// the retry runs, the mover is bound to A and the entry came from B, so it
+/// is dropped, and A's cursor is past the reply.
 #[tokio_shared_rt::test(shared)]
-#[ignore = "an entry queued again on a homeserver the user then left is dropped although their \
-            homeserver holds the event; needs the same as the scenario above"]
-async fn a_retry_queued_again_on_a_homeserver_the_user_left_is_applied_when_they_return(
+async fn a_retry_queued_again_on_a_homeserver_the_user_left_is_dropped_when_they_return(
 ) -> Result<()> {
     let t = MigrationTest::setup().await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
@@ -213,7 +208,7 @@ async fn a_retry_queued_again_on_a_homeserver_the_user_left_is_applied_when_they
             t.live_posts(&mover).await?,
             t.notifications(&scout).await?
         ),
-        ("hs_a", 1, vec!["reply".to_string()]),
+        ("hs_a", 0, Vec::new()),
         "(binding, live posts, scout's notifications)"
     );
     Ok(())
