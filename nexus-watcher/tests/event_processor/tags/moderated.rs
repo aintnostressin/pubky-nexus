@@ -342,6 +342,30 @@ async fn test_resource_tagged_after_its_takedown_was_recorded_is_removed() -> Re
     Ok(())
 }
 
+/// A takedown whose removal was left unfinished (its delete failed, or the watcher stopped
+/// before it) is finished by the next tag on the URI, which is skipped.
+#[tokio_shared_rt::test(shared)]
+async fn test_a_later_tag_finishes_an_unfinished_resource_takedown() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+    let (tagger_kp, tagger_id) = create_tagger(&mut test, "resource-takedown-finish").await?;
+
+    let url = format!("https://example.com/takedown-finish/{tagger_id}");
+    put_pubky_app_resource_tag(&mut test, &tagger_kp, &tagger_id, &url, "mod_finish").await?;
+    // Recorded, but the `Resource` was never deleted.
+    let tag_uri = tag_uri_builder(tagger_id.clone(), "MODERATORTAG".to_string());
+    record_takedown(&url, &tag_uri).await?;
+    assert!(resource_exists_in_graph(&compute_resource_id(&url)).await?);
+
+    put_pubky_app_resource_tag(&mut test, &tagger_kp, &tagger_id, &url, "mod_finish_later").await?;
+
+    assert!(
+        !resource_exists_in_graph(&compute_resource_id(&url)).await?,
+        "the next tag on the URI finishes the removal"
+    );
+    test.cleanup_user(&tagger_kp).await?;
+    Ok(())
+}
+
 /// A post has one node whichever epoch's address names it: a moderator tag written as the
 /// `social/v1` address of an indexed `pubky.app` post takes that post down.
 #[tokio_shared_rt::test(shared)]

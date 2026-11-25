@@ -92,7 +92,8 @@ pub async fn sync_put(
 /// v0 file and its v1 copy are two targets.
 ///
 /// A tag on a `Resource` the moderator took down ([`resource_takedown_key`]) is skipped, and
-/// checked again once written ([`remove_resource_if_taken_down`]).
+/// checked again once written ([`remove_resource_if_taken_down`]). The first check removes the
+/// `Resource` too, which finishes a removal that failed on an earlier attempt.
 #[tracing::instrument(
     name = "tag.put_resource",
     skip_all,
@@ -102,10 +103,8 @@ pub async fn sync_put_resource(tag: TagInput, key: ResourceKey) -> Result<(), Ev
     debug!("Indexing resource tag");
     let (normalized, scheme) =
         normalize_uri(&tag.tagged.uri).map_err(EventProcessorError::generic)?;
-    let takedown = resource_takedown_key(&tag.tagged.uri, &tag.tagged.target)
-        .map_err(EventProcessorError::generic)?;
-    if is_taken_down(&takedown).await? {
-        debug!(takedown = %takedown, "Resource was taken down by the moderator; skipping tag");
+    if remove_resource_if_taken_down(&tag.tagged).await? {
+        debug!("Resource was taken down by the moderator; skipping tag");
         return Ok(());
     }
 
@@ -128,9 +127,10 @@ pub async fn sync_put_resource(tag: TagInput, key: ResourceKey) -> Result<(), Ev
 /// Deletes the `Resource` a tag on `tagged` lands on, with every tag on it, if the moderator
 /// took it down, and returns whether it did.
 ///
-/// Run once a `Resource` tag is written. The moderator's tag may have been read by another loop
-/// while the tag was written: its takedown is recorded before its delete, so either the delete
-/// runs after the write and removes the `Resource`, or the takedown is found here.
+/// Run before a `Resource` tag is written and again once it is. The moderator's tag may have been
+/// read by another loop while the tag was written: its takedown is recorded before its delete, so
+/// either the delete runs after the write and removes the `Resource`, or the second check finds
+/// the takedown. A removal that failed is finished on the event's retry, by the first check.
 pub async fn remove_resource_if_taken_down(
     tagged: &Reference,
 ) -> Result<bool, EventProcessorError> {
@@ -140,7 +140,7 @@ pub async fn remove_resource_if_taken_down(
         return Ok(false);
     }
     let (normalized, _) = normalize_uri(&tagged.uri).map_err(EventProcessorError::generic)?;
-    debug!(takedown = %takedown, "Resource was taken down while tagged; deleting it");
+    debug!(takedown = %takedown, "Resource was taken down; deleting it");
     ResourceDetails::delete(&[resource_id(&normalized)]).await?;
     Ok(true)
 }
