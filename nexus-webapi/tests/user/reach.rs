@@ -1,3 +1,5 @@
+use crate::post::CAIRO_USER;
+use crate::stream::post::{AMSTERDAM, BOGOTA};
 use crate::utils::follows::{
     A, B, C, D, E, HUB, HUB_FOLLOWERS, HUB_FOLLOWERS_NEWEST, HUB_FOLLOWING, HUB_FOLLOWING_NEWEST,
     HUB_FRIENDS, HUB_FRIENDS_NEWEST, LONER,
@@ -446,6 +448,16 @@ async fn test_post_stream_source_users_are_the_newest_follows() -> Result<()> {
     assert_eq!(
         PostStream::source_user_ids(&friends, 2).await?,
         ids(&HUB_FRIENDS_NEWEST[..2])
+    );
+
+    // AMSTERDAM follows itself in the mock data, its newest follow, then BOGOTA
+    // and CAIRO: the observer is left out of its own source
+    let self_following = StreamSource::Following {
+        observer_id: AMSTERDAM.to_string(),
+    };
+    assert_eq!(
+        PostStream::source_user_ids(&self_following, 200).await?,
+        ids(&[BOGOTA, CAIRO_USER])
     );
 
     // A source that is not a follow list has no users to read
