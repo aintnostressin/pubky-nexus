@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use super::{users_exist, Relationship, SocialGraphStatus, UserCounts, UserDetails};
+use super::{Relationship, SocialGraphStatus, UserCounts, UserDetails};
 use crate::models::error::{ModelError, ModelResult};
 use crate::models::tag::traits::TagCollection;
 use crate::models::tag::user::TagUser;
@@ -81,10 +81,10 @@ impl UserView {
         viewer_id: Option<&str>,
         depth: Option<u8>,
     ) -> ModelResult<Vec<Option<Self>>> {
-        // Details and counts come from one graph query each, the social graph
-        // from Redis in bulk, and the viewer is resolved once for the page. The
-        // social graph lookup belongs here, batched, not in the per-user fan-out below.
-        let (details_list, counts_list, social_graph_list, viewer_exists) = tokio::try_join!(
+        // Details, counts and the viewer's relationships come from one graph
+        // query each, the social graph from Redis in bulk. The social graph
+        // lookup belongs here, batched, not in the per-user fan-out below.
+        let (details_list, counts_list, social_graph_list, relationship_list) = tokio::try_join!(
             UserDetails::get_by_ids(user_ids),
             UserCounts::get_by_ids(user_ids),
             async {
@@ -94,8 +94,8 @@ impl UserView {
             },
             async {
                 match viewer_id {
-                    Some(viewer) => users_exist(&[viewer]).await.map_err(ModelError::from),
-                    None => Ok(false),
+                    Some(viewer) => Relationship::get_by_ids(user_ids, viewer).await,
+                    None => Ok(vec![None; user_ids.len()]),
                 }
             },
         )?;
@@ -103,6 +103,7 @@ impl UserView {
         debug_assert_eq!(details_list.len(), user_ids.len());
         debug_assert_eq!(counts_list.len(), user_ids.len());
         debug_assert_eq!(social_graph_list.len(), user_ids.len());
+        debug_assert_eq!(relationship_list.len(), user_ids.len());
 
         // Bounded to protect the pool; `buffered` preserves order so results stay
         // aligned with `user_ids`; inputs owned so the future stays `Send`.
@@ -114,47 +115,44 @@ impl UserView {
                 .zip(details_list)
                 .zip(counts_list)
                 .zip(social_graph_list)
-                .map(|(((user_id, details), counts), social_graph_status)| {
-                    let viewer_id = viewer_id.clone();
-                    async move {
-                        let Some(details) = details else {
-                            return Ok::<_, ModelError>(None);
-                        };
+                .zip(relationship_list)
+                .map(
+                    |((((user_id, details), counts), social_graph_status), relationship)| {
+                        let viewer_id = viewer_id.clone();
+                        async move {
+                            let Some(details) = details else {
+                                return Ok::<_, ModelError>(None);
+                            };
 
-                        // A `Some` counts slot is this row's own existence check.
-                        let relationship = match (&counts, viewer_id.as_deref()) {
-                            (Some(_), Some(viewer)) if viewer_exists => {
-                                Relationship::from_follow_sets(&user_id, viewer).await?
-                            }
-                            _ => Relationship::default(),
-                        };
-                        let counts = counts.unwrap_or_default();
+                            let relationship = relationship.unwrap_or_default();
+                            let counts = counts.unwrap_or_default();
 
-                        // Before fetching post tags, check if the post has any tags
-                        let tags = match counts.tags {
-                            0 => Vec::new(),
-                            _ => TagUser::get_by_id(
-                                &user_id,
-                                None,
-                                None,
-                                None,
-                                None,
-                                viewer_id.as_deref(),
-                                depth.and_then(|d| WotDepth::new(d).ok()),
-                            )
-                            .await?
-                            .unwrap_or_default(),
-                        };
+                            // Before fetching post tags, check if the post has any tags
+                            let tags = match counts.tags {
+                                0 => Vec::new(),
+                                _ => TagUser::get_by_id(
+                                    &user_id,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    viewer_id.as_deref(),
+                                    depth.and_then(|d| WotDepth::new(d).ok()),
+                                )
+                                .await?
+                                .unwrap_or_default(),
+                            };
 
-                        Ok(Some(Self {
-                            details,
-                            counts,
-                            relationship,
-                            tags,
-                            social_graph_status,
-                        }))
-                    }
-                }),
+                            Ok(Some(Self {
+                                details,
+                                counts,
+                                relationship,
+                                tags,
+                                social_graph_status,
+                            }))
+                        }
+                    },
+                ),
         )
         .buffered(8)
         .try_collect()

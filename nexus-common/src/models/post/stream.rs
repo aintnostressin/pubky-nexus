@@ -205,6 +205,9 @@ pub struct PostStream(pub Vec<PostView>);
 
 impl RedisOps for PostStream {}
 
+/// How many users of a follow source a post stream reads the posts of.
+const SOURCE_USERS: usize = 200;
+
 impl PostStream {
     pub fn extend(&mut self, post_stream: PostStream) {
         self.0.extend(post_stream.0);
@@ -698,6 +701,41 @@ impl PostStream {
         }
     }
 
+    /// The users whose posts a follow source streams: the `cut` most recent
+    /// follows of the observer's list, the newest first, without the observer.
+    /// The cut keeps the newest follows so that a user past it still sees the
+    /// posts of the people they followed last. Empty for any other source.
+    pub async fn source_user_ids(source: &StreamSource, cut: usize) -> ModelResult<Vec<String>> {
+        let (observer_id, user_ids) = match source {
+            StreamSource::Following { observer_id } => (
+                observer_id,
+                Following::get_most_recent(observer_id, cut)
+                    .await?
+                    .unwrap_or_default()
+                    .0,
+            ),
+            StreamSource::Followers { observer_id } => (
+                observer_id,
+                Followers::get_most_recent(observer_id, cut)
+                    .await?
+                    .unwrap_or_default()
+                    .0,
+            ),
+            StreamSource::Friends { observer_id } => (
+                observer_id,
+                Friends::get_most_recent(observer_id, cut)
+                    .await?
+                    .unwrap_or_default()
+                    .0,
+            ),
+            _ => return Ok(Vec::new()),
+        };
+        Ok(user_ids
+            .into_iter()
+            .filter(|user_id| user_id != observer_id)
+            .collect())
+    }
+
     pub async fn get_posts_by_source(
         source: StreamSource,
         order: SortOrder,
@@ -706,32 +744,7 @@ impl PostStream {
         skip: Option<usize>,
         limit: Option<usize>,
     ) -> ModelResult<PostKeyStream> {
-        let custom_limit = Some(200);
-        let observer_id = source.get_observer();
-        let user_ids = match &source {
-            StreamSource::Following { observer_id } => {
-                Following::get_by_id(observer_id, None, custom_limit)
-                    .await?
-                    .unwrap_or_default()
-                    .0
-            }
-            StreamSource::Followers { observer_id } => {
-                Followers::get_by_id(observer_id, None, custom_limit)
-                    .await?
-                    .unwrap_or_default()
-                    .0
-            }
-            StreamSource::Friends { observer_id } => {
-                Friends::get_by_id(observer_id, None, custom_limit)
-                    .await?
-                    .unwrap_or_default()
-                    .0
-            }
-            _ => vec![],
-        }
-        .into_iter()
-        .filter(|user_id| Some(user_id.as_str()) != observer_id)
-        .collect::<Vec<_>>();
+        let user_ids = Self::source_user_ids(&source, SOURCE_USERS).await?;
 
         if !user_ids.is_empty() {
             let post_keys = Self::get_posts_for_user_ids(
@@ -786,7 +799,7 @@ impl PostStream {
     }
 
     // Streams for followers / followings / friends are expensive.
-    // We are truncating to the first 200 user_ids. We could also random draw 200.
+    // We are truncating to the first 200 user_ids.
     // TODO rethink, we could also fallback to graph
     async fn get_posts_for_user_ids(
         user_ids: &[&str],

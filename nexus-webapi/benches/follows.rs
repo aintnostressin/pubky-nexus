@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use nexus_common::models::follow::{Followers, Following, UserFollows};
+use nexus_common::models::follow::{Followers, Following, Friends, UserFollows};
 use nexus_common::models::user::UserDetails;
 use setup::run_setup;
 use std::time::Duration;
@@ -9,7 +9,7 @@ mod setup;
 
 fn bench_get_followers_by_id(c: &mut Criterion) {
     println!("******************************************************************************");
-    println!("Test the performance of getting followers by ID, using index or graph as needed.");
+    println!("Test the performance of a page of followers, as /followers reads it.");
     println!("******************************************************************************");
 
     run_setup();
@@ -53,7 +53,7 @@ fn bench_get_followers_from_graph(c: &mut Criterion) {
 
 fn bench_get_following_by_id(c: &mut Criterion) {
     println!("******************************************************************************");
-    println!("Test the performance of getting following by ID, using index or graph as needed.");
+    println!("Test the performance of a page of following, as /following reads it.");
     println!("******************************************************************************");
 
     run_setup();
@@ -121,6 +121,28 @@ fn bench_get_following_details(c: &mut Criterion) {
     );
 }
 
+fn bench_get_friends_by_id(c: &mut Criterion) {
+    println!("******************************************************************************");
+    println!("Test the performance of a page of friends, as /friends reads it.");
+    println!("******************************************************************************");
+
+    run_setup();
+
+    let user_id = "4snwyct86m383rsduhw5xgcxpw7c63j3pq8x4ycqikxgik8y64ro";
+    let rt = Runtime::new().unwrap();
+
+    c.bench_with_input(
+        BenchmarkId::new("get_friends_by_id", user_id),
+        &user_id,
+        |b, &id| {
+            b.to_async(&rt).iter(|| async {
+                let friends = Friends::get_by_id(id, None, Some(50)).await.unwrap();
+                std::hint::black_box(friends);
+            });
+        },
+    );
+}
+
 fn configure_criterion() -> Criterion {
     Criterion::default()
         .measurement_time(Duration::new(5, 0))
@@ -136,6 +158,7 @@ criterion_group! {
               bench_get_following_by_id,
               bench_get_following_from_graph,
               bench_get_following_details,
+              bench_get_friends_by_id,
 }
 
 criterion_main!(benches);

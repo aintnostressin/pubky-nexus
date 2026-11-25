@@ -1,11 +1,19 @@
 use crate::db::graph::Query;
-use crate::db::kv::RedisResult;
+use crate::db::kv::{RedisResult, SortOrder};
+use crate::db::queries::get::MAX_QUERY_LIMIT;
 use crate::db::{
-    execute_graph_operation, fetch_row_from_graph, queries, GraphResult, OperationOutcome, RedisOps,
+    execute_graph_operation, fetch_key_from_graph, fetch_row_from_graph, queries, GraphResult,
+    OperationOutcome, RedisOps,
 };
 use crate::models::error::ModelResult;
 use async_trait::async_trait;
 use chrono::Utc;
+
+/// Runs one of the follow page queries: the page's ids, or `None` when the
+/// user has no node.
+pub(super) async fn fetch_follow_page(query: Query) -> GraphResult<Option<Vec<String>>> {
+    fetch_key_from_graph(query, "ids").await
+}
 
 #[async_trait]
 pub trait UserFollows: Sized + RedisOps + AsRef<[String]> + Default {
@@ -17,34 +25,38 @@ pub trait UserFollows: Sized + RedisOps + AsRef<[String]> + Default {
         execute_graph_operation(query).await
     }
 
+    /// One page of the list, read from the graph, the oldest follow first: a
+    /// new follow goes to the end, so the pages before it keep their ids. The
+    /// Redis set is neither read nor written. `None` when the user has no
+    /// node; an existing user past the end of the list gets an empty page.
+    /// Without a `limit` the page holds at most [`MAX_QUERY_LIMIT`] ids.
+    ///
+    /// The query caps `skip` at 10,000, and the routes refuse a larger one, so
+    /// the follows past that many and one page, the newest of a longer list,
+    /// cannot be reached by paging.
     async fn get_by_id(
         user_id: &str,
         skip: Option<usize>,
         limit: Option<usize>,
     ) -> ModelResult<Option<Self>> {
-        match Self::get_from_index(user_id, skip, limit).await? {
-            Some(connections) => Ok(Some(Self::from_vec(connections))),
-            None => {
-                // Index miss: cache the full list (check_in_index needs complete
-                // membership), then slice skip/limit in Rust.
-                let Some(follows) = Self::get_from_graph(user_id).await? else {
-                    // None is reserved for "user does not exist in the graph"
-                    return Ok(None);
-                };
-                follows.put_to_index(user_id).await?;
-
-                let mut connections = follows.as_ref().to_vec();
-                if let Some(skip) = skip {
-                    connections = connections.into_iter().skip(skip).collect();
-                }
-                if let Some(limit) = limit {
-                    connections.truncate(limit);
-                }
-                Ok(Some(Self::from_vec(connections)))
-            }
-        }
+        let query = Self::get_page_query(
+            user_id,
+            &SortOrder::Ascending,
+            skip.unwrap_or(0),
+            limit.unwrap_or(MAX_QUERY_LIMIT),
+        );
+        Ok(fetch_follow_page(query).await?.map(Self::from_vec))
     }
 
+    /// The `limit` most recent follows of the list, the newest first, read
+    /// from the graph like [`Self::get_by_id`]. For a caller that cuts the
+    /// list and must not lose the follows made last.
+    async fn get_most_recent(user_id: &str, limit: usize) -> ModelResult<Option<Self>> {
+        let query = Self::get_page_query(user_id, &SortOrder::Descending, 0, limit);
+        Ok(fetch_follow_page(query).await?.map(Self::from_vec))
+    }
+
+    /// The whole list in one read, for [`Self::reindex`].
     async fn get_from_graph(user_id: &str) -> GraphResult<Option<Self>> {
         let query = Self::get_query(user_id);
         let maybe_row = fetch_row_from_graph(query).await?;
@@ -65,14 +77,6 @@ pub trait UserFollows: Sized + RedisOps + AsRef<[String]> + Default {
         };
 
         Ok(user_follows)
-    }
-
-    async fn get_from_index(
-        user_id: &str,
-        skip: Option<usize>,
-        limit: Option<usize>,
-    ) -> RedisResult<Option<Vec<String>>> {
-        Self::try_from_index_set(&[user_id], skip, limit, None).await
     }
 
     async fn put_to_index(&self, user_id: &str) -> RedisResult<()> {
@@ -100,7 +104,12 @@ pub trait UserFollows: Sized + RedisOps + AsRef<[String]> + Default {
         self.remove_from_index_set(&[user_id]).await
     }
 
+    /// The whole list, for [`Self::get_from_graph`].
     fn get_query(user_id: &str) -> Query;
+
+    /// One page of the list by the time of the follow in `order`, for
+    /// [`Self::get_by_id`] and [`Self::get_most_recent`].
+    fn get_page_query(user_id: &str, order: &SortOrder, skip: usize, limit: usize) -> Query;
 
     fn get_ids_field_name() -> &'static str;
 

@@ -1170,8 +1170,8 @@ pub fn users_exist(user_ids: &[&str]) -> Query {
     .param("user_ids", user_ids)
 }
 
-// These queries aggregate into a single row, so SKIP/LIMIT cannot paginate the
-// collected list; callers slice in Rust instead.
+// The whole list in one row, for the reindex that rebuilds the watcher's follow
+// sets. API reads page with the `*_page` queries below.
 pub fn get_user_followers(user_id: &str) -> Query {
     Query::new(
         "get_user_followers",
@@ -1192,6 +1192,112 @@ pub fn get_user_following(user_id: &str) -> Query {
                 COLLECT(following.id) AS following_ids",
     )
     .param("user_id", user_id)
+}
+
+/// One page of the followers of `user_id`, by the time of the follow in
+/// `order`. See [`follow_page`] for the row shape.
+pub fn get_user_followers_page(
+    user_id: &str,
+    order: &SortOrder,
+    skip: usize,
+    limit: usize,
+) -> Query {
+    follow_page(
+        "get_user_followers_page",
+        "MATCH (u)<-[f:FOLLOWS]-(other:User)",
+        user_id,
+        order,
+        skip,
+        limit,
+    )
+}
+
+/// One page of the users `user_id` follows, by the time of the follow in
+/// `order`. See [`follow_page`] for the row shape.
+pub fn get_user_following_page(
+    user_id: &str,
+    order: &SortOrder,
+    skip: usize,
+    limit: usize,
+) -> Query {
+    follow_page(
+        "get_user_following_page",
+        "MATCH (u)-[f:FOLLOWS]->(other:User)",
+        user_id,
+        order,
+        skip,
+        limit,
+    )
+}
+
+/// One page of the users `user_id` follows who follow back, in the order of
+/// [`get_user_following_page`]. See [`follow_page`] for the row shape.
+pub fn get_user_friends_page(user_id: &str, order: &SortOrder, skip: usize, limit: usize) -> Query {
+    follow_page(
+        "get_user_friends_page",
+        "MATCH (u)-[f:FOLLOWS]->(other:User)
+         WHERE EXISTS { (other)-[:FOLLOWS]->(u) }",
+        user_id,
+        order,
+        skip,
+        limit,
+    )
+}
+
+/// Pages the users `follows_match` binds as `other` through the edge `f` of the
+/// user `u`. Returns one row holding `ids` for an existing user, empty past the
+/// end of the list, and no row when the user has no node. The page is cut inside
+/// the subquery, before the ids are collected. The order is `f.indexed_at` in
+/// `order`, then the id ascending either way, so follows indexed in the same
+/// millisecond keep their place from one page to the next. `indexed_at` is the
+/// time the follow was last indexed: `create_follow` sets it again on every
+/// PUT of a follow that exists, which moves that follow to the newest end.
+fn follow_page(
+    name: &'static str,
+    follows_match: &str,
+    user_id: &str,
+    order: &SortOrder,
+    skip: usize,
+    limit: usize,
+) -> Query {
+    let direction = match order {
+        SortOrder::Ascending => "ASC",
+        SortOrder::Descending => "DESC",
+    };
+    let cypher = format!(
+        "MATCH (u:User {{id: $user_id}})
+         CALL (u) {{
+             {follows_match}
+             WITH other.id AS id, f.indexed_at AS indexed_at
+             ORDER BY indexed_at {direction}, id ASC
+             SKIP $skip LIMIT $limit
+             RETURN collect(id) AS ids
+         }}
+         RETURN ids"
+    );
+    Query::new(name, cypher)
+        .param("user_id", user_id)
+        .param("skip", skip.min(MAX_QUERY_SKIP) as i64)
+        .param("limit", limit.min(MAX_QUERY_LIMIT) as i64)
+}
+
+/// One row per distinct id in `user_ids` that has a `User` node, in no
+/// guaranteed order: `following` when the viewer follows that user,
+/// `followed_by` when that user follows the viewer. No rows at all when the
+/// viewer has no node. Each check is between two bound nodes.
+pub fn user_relationships(user_ids: &[&str], viewer_id: &str) -> Query {
+    Query::new(
+        "user_relationships",
+        "MATCH (viewer:User {id: $viewer_id})
+         UNWIND $user_ids AS id
+         WITH DISTINCT viewer, id
+         MATCH (u:User {id: id})
+         RETURN id,
+                EXISTS { (viewer)-[:FOLLOWS]->(u) } AS following,
+                EXISTS { (u)-[:FOLLOWS]->(viewer) } AS followed_by",
+    )
+    .param("user_ids", user_ids)
+    .param("viewer_id", viewer_id)
 }
 
 fn stream_reach_to_graph_subquery(reach: &StreamReach) -> String {

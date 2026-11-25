@@ -1,9 +1,16 @@
+use crate::post::CAIRO_USER;
+use crate::stream::post::{AMSTERDAM, BOGOTA};
+use crate::utils::follows::{
+    A, B, C, D, E, HUB, HUB_FOLLOWERS, HUB_FOLLOWERS_NEWEST, HUB_FOLLOWING, HUB_FOLLOWING_NEWEST,
+    HUB_FRIENDS, HUB_FRIENDS_NEWEST, LONER,
+};
 use crate::utils::recommended::{DELETED, HOP};
-use crate::utils::{get_request, invalid_get_request, server::TestServiceServer};
+use crate::utils::{get_request, invalid_get_request, post_request, server::TestServiceServer};
 use anyhow::Result;
 use axum::http::StatusCode;
-use deadpool_redis::redis::AsyncCommands;
-use nexus_common::db::get_redis_conn;
+use nexus_common::db::RedisOps;
+use nexus_common::models::follow::{Followers, Following, Friends, UserFollows};
+use nexus_common::models::post::{PostStream, StreamSource};
 
 const NON_EXISTING_USER_ID: &str = "qca6wzjg4okp6g1hwr9g8hmx1po1jpoirjfau9ejsws1qz3t7iiy";
 
@@ -112,11 +119,6 @@ async fn test_get_following() -> Result<()> {
 
 #[tokio_shared_rt::test(shared)]
 async fn test_get_following_details() -> Result<()> {
-    // HOP's follows (recommended.cypher) are read by no other test that clears the cache. The
-    // order is only stable while both reads hit the same cached set: a cold read returns the
-    // graph's order and caches it, a warm one SSCANs it. So warm it first.
-    get_request(&format!("/v1/user/{HOP}/following")).await?;
-
     // Same users, same order, same pages as /following
     for query in ["", "?skip=1&limit=3"] {
         let ids = get_request(&format!("/v1/user/{HOP}/following{query}")).await?;
@@ -328,70 +330,307 @@ async fn test_follows_skip_past_end() -> Result<()> {
     Ok(())
 }
 
-#[tokio_shared_rt::test(shared)]
-async fn test_follows_pagination_slicing() -> Result<()> {
-    // The fixture user has 10 followers and follows 15 users; skip/limit must
-    // slice the list instead of being ignored. CI seeds a warm
-    // cache, and the warm SSCAN path already slices, so each request below
-    // deletes the cached set first to force the cold graph-fetch path.
-    let user_id = "4snwyct86m383rsduhw5xgcxpw7c63j3pq8x4ycqikxgik8y64ro";
+/// The ids a follow list endpoint returns, in its order.
+async fn follow_ids(endpoint: &str) -> Result<Vec<String>> {
+    let res = get_request(endpoint).await?;
+    Ok(res
+        .as_array()
+        .expect("a follow list is a JSON array")
+        .iter()
+        .map(|id| id.as_str().expect("a follow list holds ids").to_string())
+        .collect())
+}
 
+/// Owned copies of `ids`, as the follow models hold them.
+fn ids(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|id| id.to_string()).collect()
+}
+
+/// The `(following, followed_by)` flags of `user_id` as `viewer_id` sees them.
+async fn relationship(user_id: &str, viewer_id: &str) -> Result<(bool, bool)> {
+    let res = get_request(&format!("/v0/user/{user_id}/relationship/{viewer_id}")).await?;
+    Ok((
+        res["following"].as_bool().expect("following is a boolean"),
+        res["followed_by"]
+            .as_bool()
+            .expect("followed_by is a boolean"),
+    ))
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_follow_lists_oldest_first() -> Result<()> {
+    // The fixture creates its follows in an order that matches none of these lists,
+    // forwards or backwards, and none of them is in id order: only the query's own
+    // ordering gives them.
+    assert_eq!(
+        follow_ids(&format!("/v0/user/{HUB}/followers")).await?,
+        HUB_FOLLOWERS,
+        "followers: oldest follow first, same-millisecond follows by id"
+    );
+    assert_eq!(
+        follow_ids(&format!("/v0/user/{HUB}/following")).await?,
+        HUB_FOLLOWING,
+        "following: oldest follow first, same-millisecond follows by id"
+    );
+    // B only follows HUB and E is only followed by it: neither is a friend
+    assert_eq!(
+        follow_ids(&format!("/v0/user/{HUB}/friends")).await?,
+        HUB_FRIENDS,
+        "friends: the mutual follows, in the order of the following list"
+    );
+
+    Ok(())
+}
+
+/// The read behind the post streams of a follow source: the follows made last,
+/// the newest first, cut to `limit`.
+#[tokio_shared_rt::test(shared)]
+async fn test_most_recent_follows() -> Result<()> {
+    // Ensure the server is running, so the graph connection is initialized
+    TestServiceServer::get_test_server().await;
+
+    let followers = Followers::get_most_recent(HUB, 10).await?;
+    let following = Following::get_most_recent(HUB, 10).await?;
+    let friends = Friends::get_most_recent(HUB, 10).await?;
+    assert_eq!(followers.map(|f| f.0), Some(ids(&HUB_FOLLOWERS_NEWEST)));
+    assert_eq!(following.map(|f| f.0), Some(ids(&HUB_FOLLOWING_NEWEST)));
+    assert_eq!(friends.map(|f| f.0), Some(ids(&HUB_FRIENDS_NEWEST)));
+
+    // A limit below the list keeps the newest follows, a tie cut by id
+    let followers = Followers::get_most_recent(HUB, 1).await?;
+    let following = Following::get_most_recent(HUB, 3).await?;
+    let friends = Friends::get_most_recent(HUB, 2).await?;
+    assert_eq!(
+        followers.map(|f| f.0),
+        Some(ids(&HUB_FOLLOWERS_NEWEST[..1]))
+    );
+    assert_eq!(
+        following.map(|f| f.0),
+        Some(ids(&HUB_FOLLOWING_NEWEST[..3]))
+    );
+    assert_eq!(friends.map(|f| f.0), Some(ids(&HUB_FRIENDS_NEWEST[..2])));
+
+    // An existing user with no follows against a user with no node
+    let loner = Following::get_most_recent(LONER, 10).await?;
+    assert_eq!(loner.map(|f| f.0), Some(Vec::new()));
+    let missing = NON_EXISTING_USER_ID;
+    assert!(Followers::get_most_recent(missing, 10).await?.is_none());
+    assert!(Friends::get_most_recent(missing, 10).await?.is_none());
+
+    Ok(())
+}
+
+/// A post stream by a follow source reads the posts of the follows made last:
+/// its cut keeps the newest of the list, and leaves the observer out.
+#[tokio_shared_rt::test(shared)]
+async fn test_post_stream_source_users_are_the_newest_follows() -> Result<()> {
+    // Ensure the server is running, so the graph connection is initialized
+    TestServiceServer::get_test_server().await;
+
+    let observer_id = HUB.to_string();
+    let following = StreamSource::Following {
+        observer_id: observer_id.clone(),
+    };
+    let followers = StreamSource::Followers {
+        observer_id: observer_id.clone(),
+    };
+    let friends = StreamSource::Friends { observer_id };
+
+    // A cut below each list: the oldest follows are the ones left out
+    assert_eq!(
+        PostStream::source_user_ids(&following, 2).await?,
+        ids(&HUB_FOLLOWING_NEWEST[..2])
+    );
+    assert_eq!(
+        PostStream::source_user_ids(&followers, 2).await?,
+        ids(&HUB_FOLLOWERS_NEWEST[..2])
+    );
+    assert_eq!(
+        PostStream::source_user_ids(&friends, 2).await?,
+        ids(&HUB_FRIENDS_NEWEST[..2])
+    );
+
+    // AMSTERDAM follows itself in the mock data, its newest follow, then BOGOTA
+    // and CAIRO: the observer is left out of its own source
+    let self_following = StreamSource::Following {
+        observer_id: AMSTERDAM.to_string(),
+    };
+    assert_eq!(
+        PostStream::source_user_ids(&self_following, 200).await?,
+        ids(&[BOGOTA, CAIRO_USER])
+    );
+
+    // A source that is not a follow list has no users to read
+    let author = StreamSource::Author {
+        author_id: HUB.to_string(),
+    };
+    assert!(PostStream::source_user_ids(&author, 2).await?.is_empty());
+
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_follow_lists_pages() -> Result<()> {
+    let lists: [(&str, &[&str]); 3] = [
+        ("followers", &HUB_FOLLOWERS),
+        ("following", &HUB_FOLLOWING),
+        ("friends", &HUB_FRIENDS),
+    ];
+
+    for (list, expected) in lists {
+        // Pages of one and of two: followers and following each hold a tie, so a
+        // page edge falls inside it
+        for limit in [1, 2] {
+            let mut paged = Vec::new();
+            for skip in (0..expected.len()).step_by(limit) {
+                let page =
+                    follow_ids(&format!("/v0/user/{HUB}/{list}?skip={skip}&limit={limit}")).await?;
+                assert_eq!(
+                    page.len(),
+                    limit.min(expected.len() - skip),
+                    "{list}: size of the page at skip={skip}, limit={limit}"
+                );
+                paged.extend(page);
+            }
+            assert_eq!(
+                paged, expected,
+                "{list}: pages of {limit} should join into the whole list"
+            );
+        }
+
+        // Past the end an existing user gets an empty page, not a 404
+        let past_end = follow_ids(&format!("/v0/user/{HUB}/{list}?skip=100")).await?;
+        assert!(past_end.is_empty(), "{list}: expected an empty page");
+    }
+
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_follow_lists_of_user_without_follows() -> Result<()> {
+    // An existing user with no follows gets empty lists; only a missing user is a 404
+    for list in ["followers", "following", "friends"] {
+        let ids = follow_ids(&format!("/v0/user/{LONER}/{list}")).await?;
+        assert!(ids.is_empty(), "{list}: LONER has no follows");
+
+        invalid_get_request(
+            &format!("/v0/user/{NON_EXISTING_USER_ID}/{list}"),
+            StatusCode::NOT_FOUND,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+#[tokio_shared_rt::test(shared)]
+async fn test_relationship_one_way_and_mutual() -> Result<()> {
+    // (viewed user, viewer follows them, they follow the viewer), the viewer being HUB
+    let cases = [
+        (A, true, true),
+        (B, false, true),
+        (E, true, false),
+        (LONER, false, false),
+    ];
+
+    for (user_id, following, followed_by) in cases {
+        assert_eq!(
+            relationship(user_id, HUB).await?,
+            (following, followed_by),
+            "relationship of {user_id} as HUB sees it"
+        );
+        // The same follows read from the other side
+        assert_eq!(
+            relationship(HUB, user_id).await?,
+            (followed_by, following),
+            "relationship of HUB as {user_id} sees it"
+        );
+    }
+
+    // A page of users reads all its relationships in one query: it must agree with
+    // the single route, whatever order the ids come in, and skip the missing user
+    let page = post_request(
+        "/v0/stream/users/by_ids",
+        serde_json::json!({
+            "user_ids": [LONER, E, NON_EXISTING_USER_ID, B, A],
+            "viewer_id": HUB
+        }),
+    )
+    .await?;
+    let page = page.as_array().expect("a user stream is a JSON array");
+    assert_eq!(page.len(), cases.len(), "one view per existing user");
+    for (user_id, following, followed_by) in cases {
+        let view = page
+            .iter()
+            .find(|view| view["details"]["id"] == user_id)
+            .unwrap_or_else(|| panic!("{user_id} should be in the page"));
+        assert_eq!(
+            (
+                view["relationship"]["following"].as_bool(),
+                view["relationship"]["followed_by"].as_bool()
+            ),
+            (Some(following), Some(followed_by)),
+            "stream relationship of {user_id} as HUB sees it"
+        );
+    }
+
+    // A missing viewer leaves the flags at their default instead of failing the page
+    let page = post_request(
+        "/v0/stream/users/by_ids",
+        serde_json::json!({ "user_ids": [A], "viewer_id": NON_EXISTING_USER_ID }),
+    )
+    .await?;
+    assert_eq!(page[0]["relationship"]["following"], false);
+    assert_eq!(page[0]["relationship"]["followed_by"], false);
+
+    Ok(())
+}
+
+/// The watcher's follow sets can lag the graph or be missing. The API reads only
+/// the graph, and a read must not write the sets back.
+#[tokio_shared_rt::test(shared)]
+async fn test_follow_reads_ignore_the_follow_sets() -> Result<()> {
     // Ensure the server is running, so the Redis pool is initialized
     TestServiceServer::get_test_server().await;
-    let mut redis_conn = get_redis_conn().await?;
-    let followers_key = format!("Followers:{user_id}");
-    let following_key = format!("Following:{user_id}");
 
-    // Cold cache: limit smaller than the list returns exactly limit items
-    let _: () = redis_conn.del(&followers_key).await?;
-    let res = get_request(&format!("/v0/user/{user_id}/followers?limit=4")).await?;
-    assert_eq!(
-        res.as_array().unwrap().len(),
-        4,
-        "Expected followers limit to cap the page size on a cold cache"
+    // Make the sets disagree with the graph: LONER added as a follower of HUB that
+    // HUB follows back, D dropped from HUB's followers, HUB's following set gone
+    Followers(ids(&[LONER])).put_to_index(HUB).await?;
+    Following(ids(&[HUB])).put_to_index(LONER).await?;
+    Followers(ids(&[D])).del_from_index(HUB).await?;
+    Following(ids(&HUB_FOLLOWING)).del_from_index(HUB).await?;
+
+    let followers = follow_ids(&format!("/v0/user/{HUB}/followers")).await?;
+    let following = follow_ids(&format!("/v0/user/{HUB}/following")).await?;
+    let friends = follow_ids(&format!("/v0/user/{HUB}/friends")).await?;
+    let loner_following = follow_ids(&format!("/v0/user/{LONER}/following")).await?;
+    let with_loner = relationship(HUB, LONER).await?;
+    let with_d = relationship(HUB, D).await?;
+
+    // What the reads left in Redis, taken before the sets are put back
+    let (following_set_exists, _) = Following::check_set_member(&[HUB], C).await?;
+    let d_in_followers_set = Followers::check_in_index(HUB, D).await?;
+
+    // Put the sets back as the mock data had them before asserting anything
+    Followers(ids(&[LONER])).del_from_index(HUB).await?;
+    Following(ids(&[HUB])).del_from_index(LONER).await?;
+    Followers(ids(&[D])).put_to_index(HUB).await?;
+    Following(ids(&HUB_FOLLOWING)).put_to_index(HUB).await?;
+
+    assert_eq!(followers, HUB_FOLLOWERS, "followers come from the graph");
+    assert_eq!(following, HUB_FOLLOWING, "following comes from the graph");
+    assert_eq!(friends, HUB_FRIENDS, "friends come from the graph");
+    assert!(loner_following.is_empty(), "LONER follows nobody");
+    assert_eq!(with_loner, (false, false), "LONER does not follow HUB");
+    assert_eq!(with_d, (true, true), "D and HUB follow each other");
+
+    assert!(
+        !following_set_exists,
+        "reading the following list must not write the set back"
     );
-
-    // Cold cache: a mid-list skip returns 200 with the remainder instead of
-    // 404ing (the aggregated single-row query used to drop the row on SKIP)
-    let _: () = redis_conn.del(&followers_key).await?;
-    let res = get_request(&format!("/v0/user/{user_id}/followers?skip=8&limit=4")).await?;
-    assert_eq!(
-        res.as_array().unwrap().len(),
-        2,
-        "Expected a cold mid-list skip to return the remainder"
-    );
-
-    // The cold request above cached the full list, so the warm SSCAN path
-    // must serve a page of the same size
-    let res = get_request(&format!("/v0/user/{user_id}/followers?skip=8&limit=4")).await?;
-    assert_eq!(
-        res.as_array().unwrap().len(),
-        2,
-        "Expected the warm cache to serve the same page size as the cold path"
-    );
-
-    // Same checks for the following list
-    let _: () = redis_conn.del(&following_key).await?;
-    let res = get_request(&format!("/v0/user/{user_id}/following?limit=6")).await?;
-    assert_eq!(
-        res.as_array().unwrap().len(),
-        6,
-        "Expected following limit to cap the page size on a cold cache"
-    );
-
-    let _: () = redis_conn.del(&following_key).await?;
-    let res = get_request(&format!("/v0/user/{user_id}/following?skip=10&limit=10")).await?;
-    assert_eq!(
-        res.as_array().unwrap().len(),
-        5,
-        "Expected a cold mid-list skip to return the last following page"
-    );
-
-    let res = get_request(&format!("/v0/user/{user_id}/following?skip=10&limit=10")).await?;
-    assert_eq!(
-        res.as_array().unwrap().len(),
-        5,
-        "Expected the warm cache to serve the same page size as the cold path"
+    assert!(
+        !d_in_followers_set,
+        "reading the followers list must not write the set back"
     );
 
     Ok(())
