@@ -2,9 +2,9 @@
 //! has followed the user: what they bring from the old homeserver, or about
 //! it, must not be applied on top of the new one.
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use nexus_common::models::user::RecheckOutcome;
-use pubky::Keypair;
+use pubky::{Keypair, Pubky};
 
 use crate::harness::{post_uri, MigrationTest};
 
@@ -72,6 +72,153 @@ async fn a_read_of_the_old_homeserver_started_before_the_switch_leaves_the_wipe_
     Ok(())
 }
 
+/// The scout posts on the primary and nexus has not read it yet. The mover
+/// replies from A: the parent is unknown, so the reply waits in the retry
+/// queue with A as the homeserver it came from, and A's cursor moves past it.
+/// Returns the mover's device and the reply's id.
+async fn reply_waiting_for_its_parent(
+    t: &MigrationTest,
+    mover: &Keypair,
+    scout: &Keypair,
+) -> Result<(Pubky, String)> {
+    let device_scout = t.device()?;
+    let session_scout = t.signup(&device_scout, scout, &t.primary, "scout").await?;
+    let topic = t.post(&session_scout, "topic", None).await?;
+
+    let device_a = t.device()?;
+    let session_a = t.signup(&device_a, mover, &t.hs_a, "mover").await?;
+    let reply = t
+        .post(&session_a, "a reply", Some(post_uri(scout, &topic)))
+        .await?;
+    t.ingest(mover).await?;
+    t.index_external(&t.hs_a).await?;
+    ensure!(t.live_posts(mover).await? == 0, "waiting for its parent");
+    ensure!(t.queued_retries().await? == 1, "queued for a retry");
+    Ok((device_a, reply))
+}
+
+/// The mover copies to B while the reply still waits for its parent. B's read
+/// meets the reply too and queues it again: the queue holds one entry for an
+/// address, so it now names B as the homeserver it came from. The parent
+/// arrives, the retry runs for a user bound to B and applies the reply once.
+/// A second retry and a second read of B add nothing.
+#[tokio_shared_rt::test(shared)]
+async fn a_retry_queued_again_on_the_new_homeserver_is_applied_there_once() -> Result<()> {
+    let t = MigrationTest::setup().await?;
+    let (mover, scout) = (Keypair::random(), Keypair::random());
+    let (device_a, _) = reply_waiting_for_its_parent(&t, &mover, &scout).await?;
+
+    t.signup_and_copy(&mover, &t.hs_b, "mover", &device_a)
+        .await?;
+    assert_eq!(t.recheck(&mover).await?.outcome, RecheckOutcome::Switched);
+    t.index_external(&t.hs_b).await?;
+    assert_eq!(t.queued_retries().await?, 1, "one entry for the address");
+
+    t.index_primary().await?;
+    t.retry().await?;
+    let applied = (
+        t.live_posts(&mover).await?,
+        t.notification_times(&scout).await?,
+    );
+    assert_eq!(
+        (applied.0, applied.1.len()),
+        (1, 1),
+        "(live posts, replies)"
+    );
+
+    t.retry().await?;
+    t.index_external(&t.hs_b).await?;
+    assert_eq!(
+        (
+            t.live_posts(&mover).await?,
+            t.notification_times(&scout).await?
+        ),
+        applied
+    );
+    Ok(())
+}
+
+/// The mover tries B without copying anything and nexus follows them there.
+/// The retry runs while they are away: the mover is bound to another
+/// homeserver than the one the entry came from, so it is dropped. Then the
+/// mover returns to A, which still holds the reply. A's cursor passed the
+/// reply when it was queued, so the read of A resumes after it, and with the
+/// entry gone nothing delivers the reply again. Demonstrated.
+///
+/// The drop assumes the user's new homeserver delivers what it holds. A user
+/// who comes back to the origin is read there from a cursor that already
+/// passed the event. The entry should outlive the absence, or the return
+/// should read the homeserver again from before the dropped events.
+#[tokio_shared_rt::test(shared)]
+#[ignore = "a retry dropped while the user was bound elsewhere is not read again when they \
+            return to its origin; needs the entry kept, or the origin's cursor moved back"]
+async fn a_retry_dropped_while_the_user_was_away_is_applied_when_they_return() -> Result<()> {
+    let t = MigrationTest::setup().await?;
+    let (mover, scout) = (Keypair::random(), Keypair::random());
+    let (device_a, _) = reply_waiting_for_its_parent(&t, &mover, &scout).await?;
+    t.index_primary().await?;
+
+    // Away: a signup on B, nothing copied. The retry runs meanwhile.
+    let device_b = t.device()?;
+    t.signup(&device_b, &mover, &t.hs_b, "mover").await?;
+    assert_eq!(t.recheck(&mover).await?.outcome, RecheckOutcome::Switched);
+    t.retry().await?;
+
+    // Back to A.
+    t.switch_record(&device_a, &mover, &t.hs_a).await?;
+    assert_eq!(t.recheck(&mover).await?.outcome, RecheckOutcome::Switched);
+    t.index_external(&t.hs_a).await?;
+    t.retry().await?;
+
+    assert_eq!(
+        (
+            t.bound_name(&mover).await?,
+            t.live_posts(&mover).await?,
+            t.notifications(&scout).await?
+        ),
+        ("hs_a", 1, vec!["reply".to_string()]),
+        "(binding, live posts, scout's notifications)"
+    );
+    Ok(())
+}
+
+/// The same loss without a retry run in between. The mover copies to B while
+/// the reply waits for its parent, B's read queues it again, and the entry
+/// now names B. The mover returns to A before the parent arrives. When the
+/// retry runs, the mover is bound to A and the entry came from B, so it is
+/// dropped, and A's cursor is past the reply. Demonstrated.
+#[tokio_shared_rt::test(shared)]
+#[ignore = "an entry queued again on a homeserver the user then left is dropped although their \
+            homeserver holds the event; needs the same as the scenario above"]
+async fn a_retry_queued_again_on_a_homeserver_the_user_left_is_applied_when_they_return(
+) -> Result<()> {
+    let t = MigrationTest::setup().await?;
+    let (mover, scout) = (Keypair::random(), Keypair::random());
+    let (device_a, _) = reply_waiting_for_its_parent(&t, &mover, &scout).await?;
+
+    t.signup_and_copy(&mover, &t.hs_b, "mover", &device_a)
+        .await?;
+    assert_eq!(t.recheck(&mover).await?.outcome, RecheckOutcome::Switched);
+    t.index_external(&t.hs_b).await?;
+
+    t.switch_record(&device_a, &mover, &t.hs_a).await?;
+    assert_eq!(t.recheck(&mover).await?.outcome, RecheckOutcome::Switched);
+    t.index_external(&t.hs_a).await?;
+    t.index_primary().await?;
+    t.retry().await?;
+
+    assert_eq!(
+        (
+            t.bound_name(&mover).await?,
+            t.live_posts(&mover).await?,
+            t.notifications(&scout).await?
+        ),
+        ("hs_a", 1, vec!["reply".to_string()]),
+        "(binding, live posts, scout's notifications)"
+    );
+    Ok(())
+}
+
 /// The mover replies from A to a post nexus has not indexed yet, so the reply
 /// waits in the retry queue with A as the homeserver it came from. The parent
 /// is indexed, the mover moves to B with a copy, and the reply is indexed from
@@ -88,22 +235,7 @@ async fn a_read_of_the_old_homeserver_started_before_the_switch_leaves_the_wipe_
 async fn a_retry_queued_on_the_old_homeserver_is_dropped_once_the_user_left_it() -> Result<()> {
     let t = MigrationTest::setup().await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
-
-    // The scout posts on the primary; nexus has not read it yet.
-    let device_scout = t.device()?;
-    let session_scout = t.signup(&device_scout, &scout, &t.primary, "scout").await?;
-    let topic = t.post(&session_scout, "topic", None).await?;
-
-    // The mover replies from A. The parent is unknown, so the reply is queued
-    // for a retry, tagged with A.
-    let device_a = t.device()?;
-    let session_a = t.signup(&device_a, &mover, &t.hs_a, "mover").await?;
-    let reply = t
-        .post(&session_a, "a reply", Some(post_uri(&scout, &topic)))
-        .await?;
-    t.ingest(&mover).await?;
-    t.index_external(&t.hs_a).await?;
-    assert_eq!(t.live_posts(&mover).await?, 0, "waiting for its parent");
+    let (device_a, reply) = reply_waiting_for_its_parent(&t, &mover, &scout).await?;
     t.index_primary().await?;
 
     // Move to B. The copy brings the reply, whose parent is indexed by now.
