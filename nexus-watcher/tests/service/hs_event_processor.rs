@@ -521,31 +521,37 @@ async fn test_events_of_a_left_user_without_a_mapping_are_processed_on_one_looku
 /// The resolver, or another user's event that mentions them, can map a left user while a run
 /// is on, and the per-user read then reads them from its next tick. The run stops applying
 /// their events at their next one, not at its end: the two reads applying the same events at
-/// once could put an older one after a newer one.
+/// once could put an older one after a newer one. A mapping to another homeserver stops it
+/// too: that user is no longer read here.
 #[tokio_shared_rt::test(shared)]
 async fn test_a_left_user_mapped_during_a_run_is_passed_over_from_their_next_event() -> Result<()> {
     setup().await?;
-    let store = new_in_memory_store();
-    let handler = create_mock_handler(Ok(()), None);
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let processor = build_processor_at_cursor(7, store, handler.clone(), shutdown_rx).await?;
-    let hs_id = processor.homeserver.id.to_string();
-    let user_id = random_user_id();
-    PerUserRead::leave(&hs_id, &user_id, 3).await?;
-    let put = |post_id: &str| format!("PUT {}", post_uri_builder(user_id.clone(), post_id.into()));
+    for elsewhere in [None, Some(random_pubky_id().to_string())] {
+        let store = new_in_memory_store();
+        let handler = create_mock_handler(Ok(()), None);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let processor = build_processor_at_cursor(7, store, handler.clone(), shutdown_rx).await?;
+        let hs_id = processor.homeserver.id.to_string();
+        let user_id = random_user_id();
+        PerUserRead::leave(&hs_id, &user_id, 3).await?;
+        let put =
+            |post_id: &str| format!("PUT {}", post_uri_builder(user_id.clone(), post_id.into()));
+        let mapped_to = elsewhere.unwrap_or(hs_id);
 
-    processor
-        .process_event_lines(vec![put("before"), "cursor: 9".to_string()])
-        .await?;
-    create_user_hosted_on(&user_id, Some(&hs_id)).await;
-    processor
-        .process_event_lines(vec![put("after"), "cursor: 11".to_string()])
-        .await?;
+        processor
+            .process_event_lines(vec![put("before"), "cursor: 9".to_string()])
+            .await?;
+        create_user_hosted_on(&user_id, Some(&mapped_to)).await;
+        processor
+            .process_event_lines(vec![put("after"), "cursor: 11".to_string()])
+            .await?;
 
-    assert_eq!(
-        handler.get_handled_uris(),
-        [post_uri_builder(user_id.clone(), "before".into())]
-    );
+        assert_eq!(
+            handler.get_handled_uris(),
+            [post_uri_builder(user_id.clone(), "before".into())],
+            "mapped during the run to {mapped_to}"
+        );
+    }
     Ok(())
 }
 
