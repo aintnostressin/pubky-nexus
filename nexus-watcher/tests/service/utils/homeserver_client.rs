@@ -56,6 +56,9 @@ pub struct MockHomeserverClient {
 
     /// Whether every homeserver lookup fails instead.
     homeserver_lookup_fails: bool,
+
+    /// Users whose record was looked up, in lookup order, answered or failed.
+    record_lookups: Mutex<Vec<String>>,
 }
 
 impl MockHomeserverClient {
@@ -142,6 +145,11 @@ impl MockHomeserverClient {
         self.blob_fetches.lock().await.clone()
     }
 
+    /// The users whose record was looked up, in lookup order.
+    pub async fn record_lookups(&self) -> Vec<String> {
+        self.record_lookups.lock().await.clone()
+    }
+
     /// The homeserver each resource and blob fetch was asked of, `None` when it was left to
     /// the owner's record, with the URI asked for, in fetch order.
     pub async fn fetched_from(&self) -> Vec<(Option<String>, String)> {
@@ -156,7 +164,8 @@ impl MockHomeserverClient {
 
 #[async_trait::async_trait]
 impl PkdnsHomeserverResolver for MockHomeserverClient {
-    async fn resolve_record(&self, _user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+    async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        self.record_lookups.lock().await.push(user_pk.to_z32());
         if self.homeserver_lookup_fails {
             return Err(PubkyClientError::RequestFailed {
                 message: "homeserver lookup failed".into(),

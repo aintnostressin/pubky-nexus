@@ -7,6 +7,7 @@ mod hosted_by;
 //mod id;
 mod influencers;
 mod ingestor;
+mod per_user_read;
 mod relationship;
 mod search;
 mod social_graph;
@@ -28,6 +29,7 @@ pub use hosted_by::{
 };
 pub use influencers::{Influencers, GLOBAL_INFLUENCERS_CACHE_SIZE};
 pub use ingestor::UserIngestor;
+pub use per_user_read::PerUserRead;
 pub use relationship::Relationship;
 pub use search::{
     UserSearch, UsersByTagSearch, TAG_GLOBAL_USER_TAGGERS, USER_ID_KEY_PARTS, USER_NAME_KEY_PARTS,

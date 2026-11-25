@@ -1,5 +1,6 @@
 mod active_homeservers;
 mod content;
+mod per_user_read;
 mod user_events;
 
 use pubky_social_specs::legacy_v0::PubkyAppUser;

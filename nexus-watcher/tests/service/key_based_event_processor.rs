@@ -9,7 +9,7 @@ use nexus_common::db::{
 };
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::user::{
-    set_user_homeserver, set_user_homeserver_stale, user_hs_cursor_key, Epoch,
+    set_user_homeserver, set_user_homeserver_stale, user_hs_cursor_key, Epoch, PerUserRead,
     PkdnsHomeserverResolver, PkdnsRecord, UserDetails, UserHsCursor,
 };
 use nexus_common::types::DynError;
@@ -1275,6 +1275,91 @@ fn retryable_client_error() -> EventProcessorError {
     .into()
 }
 
+/// The primary homeserver is read in bulk, so its per-user read is for the users the bulk
+/// read left to it: the external loop lists the primary only once there is one, and reads
+/// only them, each from the cursor they were left with or their own if that is later. A
+/// homeserver that is not the primary has every hosted user read.
+#[tokio_shared_rt::test(shared)]
+async fn key_based_runner_reads_the_primary_for_the_users_its_bulk_read_left(
+) -> Result<(), DynError> {
+    setup().await?;
+    let (_primary_keypair, primary) = create_homeserver().await?;
+    let primary_id = primary.id.to_string();
+    let left = create_user_on_homeserver(&primary).await?;
+    let left_and_read_since = create_user_on_homeserver(&primary).await?;
+    let _never_left = create_user_on_homeserver(&primary).await?;
+    let (_external_keypair, external) = create_homeserver().await?;
+    let external_id = external.id.to_string();
+    let hosted_externally = create_user_on_homeserver(&external).await?;
+
+    let source = Arc::new(MockHomeserverClient::default());
+    let mut runner = runner(source.clone());
+    runner.primary_homeserver = primary.id.clone();
+
+    assert!(
+        !runner.pre_run().await?.contains(&primary_id),
+        "the bulk read covers every user of the primary"
+    );
+
+    PerUserRead::leave(&primary_id, &left, 5).await?;
+    PerUserRead::leave(&primary_id, &left_and_read_since, 5).await?;
+    UserHsCursor::write(&left_and_read_since, &primary_id, 42).await?;
+    // Left by the primary's bulk read, but hosted elsewhere: not the primary's to read.
+    PerUserRead::leave(&primary_id, &hosted_externally, 5).await?;
+
+    let listed = runner.pre_run().await?;
+    assert!(listed.contains(&primary_id), "{listed:?}");
+    for hs_id in [&primary_id, &external_id] {
+        runner
+            .build(hs_id)
+            .await?
+            .run()
+            .await
+            .map_err(|e| format!("{e}"))?;
+    }
+
+    let mut calls = source.call_details().await;
+    calls.sort();
+    let limit = WatcherConfig::default().key_based_events_limit;
+    let mut expected = vec![
+        (primary_id.clone(), left, 5, limit),
+        (primary_id, left_and_read_since, 42, limit),
+        (external_id, hosted_externally, 0, limit),
+    ];
+    expected.sort();
+    assert_eq!(calls, expected);
+    Ok(())
+}
+
+/// `monitored_homeservers_limit` bounds the third-party homeservers a run reads. The users the
+/// primary's bulk read left have no other reader, so its per-user read runs whatever the cap.
+#[tokio_shared_rt::test(shared)]
+async fn key_based_runner_reads_the_primary_outside_the_homeserver_cap() -> Result<(), DynError> {
+    setup().await?;
+    let (_primary_keypair, primary) = create_homeserver().await?;
+    let primary_id = primary.id.to_string();
+    let left = create_user_on_homeserver(&primary).await?;
+    PerUserRead::leave(&primary_id, &left, 5).await?;
+    let (_external_keypair, external) = create_homeserver().await?;
+    create_user_on_homeserver(&external).await?;
+
+    let source = Arc::new(MockHomeserverClient::default());
+    let mut runner = runner(source.clone());
+    runner.primary_homeserver = primary.id.clone();
+    runner.monitored_hs_limit = 0;
+
+    let stats = runner.run().await?.0;
+
+    let ran: Vec<&str> = stats.stats.iter().map(|run| run.hs_id.as_str()).collect();
+    assert_eq!(ran, vec![primary_id.as_str()]);
+    let limit = WatcherConfig::default().key_based_events_limit;
+    assert_eq!(
+        source.call_details().await,
+        vec![(primary_id, left, 5, limit)]
+    );
+    Ok(())
+}
+
 /// A runner over every active homeserver but a random primary one, fetching from `source`.
 fn runner(source: Arc<MockHomeserverClient>) -> KeyBasedEventProcessorRunner {
     let mut runner = KeyBasedEventProcessorRunner::new(
@@ -1399,6 +1484,7 @@ fn processor_with_options(
 ) -> KeyBasedEventProcessor {
     KeyBasedEventProcessor {
         homeserver_id: homeserver.id,
+        left_by_bulk_read: None,
         limit,
         event_handler: handler,
         client: source,
