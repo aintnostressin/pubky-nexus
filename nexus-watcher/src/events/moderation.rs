@@ -13,7 +13,7 @@ use nexus_common::media::is_v1_file_id;
 use nexus_common::models::resource::ResourceDetails;
 use nexus_common::models::takedown::record_takedown;
 use nexus_common::models::user::UserIngestor;
-use nexus_common::universal_tag::normalize::resource_id;
+use nexus_common::universal_tag::normalize::{normalize_uri, resource_id};
 use nexus_common::WatcherConfig;
 use pubky_social_specs::legacy_v0::validate_crockford_id;
 use pubky_social_specs::PubkyId;
@@ -131,7 +131,9 @@ impl Moderation {
                 }
                 record_takedown(&address, tag_uri).await?;
                 // Before the file: deleting a file that isn't indexed stops the takedown.
-                Self::remove_file_resources(&file_keys).await?;
+                if matches!(target, ReferenceTarget::File(_)) {
+                    Self::remove_file_resources(&uri, &file_keys).await?;
+                }
                 Self::remove_taken_down(target, files_path, ingestor).await
             }
         }
@@ -141,22 +143,24 @@ impl Moderation {
     /// [`resource_falls_under`] one of `keys`. A file's key is a prefix of each address it
     /// covers (`…/files/{id}` with a trailing slash or a query, `…/files/{hash}.{ext}` for every
     /// extension), so the candidates are read by prefix and kept only if they fall under it.
-    async fn remove_file_resources(keys: &[String]) -> Result<(), EventProcessorError> {
+    /// The `Resource` at `uri`, the address the moderator tagged, goes too, even in a spelling
+    /// the prefix read misses (a `:port`).
+    async fn remove_file_resources(uri: &str, keys: &[String]) -> Result<(), EventProcessorError> {
+        let mut ids: Vec<String> = normalize_uri(uri)
+            .map(|(normalized, _)| resource_id(&normalized))
+            .into_iter()
+            .collect();
         for key in keys {
-            let ids: Vec<String> = ResourceDetails::ids_by_uri_prefix(key)
-                .await?
-                .into_iter()
-                .filter(|(_, uri)| resource_falls_under(uri, key))
-                .map(|(id, _)| id)
-                .collect();
-            if !ids.is_empty() {
-                info!(
-                    "Taking down {} Resources on the addresses of {key}",
-                    ids.len()
-                );
-            }
-            ResourceDetails::delete(&ids).await?;
+            ids.extend(
+                ResourceDetails::ids_by_uri_prefix(key)
+                    .await?
+                    .into_iter()
+                    .filter(|(_, uri)| resource_falls_under(uri, key))
+                    .map(|(id, _)| id),
+            );
         }
+        info!("Taking down the Resources on the addresses of {uri}");
+        ResourceDetails::delete(&ids).await?;
         Ok(())
     }
 

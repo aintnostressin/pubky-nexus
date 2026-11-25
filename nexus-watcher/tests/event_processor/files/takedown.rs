@@ -392,3 +392,44 @@ async fn test_takedown_of_a_v0_file_takes_down_the_tags_on_its_addresses() -> Re
     test.cleanup_file(&author_kp, &kept_path).await?;
     test.cleanup_user(&author_kp).await
 }
+
+/// A moderator tag on a spelling of a v0 file address that its prefix read misses (a `:port`)
+/// still takes down the `Resource` at that spelling.
+#[tokio_shared_rt::test(shared)]
+async fn test_takedown_through_a_spelling_with_a_port_removes_its_resource() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+    let moderator_kp = create_moderator(&mut test).await?;
+    let author_kp = Keypair::random();
+    let author_id = test
+        .create_user(
+            &author_kp,
+            &test_user("Watcher:V0File:PortTakedown", "takedown"),
+        )
+        .await?;
+    let tagger_kp = Keypair::random();
+    test.create_user(
+        &tagger_kp,
+        &test_user("Watcher:V0File:PortTagger", "tagger"),
+    )
+    .await?;
+    let (_, v0_uri, _) = create_v0_file(
+        &mut test,
+        &author_kp,
+        &author_id,
+        "Watcher:V0File:PortTakedown",
+    )
+    .await?;
+    let with_port = v0_uri.replacen(&author_id, &format!("{author_id}:1"), 1);
+
+    let on_port = tag_resource(&mut test, &tagger_kp, &with_port).await?;
+    assert!(resource_exists_in_graph(&on_port).await?);
+
+    moderate(&mut test, &moderator_kp, &with_port).await?;
+
+    assert!(
+        !resource_exists_in_graph(&on_port).await?,
+        "the tagged spelling goes"
+    );
+    test.cleanup_user(&tagger_kp).await?;
+    test.cleanup_user(&author_kp).await
+}
