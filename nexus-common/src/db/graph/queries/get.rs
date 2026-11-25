@@ -777,6 +777,18 @@ pub fn resource_label_taggers(
     .param("limit", limit as i64)
 }
 
+/// The id and address of every Resource whose address starts with `prefix`, read through
+/// `resourceUriIndex`.
+pub fn resources_by_uri_prefix(prefix: &str) -> Query {
+    Query::new(
+        "resources_by_uri_prefix",
+        "MATCH (r:Resource)
+         WHERE r.uri STARTS WITH $prefix
+         RETURN r.id AS resource_id, r.uri AS uri",
+    )
+    .param("prefix", prefix)
+}
+
 /// Query a stream of Resources with an optional tag filter.
 ///
 /// Ordering:

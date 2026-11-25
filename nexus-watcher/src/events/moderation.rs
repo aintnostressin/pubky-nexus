@@ -5,11 +5,13 @@ use crate::errors::EventProcessorError;
 use crate::events::handlers;
 use crate::events::handlers::file::{blob_of, blob_takedown_key};
 use crate::events::inputs::{Reference, ReferenceTarget};
-use crate::events::route::{route, takedown_key, Routed};
+use crate::events::route::{resolve_reference, resource_takedown_key, route, takedown_key, Routed};
 use crate::events::v0_to_v1::files::FileMap;
 use nexus_common::media::is_v1_file_id;
+use nexus_common::models::resource::ResourceDetails;
 use nexus_common::models::takedown::record_takedown;
 use nexus_common::models::user::UserIngestor;
+use nexus_common::universal_tag::normalize::resource_id;
 use nexus_common::WatcherConfig;
 use pubky_social_specs::legacy_v0::validate_crockford_id;
 use pubky_social_specs::PubkyId;
@@ -41,9 +43,10 @@ impl Moderation {
     /// Apply moderation to the resource a moderator tag points at.
     ///
     /// `label` is the moderator tag's label and `moderated` the reference it tags. Removes the
-    /// resource its key names (post, tag, user or file). Posts are hard-deleted when edge-free
-    /// or tombstoned when engagement edges remain. Any other target is a no-op. `tag_uri` is
-    /// the moderator tag's own address, kept with the takedown.
+    /// resource its key names (post, tag, user or file), or the `Resource` a foreign address
+    /// names, with every tag on it. Posts are hard-deleted when edge-free or tombstoned when
+    /// engagement edges remain. A file takes the `Resource`s on its addresses with it. Any other
+    /// target is a no-op. `tag_uri` is the moderator tag's own address, kept with the takedown.
     #[tracing::instrument(name = "moderation.apply", skip_all)]
     pub async fn apply_moderation(
         &self,
@@ -54,9 +57,6 @@ impl Moderation {
         ingestor: &UserIngestor,
     ) -> Result<(), EventProcessorError> {
         let Reference { uri, target } = moderated;
-        // TODO(specs-migration): a `Resource` tag is never taken down. A moderator tag on a
-        // foreign resource removes nothing, and a file takedown deletes the file but leaves the
-        // `Resource` tags on its address.
         match target {
             // A profile is not remembered: its address is the user's, and a moderated user may
             // come back by writing a new profile.
@@ -64,9 +64,22 @@ impl Moderation {
                 info!("Moderation tag '{label}' detected. Deleting user profile {user_id}");
                 handlers::user::del(user_id).await
             }
+            // A foreign resource is only the `Resource` its tags create, so its takedown is
+            // recorded under the key those tags are checked against (see
+            // `handlers::tag::sync_put_resource`) before the `Resource` is deleted.
+            ReferenceTarget::Foreign => {
+                let Ok(address) = resource_takedown_key(&uri, &ReferenceTarget::Foreign) else {
+                    warn!("Moderation tag '{label}' on {uri} not applied: not a valid URI");
+                    return Ok(());
+                };
+                info!("Moderation tag '{label}' on {uri} detected. Taking down {address}");
+                record_takedown(&address, tag_uri).await?;
+                ResourceDetails::delete(&[resource_id(&address)]).await?;
+                Ok(())
+            }
             // `handle_error` drops a non-retryable error at debug level, so a moderator action
             // that cannot apply is logged here, where an operator will see it.
-            ReferenceTarget::Foreign | ReferenceTarget::Other => {
+            ReferenceTarget::Other => {
                 warn!("Moderation tag '{label}' on {uri} not applied: names nothing Nexus deletes");
                 Ok(())
             }
@@ -100,6 +113,7 @@ impl Moderation {
                 // holds against the flip's copy whichever comes first. The map is read before
                 // anything is recorded: once the address is, another loop's
                 // `remove_if_taken_down` may delete the `File` node the map is built from.
+                let mut file_keys = Vec::new();
                 if let ReferenceTarget::File(key) = &target {
                     if !is_v1_file_id(&key.resource_id) {
                         let files = FileMap::load(&key.owner_id).await?;
@@ -108,13 +122,42 @@ impl Moderation {
                             info!("Taking down {blob_key}, the bytes of {address}");
                             record_takedown(&blob_key, tag_uri).await?;
                             handlers::file::del_blob(&key.owner_id, hash, files_path).await?;
+                            file_keys.push(blob_key);
                         }
                     }
+                    file_keys.push(address.clone());
                 }
                 record_takedown(&address, tag_uri).await?;
+                // Before the file: deleting a file that isn't indexed stops the takedown.
+                Self::remove_file_resources(&file_keys).await?;
                 Self::remove_taken_down(target, files_path, ingestor).await
             }
         }
+    }
+
+    /// Deletes the `Resource`s the tags on a taken-down file's addresses created: those whose
+    /// [`resource_takedown_key`] is one of `keys`. A file's key is a prefix of each address it
+    /// covers (`…/files/{id}` with a trailing slash or a query, `…/files/{hash}.{ext}` for every
+    /// extension), so the candidates are read by prefix and kept only if they resolve back to it.
+    async fn remove_file_resources(keys: &[String]) -> Result<(), EventProcessorError> {
+        for key in keys {
+            let ids: Vec<String> = ResourceDetails::ids_by_uri_prefix(key)
+                .await?
+                .into_iter()
+                .filter(|(_, uri)| {
+                    resource_takedown_key(uri, &resolve_reference(uri).target).as_ref() == Ok(key)
+                })
+                .map(|(id, _)| id)
+                .collect();
+            if !ids.is_empty() {
+                info!(
+                    "Taking down {} Resources on the addresses of {key}",
+                    ids.len()
+                );
+            }
+            ResourceDetails::delete(&ids).await?;
+        }
+        Ok(())
     }
 
     /// Deletes the post, tag or file `target` names, which the moderator took down. Posts are
@@ -143,7 +186,6 @@ impl Moderation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::route::resolve_reference;
 
     const USER_ID: &str = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
 
@@ -160,8 +202,8 @@ mod tests {
         let tag_uri = format!("pubky://{USER_ID}/pub/pubky.app/tags/ABCDEFGHJK");
 
         for address in [
-            "https://example.com/album/123".to_string(),
             format!("pubky://{USER_ID}/pub/pubky.app/follows/{USER_ID}"),
+            format!("pubky://{USER_ID}/pub/pubky.app/blobs/0034FJVRPG4V0"),
         ] {
             let result = moderation
                 .apply_moderation(

@@ -1,11 +1,12 @@
-//! Posts, tags and files the moderator took down, so they stay down whatever order
-//! events arrive in.
+//! Posts, tags, files and foreign resources the moderator took down, so they stay down
+//! whatever order events arrive in.
 //!
 //! The moderator's tag deletes its target when read. If the target isn't indexed yet
 //! (a new Nexus reads everyone's history in no particular order), there is nothing to
 //! delete, and the target would land when its own event is read later; remembering the
-//! address drops that event. Profiles aren't remembered: a moderated user may come back
-//! with a new profile at the same address.
+//! address drops that event. A foreign resource has no event of its own: remembering its
+//! address drops the tags on it, which would create it again. Profiles aren't remembered:
+//! a moderated user may come back with a new profile at the same address.
 //!
 //! Each takedown is a `:Takedown {uri, tag_uri}` node: the canonical address taken down,
 //! and the address of the moderator tag that took it down. A takedown is permanent for

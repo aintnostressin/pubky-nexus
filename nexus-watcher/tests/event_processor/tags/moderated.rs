@@ -1,4 +1,4 @@
-use super::resource_utils::{compute_resource_id, find_resource_tag};
+use super::resource_utils::{compute_resource_id, find_resource_tag, resource_exists_in_graph};
 use super::utils::find_post_tag;
 use crate::event_processor::posts::utils::find_post_details;
 use crate::event_processor::users::utils::find_user_counts;
@@ -7,6 +7,11 @@ use crate::event_processor::utils::watcher::{
 };
 use anyhow::Result;
 use chrono::Utc;
+use nexus_common::models::tag::search::TagSearch;
+use nexus_common::models::takedown::{is_taken_down, record_takedown};
+use nexus_common::types::Pagination;
+use nexus_watcher::events::handlers::tag::remove_resource_if_taken_down;
+use nexus_watcher::events::inputs::{Reference, ReferenceTarget};
 use pubky::{recovery_file, Keypair};
 use pubky_social_specs::legacy_v0::traits::HashId;
 use pubky_social_specs::legacy_v0::{
@@ -179,8 +184,8 @@ async fn test_moderation_keeps_same_label_pubky_app_tag_from_different_user() ->
     Ok(())
 }
 
-/// A moderator tag whose target names nothing Nexus deletes (a URL) is a no-op that succeeds:
-/// nothing is deleted or indexed.
+/// A moderator tag whose target names nothing Nexus deletes (a follow) is a no-op that
+/// succeeds: nothing is deleted or indexed.
 #[tokio_shared_rt::test(shared)]
 async fn test_moderation_of_an_unresolved_target_is_a_no_op() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
@@ -192,9 +197,9 @@ async fn test_moderation_of_an_unresolved_target_is_a_no_op() -> Result<()> {
     // Switch OFF event processing so the tag is handled only by the call below
     test = test.remove_event_processing().await;
 
-    let url = format!("https://example.com/moderate-other/{author_id}");
+    let follow = format!("pubky://{author_id}/pub/pubky.app/follows/{moderator_id}");
     let tag = PubkyAppTag {
-        uri: url.clone(),
+        uri: follow.clone(),
         label: MODERATION_LABEL.to_string(),
         created_at: Utc::now().timestamp_millis(),
     };
@@ -205,15 +210,13 @@ async fn test_moderation_of_an_unresolved_target_is_a_no_op() -> Result<()> {
     let event_handler = test.event_processor_runner.event_handler.clone();
     retrieve_and_handle_event_line(&tag_event, &test.homeserver_id, event_handler)
         .await
-        .unwrap_or_else(|err| panic!("moderating {url} should succeed: {err:?}"));
+        .unwrap_or_else(|err| panic!("moderating {follow} should succeed: {err:?}"));
 
     let post = find_post_details(&author_id, &post_id).await?;
     assert!(!post.deleted, "the v0 post must not be moderated");
     assert!(
-        find_resource_tag(&compute_resource_id(&url), MODERATION_LABEL)
-            .await?
-            .is_none(),
-        "the moderator tag must not be indexed on the URL"
+        !is_taken_down(&follow).await?,
+        "nothing is recorded for a target Nexus never deletes"
     );
     assert_eq!(
         find_user_counts(&moderator_id).await.tagged,
@@ -221,6 +224,121 @@ async fn test_moderation_of_an_unresolved_target_is_a_no_op() -> Result<()> {
         "the moderator tag must not be indexed"
     );
 
+    Ok(())
+}
+
+/// A moderator tag on a foreign URI, written with a fragment that normalizes away, takes its
+/// `Resource` down with every tag on it, whoever wrote them, and leaves another URI's
+/// `Resource` alone. A later tag on the URI is dropped before it is written, so
+/// its label doesn't reach the tag search either.
+#[tokio_shared_rt::test(shared)]
+async fn test_moderation_takes_down_a_foreign_resource_with_every_tag_on_it() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+    let moderator_kp = create_moderator(&mut test).await?;
+    let (tagger_kp, tagger_id) = create_tagger(&mut test, "resource-takedown").await?;
+    let (other_kp, other_id) = create_tagger(&mut test, "resource-takedown-other").await?;
+
+    let url = format!("https://example.com/takedown/{tagger_id}");
+    let kept_url = format!("{url}/kept");
+    let run = Utc::now().timestamp_millis() % 100_000_000;
+    let (label, other_label, later_label) = (
+        format!("restd{run}a"),
+        format!("restd{run}b"),
+        format!("restd{run}c"),
+    );
+    put_pubky_app_resource_tag(&mut test, &tagger_kp, &tagger_id, &url, &label).await?;
+    put_pubky_app_resource_tag(&mut test, &other_kp, &other_id, &url, &other_label).await?;
+    put_pubky_app_resource_tag(&mut test, &tagger_kp, &tagger_id, &kept_url, &label).await?;
+    let resource_id = compute_resource_id(&url);
+    assert!(resource_exists_in_graph(&resource_id).await?);
+
+    moderate_tag(&mut test, &moderator_kp, &format!("{url}#comments")).await?;
+
+    assert!(
+        !resource_exists_in_graph(&resource_id).await?,
+        "the Resource goes with every tag on it"
+    );
+    assert!(
+        is_taken_down(&url).await?,
+        "recorded under the normalized address"
+    );
+    assert!(
+        find_resource_tag(&compute_resource_id(&kept_url), &label)
+            .await?
+            .is_some(),
+        "another URI's Resource stays"
+    );
+
+    put_pubky_app_resource_tag(&mut test, &tagger_kp, &tagger_id, &url, &later_label).await?;
+    assert!(
+        !resource_exists_in_graph(&resource_id).await?,
+        "a later tag on the URI stays out"
+    );
+    assert!(
+        TagSearch::get_by_label(&later_label, &Pagination::default())
+            .await?
+            .is_none_or(|labels| labels.is_empty()),
+        "the dropped tag's label is not indexed"
+    );
+
+    for label in [label, other_label] {
+        TagSearch::del_from_index(&label).await?;
+    }
+    test.cleanup_user(&tagger_kp).await?;
+    test.cleanup_user(&other_kp).await?;
+    Ok(())
+}
+
+/// A takedown of a foreign URI that nobody tagged yet is recorded, so the tags read after it
+/// never create its `Resource`.
+#[tokio_shared_rt::test(shared)]
+async fn test_takedown_of_a_foreign_resource_read_before_its_tags_holds() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+    let moderator_kp = create_moderator(&mut test).await?;
+    let (tagger_kp, tagger_id) = create_tagger(&mut test, "resource-takedown-first").await?;
+
+    let url = format!("https://example.com/takedown-first/{tagger_id}");
+    moderate_tag(&mut test, &moderator_kp, &url).await?;
+    put_pubky_app_resource_tag(&mut test, &tagger_kp, &tagger_id, &url, "mod_first").await?;
+
+    assert!(
+        !resource_exists_in_graph(&compute_resource_id(&url)).await?,
+        "the tag read after the takedown is dropped"
+    );
+    test.cleanup_user(&tagger_kp).await?;
+    Ok(())
+}
+
+/// A tag written while the moderator's tag was read elsewhere doesn't stay: once written, a
+/// recorded takedown of its `Resource` deletes it. A `Resource` not taken down is left alone.
+#[tokio_shared_rt::test(shared)]
+async fn test_resource_tagged_after_its_takedown_was_recorded_is_removed() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+    let (tagger_kp, tagger_id) = create_tagger(&mut test, "resource-takedown-race").await?;
+
+    let url = format!("https://example.com/takedown-race/{tagger_id}");
+    let kept_url = format!("{url}/kept");
+    // The writes that passed the first check before the takedown was recorded.
+    put_pubky_app_resource_tag(&mut test, &tagger_kp, &tagger_id, &url, "mod_race").await?;
+    put_pubky_app_resource_tag(&mut test, &tagger_kp, &tagger_id, &kept_url, "mod_race").await?;
+
+    // The takedown, recorded by another loop that found nothing to delete yet.
+    let tag_uri = tag_uri_builder(tagger_id.clone(), "MODERATORTAG".to_string());
+    record_takedown(&url, &tag_uri).await?;
+
+    let foreign = |uri: &str| Reference {
+        uri: uri.to_string(),
+        target: ReferenceTarget::Foreign,
+    };
+    assert!(remove_resource_if_taken_down(&foreign(&url)).await?);
+    assert!(!remove_resource_if_taken_down(&foreign(&kept_url)).await?);
+
+    assert!(
+        !resource_exists_in_graph(&compute_resource_id(&url)).await?,
+        "the Resource written before the takedown was recorded doesn't stay"
+    );
+    assert!(resource_exists_in_graph(&compute_resource_id(&kept_url)).await?);
+    test.cleanup_user(&tagger_kp).await?;
     Ok(())
 }
 

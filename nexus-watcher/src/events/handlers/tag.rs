@@ -6,10 +6,12 @@ use nexus_common::models::notification::Notification;
 use nexus_common::models::post::search::PostsByTagSearch;
 use nexus_common::models::post::{PostCounts, PostStream};
 use nexus_common::models::resource::tag::TagResource;
+use nexus_common::models::resource::ResourceDetails;
 use nexus_common::models::tag::post::TagPost;
 use nexus_common::models::tag::search::TagSearch;
 use nexus_common::models::tag::traits::{TagCollection, TaggersCollection};
 use nexus_common::models::tag::user::TagUser;
+use nexus_common::models::takedown::is_taken_down;
 use nexus_common::models::user::{UserIngestor, UsersByTagSearch};
 use nexus_common::types::Pagination;
 use nexus_common::universal_tag::normalize::{normalize_uri, resource_id};
@@ -20,6 +22,7 @@ use super::utils::{
     bounded, fail_on_permanent_ingest_error, post_kind, post_relationships_is_reply,
 };
 use crate::events::inputs::{Reference, ReferenceTarget, ResourceKey, TagInput};
+use crate::events::route::resource_takedown_key;
 
 /// `tag.uri` is the address the tag is stored under, kept as the edge `uri`; `tag.tagged` is
 /// what it tags. Only a post or a user can be tagged here; any other target is
@@ -87,6 +90,9 @@ pub async fn sync_put(
 /// Indexes a tag on a foreign resource or a file (at either epoch's address) as a generic
 /// `Resource` tag, keyed by the target's normalized address: a file is never waited for, and a
 /// v0 file and its v1 copy are two targets.
+///
+/// A tag on a `Resource` the moderator took down ([`resource_takedown_key`]) is skipped, and
+/// checked again once written ([`remove_resource_if_taken_down`]).
 #[tracing::instrument(
     name = "tag.put_resource",
     skip_all,
@@ -96,6 +102,12 @@ pub async fn sync_put_resource(tag: TagInput, key: ResourceKey) -> Result<(), Ev
     debug!("Indexing resource tag");
     let (normalized, scheme) =
         normalize_uri(&tag.tagged.uri).map_err(EventProcessorError::generic)?;
+    let takedown = resource_takedown_key(&tag.tagged.uri, &tag.tagged.target)
+        .map_err(EventProcessorError::generic)?;
+    if is_taken_down(&takedown).await? {
+        debug!(takedown = %takedown, "Resource was taken down by the moderator; skipping tag");
+        return Ok(());
+    }
 
     put_sync_resource(
         key.owner_id,
@@ -107,7 +119,30 @@ pub async fn sync_put_resource(tag: TagInput, key: ResourceKey) -> Result<(), Ev
         &tag.label,
         Utc::now().timestamp_millis(),
     )
-    .await
+    .await?;
+
+    remove_resource_if_taken_down(&tag.tagged).await?;
+    Ok(())
+}
+
+/// Deletes the `Resource` a tag on `tagged` lands on, with every tag on it, if the moderator
+/// took it down, and returns whether it did.
+///
+/// Run once a `Resource` tag is written. The moderator's tag may have been read by another loop
+/// while the tag was written: its takedown is recorded before its delete, so either the delete
+/// runs after the write and removes the `Resource`, or the takedown is found here.
+pub async fn remove_resource_if_taken_down(
+    tagged: &Reference,
+) -> Result<bool, EventProcessorError> {
+    let takedown =
+        resource_takedown_key(&tagged.uri, &tagged.target).map_err(EventProcessorError::generic)?;
+    if !is_taken_down(&takedown).await? {
+        return Ok(false);
+    }
+    let (normalized, _) = normalize_uri(&tagged.uri).map_err(EventProcessorError::generic)?;
+    debug!(takedown = %takedown, "Resource was taken down while tagged; deleting it");
+    ResourceDetails::delete(&[resource_id(&normalized)]).await?;
+    Ok(true)
 }
 
 /// Creates a Resource tag in the graph and adds its label to the tag search index.

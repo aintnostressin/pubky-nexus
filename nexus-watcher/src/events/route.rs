@@ -9,6 +9,7 @@
 
 use super::handlers::file::{blob_of, blob_takedown_key};
 use super::inputs::{Reference, ReferenceTarget, ResourceKey};
+use nexus_common::universal_tag::normalize::normalize_uri;
 use pubky_social_specs::legacy_v0::traits::{HasIdPath, HasPath};
 use pubky_social_specs::legacy_v0::{
     self, try_parse_pubky_path, ExtendedParsedUri, PubkyAppBlob, PubkyAppBookmark, PubkyAppFeed,
@@ -129,6 +130,22 @@ pub fn takedown_key(address: &str) -> Result<String, String> {
         Routed::Legacy(parsed) => parsed.try_to_uri_str(),
         Routed::UnsupportedEpoch { version } => Err(format!("unsupported epoch {version}")),
         Routed::Malformed { reason } => Err(reason),
+    }
+}
+
+/// The key a takedown of the `Resource` that a tag on `uri` creates is recorded under and looked
+/// up by. A file's is its [`takedown_key`], so the takedown of a file also holds for the tags on
+/// its addresses. A foreign resource's is its normalized address, the one its `Resource` id is
+/// hashed from. `Err` for an address that does not normalize, or a target a tag never makes a
+/// `Resource` of.
+pub fn resource_takedown_key(uri: &str, target: &ReferenceTarget) -> Result<String, String> {
+    match target {
+        ReferenceTarget::File(_) => takedown_key(uri),
+        ReferenceTarget::Foreign => normalize_uri(uri).map(|(normalized, _)| normalized),
+        ReferenceTarget::Post(_)
+        | ReferenceTarget::User(_)
+        | ReferenceTarget::Tag { .. }
+        | ReferenceTarget::Other => Err(format!("{target:?} is never a Resource")),
     }
 }
 
