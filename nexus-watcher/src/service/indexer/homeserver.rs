@@ -168,9 +168,9 @@ enum AppliedBy {
     /// The bulk read, until the user has a `HOSTED_BY` edge. They are left to the per-user
     /// read ([`PerUserRead`]), which cannot reach them without one. The resolver or the
     /// ingestor can give them one at any time, and the per-user read reads them from its next
-    /// tick on, so the bulk read decides again at each event of theirs. Going on to the end
-    /// of the batch would have both reads apply the same events at once, and an older one
-    /// could land after a newer one.
+    /// tick on, so the bulk read checks for the edge at each event of theirs and decides
+    /// again once it is there. Going on to the end of the batch would have both reads apply
+    /// the same events at once, and an older one could land after a newer one.
     BulkReadUntilMapped,
     /// The homeserver's per-user read: the bulk read applies none of them.
     PerUserRead,
@@ -199,8 +199,8 @@ pub struct HsEventProcessor {
     /// is resolved, the same decision is reused for the rest of the batch even if the
     /// resolver realigns the underlying edge mid-run. The cache is dropped when the run ends.
     ///
-    /// The one decision not kept is [`AppliedBy::BulkReadUntilMapped`], made again at each
-    /// event of the user.
+    /// The one decision replaced is [`AppliedBy::BulkReadUntilMapped`], once the user has
+    /// an edge.
     pub bulk_read_cache: Mutex<HashMap<String, BulkRead>>,
 }
 
@@ -299,22 +299,44 @@ impl TEventProcessor for HsEventProcessor {
 }
 
 impl HsEventProcessor {
-    /// How this run reads `user_id`: the decision cached for them, or a new one, cached unless
-    /// it is made again at each event ([`AppliedBy::BulkReadUntilMapped`]).
+    /// How this run reads `user_id`: the decision cached for them, or a new one. A decision
+    /// that waits on their mapping ([`AppliedBy::BulkReadUntilMapped`]) is made again once
+    /// they have one.
     async fn bulk_read(&self, user_id: &PubkyId) -> Result<BulkRead, EventProcessorError> {
-        if let Some(read) = self.bulk_read_cache.lock().await.get(user_id.as_ref()) {
-            return Ok(read.clone());
+        let cached = self
+            .bulk_read_cache
+            .lock()
+            .await
+            .get(user_id.as_ref())
+            .cloned();
+        if let Some(read) = cached {
+            if !self.mapped_since(&read, user_id).await? {
+                return Ok(read);
+            }
         }
 
         let read = self.decide_bulk_read(user_id).await?;
-        if read.applied_by != AppliedBy::BulkReadUntilMapped {
-            self.bulk_read_cache
-                .lock()
-                .await
-                .insert(user_id.as_ref().to_string(), read.clone());
-        }
+        self.bulk_read_cache
+            .lock()
+            .await
+            .insert(user_id.as_ref().to_string(), read.clone());
 
         Ok(read)
+    }
+
+    /// Whether `user_id`, whose decision `read` waits on their mapping, has one by now. Only
+    /// the edge is read: the record they publish was looked up when `read` was decided, and
+    /// a lookup at each event would hold the batch up on the network.
+    async fn mapped_since(
+        &self,
+        read: &BulkRead,
+        user_id: &PubkyId,
+    ) -> Result<bool, EventProcessorError> {
+        if read.applied_by != AppliedBy::BulkReadUntilMapped {
+            return Ok(false);
+        }
+        let stored = HsMapping::stored(user_id.as_ref(), &self.homeserver.id).await?;
+        Ok(stored.is_some())
     }
 
     /// Decides how this run reads `user_id`. A user without a `HOSTED_BY` edge is classified

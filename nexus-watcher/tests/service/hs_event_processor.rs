@@ -484,25 +484,37 @@ async fn test_events_of_a_user_left_to_the_per_user_read_are_passed_over() -> Re
 /// The per-user read finds its users by their mapping to the homeserver, so it cannot read a
 /// user left before they were ever mapped (no mapping is removed later, a deleted profile's
 /// included). The bulk read keeps applying such a user's events, or their first profile
-/// would never be indexed.
+/// would never be indexed. Each event asks only whether they are mapped by now: the record
+/// they publish is looked up once a run, as for any user without a mapping. A missing
+/// record is not cached, so a lookup at each event would hold the whole read up.
 #[tokio_shared_rt::test(shared)]
-async fn test_events_of_a_left_user_without_a_mapping_are_processed() -> Result<()> {
+async fn test_events_of_a_left_user_without_a_mapping_are_processed_on_one_lookup() -> Result<()> {
     setup().await?;
-    let store = new_in_memory_store();
+    let client = Arc::new(MockHomeserverClient::default());
     let handler = create_mock_handler(Ok(()), None);
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let processor = build_processor_at_cursor(7, store, handler.clone(), shutdown_rx).await?;
-    let hs_id = processor.homeserver.id.to_string();
-
+    let homeserver = Homeserver {
+        id: random_pubky_id(),
+        cursor: 7,
+    };
+    homeserver.put_to_index().await?;
     let user_id = random_user_id();
-    PerUserRead::leave(&hs_id, &user_id, 3).await?;
+    PerUserRead::leave(&homeserver.id, &user_id, 3).await?;
+    let processor = processor_with_client(
+        homeserver,
+        handler.clone(),
+        client.clone(),
+        new_in_memory_store(),
+    );
+    let put = |post_id: &str| format!("PUT {}", post_uri_builder(user_id.clone(), post_id.into()));
 
-    let uri = post_uri_builder(user_id, "post".into());
     processor
-        .process_event_lines(vec![format!("PUT {uri}"), "cursor: 9".to_string()])
+        .process_event_lines(vec![put("first"), put("second"), "cursor: 9".to_string()])
         .await?;
 
-    assert_eq!(handler.get_handle_count(), 1);
+    assert_eq!(
+        (handler.get_handle_count(), client.record_lookups().await),
+        (2, vec![user_id.clone()])
+    );
     Ok(())
 }
 
