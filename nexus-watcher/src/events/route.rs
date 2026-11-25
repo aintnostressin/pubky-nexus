@@ -149,6 +149,12 @@ pub fn resource_takedown_key(uri: &str, target: &ReferenceTarget) -> Result<Stri
     }
 }
 
+/// Whether the `Resource` at `uri` falls under the takedown recorded under `key`: whether its
+/// [`resource_takedown_key`] is `key`.
+pub fn resource_falls_under(uri: &str, key: &str) -> bool {
+    resource_takedown_key(uri, &resolve_reference(uri).target).is_ok_and(|own| own == key)
+}
+
 /// The user a bare `pubky://<pk>` names. It has no namespace segment to route by, so the
 /// router calls it malformed; the v1 parser reads it as a user reference. The only other
 /// routed-malformed addresses it reads as one are the SDK short forms the v0 splitter does not
@@ -600,6 +606,40 @@ mod tests {
         ] {
             assert!(takedown_key(&address).is_err(), "{address}");
         }
+    }
+
+    /// A v0 file's key covers its address in every spelling its reader accepts, and a blob key
+    /// every extension of its bytes; an address the key is only a prefix of falls under neither.
+    #[test]
+    fn a_file_resource_falls_under_its_file_or_blob_key() {
+        let file = file_uri_builder(USER.into(), POST_ID.into());
+        let blob = v1_file_uri_builder(USER.into(), HASH_ID.into());
+        for (uri, key) in [
+            (file.clone(), &file),
+            (format!("{file}/"), &file),
+            (format!("{file}?x=1"), &file),
+            (format!("{blob}.png"), &blob),
+            (format!("{blob}.bin"), &blob),
+        ] {
+            assert!(resource_falls_under(&uri, key), "{uri} under {key}");
+        }
+        for (uri, key) in [
+            (format!("{file}0"), &file),
+            (format!("{blob}0.png"), &blob),
+            (format!("{blob}.png"), &file),
+            ("https://example.com/a".to_string(), &file),
+        ] {
+            assert!(!resource_falls_under(&uri, key), "{uri} not under {key}");
+        }
+    }
+
+    /// A foreign resource falls under its normalized address, whatever fragment it carries,
+    /// and not under a longer address.
+    #[test]
+    fn a_foreign_resource_falls_under_its_normalized_address() {
+        let key = "https://example.com/a";
+        assert!(resource_falls_under("https://example.com/a#part", key));
+        assert!(!resource_falls_under("https://example.com/ab", key));
     }
 
     /// Another scheme's address, and a public path under another app's namespace that is not a

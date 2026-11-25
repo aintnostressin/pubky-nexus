@@ -5,7 +5,9 @@ use crate::errors::EventProcessorError;
 use crate::events::handlers;
 use crate::events::handlers::file::{blob_of, blob_takedown_key};
 use crate::events::inputs::{Reference, ReferenceTarget};
-use crate::events::route::{resolve_reference, resource_takedown_key, route, takedown_key, Routed};
+use crate::events::route::{
+    resource_falls_under, resource_takedown_key, route, takedown_key, Routed,
+};
 use crate::events::v0_to_v1::files::FileMap;
 use nexus_common::media::is_v1_file_id;
 use nexus_common::models::resource::ResourceDetails;
@@ -135,18 +137,16 @@ impl Moderation {
         }
     }
 
-    /// Deletes the `Resource`s the tags on a taken-down file's addresses created: those whose
-    /// [`resource_takedown_key`] is one of `keys`. A file's key is a prefix of each address it
+    /// Deletes the `Resource`s the tags on a taken-down file's addresses created: those that
+    /// [`resource_falls_under`] one of `keys`. A file's key is a prefix of each address it
     /// covers (`…/files/{id}` with a trailing slash or a query, `…/files/{hash}.{ext}` for every
-    /// extension), so the candidates are read by prefix and kept only if they resolve back to it.
+    /// extension), so the candidates are read by prefix and kept only if they fall under it.
     async fn remove_file_resources(keys: &[String]) -> Result<(), EventProcessorError> {
         for key in keys {
             let ids: Vec<String> = ResourceDetails::ids_by_uri_prefix(key)
                 .await?
                 .into_iter()
-                .filter(|(_, uri)| {
-                    resource_takedown_key(uri, &resolve_reference(uri).target).as_ref() == Ok(key)
-                })
+                .filter(|(_, uri)| resource_falls_under(uri, key))
                 .map(|(id, _)| id)
                 .collect();
             if !ids.is_empty() {
@@ -186,6 +186,7 @@ impl Moderation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::route::resolve_reference;
 
     const USER_ID: &str = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
 
