@@ -44,8 +44,8 @@ use pubky::pkarr::SignedPacket;
 use pubky::{ClientId, Keypair, Pubky, PubkyResource, PubkySession, PublicKey};
 use pubky_social_specs::legacy_v0::traits::{HasIdPath, HasPath, HashId, TimestampId};
 use pubky_social_specs::legacy_v0::{
-    post_uri_builder, PubkyAppBookmark, PubkyAppFollow, PubkyAppPost, PubkyAppPostKind,
-    PubkyAppTag, PubkyAppUser,
+    blob_uri_builder, post_uri_builder, PubkyAppBlob, PubkyAppBookmark, PubkyAppFile,
+    PubkyAppFollow, PubkyAppPost, PubkyAppPostKind, PubkyAppTag, PubkyAppUser,
 };
 use pubky_social_specs::PubkyId;
 use pubky_testnet::Testnet;
@@ -455,6 +455,30 @@ impl MigrationTest {
         Ok(())
     }
 
+    /// Uploads `bytes` as a blob, then writes the file record naming it, as
+    /// the app does.
+    pub async fn upload(&self, session: &PubkySession, user: &Keypair, bytes: &[u8]) -> Result<()> {
+        let blob = PubkyAppBlob::new(bytes.to_vec());
+        let hash = blob.create_id();
+        session
+            .storage()
+            .put(PubkyAppBlob::create_path(&hash).as_str(), blob.0)
+            .await?;
+        let file = PubkyAppFile {
+            name: "picture.png".to_string(),
+            content_type: "image/png".to_string(),
+            src: blob_uri_builder(user.public_key().to_z32(), hash),
+            size: bytes.len(),
+            created_at: chrono::Utc::now().timestamp_millis(),
+        };
+        let path = PubkyAppFile::create_path(&file.create_id());
+        session
+            .storage()
+            .put(path.as_str(), serde_json::to_vec(&file)?)
+            .await?;
+        Ok(())
+    }
+
     /// Every public `pubky.app` resource of `user` as `source` sees it: the
     /// read goes to whichever homeserver `source`'s cache names. The profile
     /// comes first, as a copy would write it.
@@ -653,6 +677,18 @@ impl MigrationTest {
             "user": UserCounts::get_by_id(&user_id).await?,
             "posts": posts,
         }))
+    }
+
+    /// `(file records of user in the graph, files nexus stores on disk)`. The
+    /// disk is this test's own, so the second number counts every user's.
+    pub async fn files(&self, user: &Keypair) -> Result<(i64, usize)> {
+        let query = Query::new(
+            "migration_files",
+            "MATCH (f:File {owner_id: $id}) RETURN count(f) AS n",
+        )
+        .param("id", user.public_key().to_z32());
+        let records = fetch_key_from_graph(query, "n").await?.unwrap_or(0);
+        Ok((records, stored_files(self._files.path())?))
     }
 
     /// How many events are waiting in the retry queue.
@@ -863,6 +899,20 @@ fn notification_kind(notification: &Notification) -> String {
         .ok()
         .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
         .unwrap_or_default()
+}
+
+/// How many files named `main`, the stored original of an upload, are under `dir`.
+fn stored_files(dir: &std::path::Path) -> Result<usize> {
+    let mut count = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            count += stored_files(&path)?;
+        } else if path.file_name().is_some_and(|name| name == "main") {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 fn is_profile(path: &str) -> bool {

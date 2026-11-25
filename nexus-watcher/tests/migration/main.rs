@@ -22,6 +22,7 @@
 //! or one test at a time with `cargo test`. Needs the shared Redis and Neo4j
 //! and `TEST_PUBKY_CONNECTION_STRING` like the watcher suite.
 
+mod files;
 mod harness;
 mod hazards;
 mod primary;
