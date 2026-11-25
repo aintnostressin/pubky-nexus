@@ -1,4 +1,5 @@
 use crate::db::graph::Query;
+use crate::db::kv::SortOrder;
 use crate::db::{queries, RedisOps};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -27,8 +28,8 @@ impl UserFollows for Followers {
         queries::get::get_user_followers(user_id)
     }
 
-    fn get_page_query(user_id: &str, skip: usize, limit: usize) -> Query {
-        queries::get::get_user_followers_page(user_id, skip, limit)
+    fn get_page_query(user_id: &str, order: &SortOrder, skip: usize, limit: usize) -> Query {
+        queries::get::get_user_followers_page(user_id, order, skip, limit)
     }
 
     fn get_ids_field_name() -> &'static str {

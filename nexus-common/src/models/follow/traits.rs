@@ -1,5 +1,5 @@
 use crate::db::graph::Query;
-use crate::db::kv::RedisResult;
+use crate::db::kv::{RedisResult, SortOrder};
 use crate::db::queries::get::MAX_QUERY_LIMIT;
 use crate::db::{
     execute_graph_operation, fetch_key_from_graph, fetch_row_from_graph, queries, GraphResult,
@@ -25,18 +25,30 @@ pub trait UserFollows: Sized + RedisOps + AsRef<[String]> + Default {
         execute_graph_operation(query).await
     }
 
-    /// One page of the list, read from the graph in the order of
-    /// [`Self::get_page_query`]. The Redis set is neither read nor written.
-    /// `None` when the user has no node; an existing user past the end of the
-    /// list gets an empty page. Without a `limit` the page holds at most
-    /// [`MAX_QUERY_LIMIT`] ids.
+    /// One page of the list, read from the graph, the oldest follow first: a
+    /// new follow goes to the end, so the pages before it keep their ids. The
+    /// Redis set is neither read nor written. `None` when the user has no
+    /// node; an existing user past the end of the list gets an empty page.
+    /// Without a `limit` the page holds at most [`MAX_QUERY_LIMIT`] ids.
     async fn get_by_id(
         user_id: &str,
         skip: Option<usize>,
         limit: Option<usize>,
     ) -> ModelResult<Option<Self>> {
-        let query =
-            Self::get_page_query(user_id, skip.unwrap_or(0), limit.unwrap_or(MAX_QUERY_LIMIT));
+        let query = Self::get_page_query(
+            user_id,
+            &SortOrder::Ascending,
+            skip.unwrap_or(0),
+            limit.unwrap_or(MAX_QUERY_LIMIT),
+        );
+        Ok(fetch_follow_page(query).await?.map(Self::from_vec))
+    }
+
+    /// The `limit` most recent follows of the list, the newest first, read
+    /// from the graph like [`Self::get_by_id`]. For a caller that cuts the
+    /// list and must not lose the follows made last.
+    async fn get_most_recent(user_id: &str, limit: usize) -> ModelResult<Option<Self>> {
+        let query = Self::get_page_query(user_id, &SortOrder::Descending, 0, limit);
         Ok(fetch_follow_page(query).await?.map(Self::from_vec))
     }
 
@@ -91,8 +103,9 @@ pub trait UserFollows: Sized + RedisOps + AsRef<[String]> + Default {
     /// The whole list, for [`Self::get_from_graph`].
     fn get_query(user_id: &str) -> Query;
 
-    /// One page of the list, for [`Self::get_by_id`].
-    fn get_page_query(user_id: &str, skip: usize, limit: usize) -> Query;
+    /// One page of the list by the time of the follow in `order`, for
+    /// [`Self::get_by_id`] and [`Self::get_most_recent`].
+    fn get_page_query(user_id: &str, order: &SortOrder, skip: usize, limit: usize) -> Query;
 
     fn get_ids_field_name() -> &'static str;
 

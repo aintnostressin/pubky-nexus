@@ -1194,25 +1194,37 @@ pub fn get_user_following(user_id: &str) -> Query {
     .param("user_id", user_id)
 }
 
-/// One page of the users who follow `user_id`, the most recent follow first.
-/// See [`follow_page`] for the row shape.
-pub fn get_user_followers_page(user_id: &str, skip: usize, limit: usize) -> Query {
+/// One page of the followers of `user_id`, by the time of the follow in
+/// `order`. See [`follow_page`] for the row shape.
+pub fn get_user_followers_page(
+    user_id: &str,
+    order: &SortOrder,
+    skip: usize,
+    limit: usize,
+) -> Query {
     follow_page(
         "get_user_followers_page",
         "MATCH (u)<-[f:FOLLOWS]-(other:User)",
         user_id,
+        order,
         skip,
         limit,
     )
 }
 
-/// One page of the users `user_id` follows, the most recent follow first.
-/// See [`follow_page`] for the row shape.
-pub fn get_user_following_page(user_id: &str, skip: usize, limit: usize) -> Query {
+/// One page of the users `user_id` follows, by the time of the follow in
+/// `order`. See [`follow_page`] for the row shape.
+pub fn get_user_following_page(
+    user_id: &str,
+    order: &SortOrder,
+    skip: usize,
+    limit: usize,
+) -> Query {
     follow_page(
         "get_user_following_page",
         "MATCH (u)-[f:FOLLOWS]->(other:User)",
         user_id,
+        order,
         skip,
         limit,
     )
@@ -1220,12 +1232,13 @@ pub fn get_user_following_page(user_id: &str, skip: usize, limit: usize) -> Quer
 
 /// One page of the users `user_id` follows who follow back, in the order of
 /// [`get_user_following_page`]. See [`follow_page`] for the row shape.
-pub fn get_user_friends_page(user_id: &str, skip: usize, limit: usize) -> Query {
+pub fn get_user_friends_page(user_id: &str, order: &SortOrder, skip: usize, limit: usize) -> Query {
     follow_page(
         "get_user_friends_page",
         "MATCH (u)-[f:FOLLOWS]->(other:User)
          WHERE EXISTS { (other)-[:FOLLOWS]->(u) }",
         user_id,
+        order,
         skip,
         limit,
     )
@@ -1234,22 +1247,27 @@ pub fn get_user_friends_page(user_id: &str, skip: usize, limit: usize) -> Query 
 /// Pages the users `follows_match` binds as `other` through the edge `f` of the
 /// user `u`. Returns one row holding `ids` for an existing user, empty past the
 /// end of the list, and no row when the user has no node. The page is cut inside
-/// the subquery, before the ids are collected. The order is `f.indexed_at`
-/// descending, then the id, so follows indexed in the same millisecond keep
-/// their place from one page to the next.
+/// the subquery, before the ids are collected. The order is `f.indexed_at` in
+/// `order`, then the id ascending either way, so follows indexed in the same
+/// millisecond keep their place from one page to the next.
 fn follow_page(
     name: &'static str,
     follows_match: &str,
     user_id: &str,
+    order: &SortOrder,
     skip: usize,
     limit: usize,
 ) -> Query {
+    let direction = match order {
+        SortOrder::Ascending => "ASC",
+        SortOrder::Descending => "DESC",
+    };
     let cypher = format!(
         "MATCH (u:User {{id: $user_id}})
          CALL (u) {{
              {follows_match}
              WITH other.id AS id, f.indexed_at AS indexed_at
-             ORDER BY indexed_at DESC, id ASC
+             ORDER BY indexed_at {direction}, id ASC
              SKIP $skip LIMIT $limit
              RETURN collect(id) AS ids
          }}

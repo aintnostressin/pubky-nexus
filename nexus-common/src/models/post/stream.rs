@@ -706,24 +706,25 @@ impl PostStream {
         skip: Option<usize>,
         limit: Option<usize>,
     ) -> ModelResult<PostKeyStream> {
-        // The first page of the source's list: its 200 most recent follows
-        let custom_limit = Some(200);
+        // The source's list is cut to its most recent follows, so a user past the
+        // cut still sees the posts of the people they followed last
+        const SOURCE_USERS: usize = 200;
         let observer_id = source.get_observer();
         let user_ids = match &source {
             StreamSource::Following { observer_id } => {
-                Following::get_by_id(observer_id, None, custom_limit)
+                Following::get_most_recent(observer_id, SOURCE_USERS)
                     .await?
                     .unwrap_or_default()
                     .0
             }
             StreamSource::Followers { observer_id } => {
-                Followers::get_by_id(observer_id, None, custom_limit)
+                Followers::get_most_recent(observer_id, SOURCE_USERS)
                     .await?
                     .unwrap_or_default()
                     .0
             }
             StreamSource::Friends { observer_id } => {
-                Friends::get_by_id(observer_id, None, custom_limit)
+                Friends::get_most_recent(observer_id, SOURCE_USERS)
                     .await?
                     .unwrap_or_default()
                     .0

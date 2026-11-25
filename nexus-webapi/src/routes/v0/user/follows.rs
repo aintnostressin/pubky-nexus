@@ -21,7 +21,7 @@ pub struct FollowsQuery {
 #[utoipa::path(
     get,
     path = USER_FOLLOWERS_ROUTE,
-    description = "List user's follower IDs, the most recent follow first",
+    description = "List user's follower IDs, the oldest follow first",
     tag = "User",
     params(
         ("user_id" = PubkyId, Path, description = "User Pubky ID"),
@@ -53,7 +53,7 @@ pub async fn user_followers_handler(
 #[utoipa::path(
     get,
     path = USER_FOLLOWING_ROUTE,
-    description = "List user's following IDs, the most recent follow first",
+    description = "List user's following IDs, the oldest follow first",
     tag = "User",
     params(
         ("user_id" = PubkyId, Path, description = "User Pubky ID"),

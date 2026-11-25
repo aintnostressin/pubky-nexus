@@ -1,10 +1,13 @@
-use crate::utils::follows::{A, B, C, D, E, HUB, HUB_FOLLOWERS, HUB_FOLLOWING, HUB_FRIENDS, LONER};
+use crate::utils::follows::{
+    A, B, C, D, E, HUB, HUB_FOLLOWERS, HUB_FOLLOWERS_NEWEST, HUB_FOLLOWING, HUB_FOLLOWING_NEWEST,
+    HUB_FRIENDS, HUB_FRIENDS_NEWEST, LONER,
+};
 use crate::utils::recommended::{DELETED, HOP};
 use crate::utils::{get_request, invalid_get_request, post_request, server::TestServiceServer};
 use anyhow::Result;
 use axum::http::StatusCode;
 use nexus_common::db::RedisOps;
-use nexus_common::models::follow::{Followers, Following, UserFollows};
+use nexus_common::models::follow::{Followers, Following, Friends, UserFollows};
 
 const NON_EXISTING_USER_ID: &str = "qca6wzjg4okp6g1hwr9g8hmx1po1jpoirjfau9ejsws1qz3t7iiy";
 
@@ -335,6 +338,11 @@ async fn follow_ids(endpoint: &str) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Owned copies of `ids`, as the follow models hold them.
+fn ids(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|id| id.to_string()).collect()
+}
+
 /// The `(following, followed_by)` flags of `user_id` as `viewer_id` sees them.
 async fn relationship(user_id: &str, viewer_id: &str) -> Result<(bool, bool)> {
     let res = get_request(&format!("/v0/user/{user_id}/relationship/{viewer_id}")).await?;
@@ -347,19 +355,19 @@ async fn relationship(user_id: &str, viewer_id: &str) -> Result<(bool, bool)> {
 }
 
 #[tokio_shared_rt::test(shared)]
-async fn test_follow_lists_newest_first() -> Result<()> {
+async fn test_follow_lists_oldest_first() -> Result<()> {
     // The fixture creates its follows in an order that matches none of these lists,
-    // forwards or backwards, and its oldest follow belongs to the lowest id: only
-    // the query's own ordering gives them.
+    // forwards or backwards, and none of them is in id order: only the query's own
+    // ordering gives them.
     assert_eq!(
         follow_ids(&format!("/v0/user/{HUB}/followers")).await?,
         HUB_FOLLOWERS,
-        "followers: newest follow first, same-millisecond follows by id"
+        "followers: oldest follow first, same-millisecond follows by id"
     );
     assert_eq!(
         follow_ids(&format!("/v0/user/{HUB}/following")).await?,
         HUB_FOLLOWING,
-        "following: newest follow first, same-millisecond follows by id"
+        "following: oldest follow first, same-millisecond follows by id"
     );
     // B only follows HUB and E is only followed by it: neither is a friend
     assert_eq!(
@@ -367,6 +375,44 @@ async fn test_follow_lists_newest_first() -> Result<()> {
         HUB_FRIENDS,
         "friends: the mutual follows, in the order of the following list"
     );
+
+    Ok(())
+}
+
+/// The read behind the post streams of a follow source: the follows made last,
+/// the newest first, cut to `limit`.
+#[tokio_shared_rt::test(shared)]
+async fn test_most_recent_follows() -> Result<()> {
+    // Ensure the server is running, so the graph connection is initialized
+    TestServiceServer::get_test_server().await;
+
+    let followers = Followers::get_most_recent(HUB, 10).await?;
+    let following = Following::get_most_recent(HUB, 10).await?;
+    let friends = Friends::get_most_recent(HUB, 10).await?;
+    assert_eq!(followers.map(|f| f.0), Some(ids(&HUB_FOLLOWERS_NEWEST)));
+    assert_eq!(following.map(|f| f.0), Some(ids(&HUB_FOLLOWING_NEWEST)));
+    assert_eq!(friends.map(|f| f.0), Some(ids(&HUB_FRIENDS_NEWEST)));
+
+    // A limit below the list keeps the newest follows, a tie cut by id
+    let followers = Followers::get_most_recent(HUB, 1).await?;
+    let following = Following::get_most_recent(HUB, 3).await?;
+    let friends = Friends::get_most_recent(HUB, 2).await?;
+    assert_eq!(
+        followers.map(|f| f.0),
+        Some(ids(&HUB_FOLLOWERS_NEWEST[..1]))
+    );
+    assert_eq!(
+        following.map(|f| f.0),
+        Some(ids(&HUB_FOLLOWING_NEWEST[..3]))
+    );
+    assert_eq!(friends.map(|f| f.0), Some(ids(&HUB_FRIENDS_NEWEST[..2])));
+
+    // An existing user with no follows against a user with no node
+    let loner = Following::get_most_recent(LONER, 10).await?;
+    assert_eq!(loner.map(|f| f.0), Some(Vec::new()));
+    let missing = NON_EXISTING_USER_ID;
+    assert!(Followers::get_most_recent(missing, 10).await?.is_none());
+    assert!(Friends::get_most_recent(missing, 10).await?.is_none());
 
     Ok(())
 }
@@ -380,7 +426,8 @@ async fn test_follow_lists_pages() -> Result<()> {
     ];
 
     for (list, expected) in lists {
-        // Pages of one and of two: every list has a tie, so a page edge falls inside it
+        // Pages of one and of two: followers and following each hold a tie, so a
+        // page edge falls inside it
         for limit in [1, 2] {
             let mut paged = Vec::new();
             for skip in (0..expected.len()).step_by(limit) {
@@ -493,8 +540,6 @@ async fn test_relationship_one_way_and_mutual() -> Result<()> {
 async fn test_follow_reads_ignore_the_follow_sets() -> Result<()> {
     // Ensure the server is running, so the Redis pool is initialized
     TestServiceServer::get_test_server().await;
-
-    let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
 
     // Make the sets disagree with the graph: LONER added as a follower of HUB that
     // HUB follows back, D dropped from HUB's followers, HUB's following set gone
