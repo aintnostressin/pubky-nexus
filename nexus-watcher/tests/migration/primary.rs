@@ -234,3 +234,84 @@ async fn a_copy_the_bulk_stream_reads_after_the_switch_changes_nothing() -> Resu
     );
     Ok(())
 }
+
+/// A user nexus has never met, living on A, mirrors to the primary while
+/// their record still names A, then switches. The bulk stream passes the
+/// mirror over, profile included, so nexus holds no user at all: nothing to
+/// bind, nothing for the per-user read to list, nothing for the sweep or a
+/// recheck to find. What they write on the primary after the switch has no
+/// author to attach to. Demonstrated.
+///
+/// A user who signs up on the primary directly needs no introduction, and
+/// this one is on the primary too. The per-user read should reach a left
+/// user who has no mapping yet once their record names the primary.
+#[tokio_shared_rt::test(shared)]
+#[ignore = "a user nexus never met, passed over on the primary, is read by nobody after they \
+            switch to it; needs the per-user read to reach left users without a mapping"]
+async fn a_stranger_who_mirrors_to_the_primary_is_indexed_after_the_switch() -> Result<()> {
+    let t = MigrationTest::setup().await?;
+    let mover = Keypair::random();
+
+    let device_a = t.device()?;
+    let session_a = t.signup(&device_a, &mover, &t.hs_a, "mover").await?;
+    t.post(&session_a, "first", None).await?;
+
+    // Mirror: an account on the primary, the record back on A, then the copy.
+    let device_p = t.device()?;
+    let session_p = t.signup(&device_p, &mover, &t.primary, "mover").await?;
+    t.switch_record(&device_a, &mover, &t.hs_a).await?;
+    t.write_tree(&session_p, &t.public_tree(&device_a, &mover).await?)
+        .await?;
+    t.index_primary().await?;
+
+    t.switch_record(&device_p, &mover, &t.primary).await?;
+    t.post(&session_p, "second, on the primary", None).await?;
+    t.index_primary().await?;
+    t.catch_up().await?;
+    t.retry().await?;
+
+    assert_eq!(t.live_posts(&mover).await?, 2);
+    Ok(())
+}
+
+/// A user signs up on the primary and nexus reads their posts before any
+/// sweep has bound them. They move to A with a copy and wipe the primary. The
+/// bulk stream decides for a user without a mapping from the record it looks
+/// up, cache first, and its cache still names the primary: the wipe is
+/// applied. With no mapping and nothing left, the user is removed outright,
+/// so a recheck has nobody to move to A. Demonstrated.
+///
+/// The external twin heals with the switch because the user is bound and
+/// only tombstoned. The window here is the time between a signup and the
+/// first sweep that binds the user.
+#[tokio_shared_rt::test(shared)]
+#[ignore = "the wipe of a primary user not bound yet is applied from a cached record after \
+            they moved away; needs a fresh lookup before deletes of an unbound user are applied"]
+async fn a_wipe_of_the_primary_by_a_user_not_bound_yet_is_left_unread_once_they_moved() -> Result<()>
+{
+    let t = MigrationTest::setup().await?;
+    let mover = Keypair::random();
+
+    let device_p = t.device()?;
+    let session_p = t.signup(&device_p, &mover, &t.primary, "mover").await?;
+    t.post(&session_p, "first", None).await?;
+    t.post(&session_p, "second", None).await?;
+    t.index_primary().await?;
+    assert_eq!(
+        (t.bound_name(&mover).await?, t.live_posts(&mover).await?),
+        ("nowhere", 2)
+    );
+
+    let tree = t.public_tree(&device_p, &mover).await?;
+    t.signup_and_copy(&mover, &t.hs_a, "mover", &device_p)
+        .await?;
+    t.delete_tree(&session_p, &tree).await?;
+    t.index_primary().await?;
+
+    assert_eq!(
+        t.live_posts(&mover).await?,
+        2,
+        "the record names A: the wipe is not the primary's to apply"
+    );
+    Ok(())
+}
