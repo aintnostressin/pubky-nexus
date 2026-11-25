@@ -19,8 +19,10 @@ Your job is to find an order of events where that does not hold.
   0 if they were never on B, and every event's content is fetched from the
   homeserver whose stream delivered it.
 - If B is the primary homeserver, its stream is read in bulk with one global
-  cursor and events of users bound elsewhere are skipped for good. That is
-  where the known gap is.
+  cursor and events of users bound elsewhere are skipped for good. A user it
+  skips is left to the primary's per-user read, which the external loop runs
+  for those users only and which reads them once they are bound to the
+  primary. The bulk stream never takes them back.
 
 ## Running
 
@@ -70,7 +72,8 @@ databases behind. If you must use the shared databases, rerun a failure on
   API), `index_external(hs)` (one per-user read), `index_external_paused(hs,
   user)` (a read that has listed its users and waits before fetching `user`
   until `resume()`), `index_primary` (one bulk poll), `catch_up` (a per-user
-  read of the primary, which production does not do yet), `retry` (one pass
+  read of the primary, built as the external loop builds it: for the users
+  its bulk stream left), `retry` (one pass
   of the retry processor, every entry due).
 - The retry queue is in memory, one per test.
 - What nexus holds: `binding`, `bound_to`, `bound_name`, `cursor`,

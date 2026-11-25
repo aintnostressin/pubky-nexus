@@ -131,14 +131,14 @@ async fn recheck_by_a_stranger_changes_nothing() -> Result<()> {
 }
 
 /// A copy to the primary plus a post written only there, both before nexus
-/// notices the switch: the bulk stream passed over them as another
-/// homeserver's events and nothing reads them afterwards. The copy is
-/// harmless, the post is lost.
+/// notices the switch: the bulk stream passes over them as another
+/// homeserver's events and never sees them again. Passing them over leaves the
+/// user to the primary's per-user read, which reads both once the user is
+/// bound to the primary: the copy changes nothing and the post is indexed.
+///
+/// Without that read nothing read them afterwards, and the post was lost.
 #[tokio_shared_rt::test(shared)]
-#[ignore = "the primary's bulk stream skipped the user's events and nothing re-reads them; \
-            needs the per-user catch-up read of the primary"]
-async fn switch_to_the_primary_without_a_catch_up_loses_what_the_bulk_stream_skipped() -> Result<()>
-{
+async fn switch_to_the_primary_reads_per_user_what_the_bulk_stream_skipped() -> Result<()> {
     let t = MigrationTest::setup().await?;
     let mover = Keypair::random();
 
@@ -153,7 +153,7 @@ async fn switch_to_the_primary_without_a_catch_up_loses_what_the_bulk_stream_ski
 
     t.recheck(&mover).await?;
     t.index_primary().await?;
-    t.index_primary().await?;
+    t.catch_up().await?;
     assert_eq!(t.live_posts(&mover).await?, 2);
     Ok(())
 }

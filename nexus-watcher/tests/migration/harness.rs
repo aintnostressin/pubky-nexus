@@ -16,8 +16,8 @@ use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::notification::Notification;
 use nexus_common::models::user::{
     fresh_pkdns_record_of, get_user_homeserver, pkdns_record_of, HomeserverMapping,
-    HomeserverRecheck, PkdnsHomeserverResolver, PkdnsRecord, StaleMapping, UserHsCursor,
-    UserIngestor,
+    HomeserverRecheck, PerUserRead, PkdnsHomeserverResolver, PkdnsRecord, StaleMapping,
+    UserHsCursor, UserIngestor,
 };
 use nexus_common::types::Pagination;
 use nexus_common::utils::test_utils::default_ingestor_tests;
@@ -170,6 +170,7 @@ impl MigrationTest {
     /// One per-user read of every user bound to `hs`.
     pub async fn index_external(&self, hs: &PubkyId) -> Result<()> {
         self.key_based(hs.clone(), self.client.clone())
+            .await?
             .run()
             .await
             .map_err(|e| anyhow!("{e:?}"))
@@ -186,15 +187,16 @@ impl MigrationTest {
             reached: Notify::new(),
             resume: Notify::new(),
         });
-        let run = tokio::spawn(self.key_based(hs.clone(), source.clone()).run());
+        let run = tokio::spawn(self.key_based(hs.clone(), source.clone()).await?.run());
         tokio::time::timeout(Duration::from_secs(30), source.reached.notified())
             .await
             .context("the read never reached the user")?;
         Ok(PausedRead { source, run })
     }
 
-    /// One per-user read of the users bound to the primary: how a user's own
-    /// history there is read after a switch to it.
+    /// One per-user read of the primary, for the users its bulk stream left:
+    /// how a user's own history there is read after a switch to it, and what
+    /// they write there from then on.
     pub async fn catch_up(&self) -> Result<()> {
         self.index_external(&self.primary).await
     }
@@ -266,13 +268,20 @@ impl MigrationTest {
             .map_err(|e| anyhow!("ingesting the user: {e}"))
     }
 
-    fn key_based(
+    async fn key_based(
         &self,
         hs: PubkyId,
         client: Arc<dyn HomeserverClient>,
-    ) -> Arc<KeyBasedEventProcessor> {
-        Arc::new(KeyBasedEventProcessor {
+    ) -> Result<Arc<KeyBasedEventProcessor>> {
+        // As the external loop builds it: the primary is read for the users its bulk read left.
+        let left_by_bulk_read = if hs == self.primary {
+            Some(PerUserRead::starts(&hs).await?)
+        } else {
+            None
+        };
+        Ok(Arc::new(KeyBasedEventProcessor {
             homeserver_id: hs,
+            left_by_bulk_read,
             limit: 100,
             event_handler: self.handler.clone(),
             client,
@@ -283,7 +292,7 @@ impl MigrationTest {
             // One read at a time, each a full pass: nothing to resume.
             user_resume_points: Arc::new(UserResumePoints::default()),
             budget: KEY_BASED_RUN_BUDGET,
-        })
+        }))
     }
 
     // ----- users, through their own devices -----

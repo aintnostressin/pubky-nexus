@@ -7,11 +7,12 @@ use pubky::Keypair;
 use crate::harness::MigrationTest;
 
 /// External to primary. The bulk stream skips the user's events while the
-/// edge still names the old homeserver, so after the switch the user's own
-/// history on the primary has to be read per user before the bulk stream
-/// covers the user.
+/// edge still names the old homeserver, which leaves the user to the primary's
+/// per-user read: after the switch it reads their own history on the primary,
+/// and everything they write there later. The bulk stream never takes them
+/// back.
 #[tokio_shared_rt::test(shared)]
-async fn external_to_primary_catches_up_then_the_bulk_stream_takes_over() -> Result<()> {
+async fn external_to_primary_is_read_per_user_from_then_on() -> Result<()> {
     let t = MigrationTest::setup().await?;
     let mover = Keypair::random();
 
@@ -46,17 +47,21 @@ async fn external_to_primary_catches_up_then_the_bulk_stream_takes_over() -> Res
         "the copy is not indexed twice"
     );
 
-    // From here the bulk stream alone covers the user.
+    // The bulk stream passes the user over from here on; the per-user read
+    // covers them.
     t.post(&session_p, "third, on the primary", None).await?;
     t.index_primary().await?;
+    assert_eq!(t.live_posts(&mover).await?, 2, "left to the per-user read");
+    t.catch_up().await?;
     assert_eq!(t.live_posts(&mover).await?, 3);
     Ok(())
 }
 
-/// Primary to external and back. The return reads the user's own history on
-/// the primary again from their per-user cursor there, which the idempotent
-/// handlers make safe; a cursor floor stored when leaving would make that read
-/// shorter and is a later optimisation.
+/// Primary to external and back. Once the user has left, the bulk stream
+/// passes their events over and leaves them to the primary's per-user read,
+/// which starts after the cursor the bulk stream had reached: what it applied
+/// before is not read again. The return is read per user from there, and so
+/// is everything they write on the primary afterwards.
 #[tokio_shared_rt::test(shared)]
 async fn primary_to_external_and_back() -> Result<()> {
     let t = MigrationTest::setup().await?;
@@ -112,6 +117,8 @@ async fn primary_to_external_and_back() -> Result<()> {
 
     t.post(&session_p, "fourth, home again", None).await?;
     t.index_primary().await?;
+    assert_eq!(t.live_posts(&mover).await?, 3, "left to the per-user read");
+    t.catch_up().await?;
     assert_eq!(t.live_posts(&mover).await?, 4);
     Ok(())
 }
