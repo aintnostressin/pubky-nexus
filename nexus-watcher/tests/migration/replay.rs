@@ -137,17 +137,8 @@ async fn a_copy_read_per_user_on_the_primary_counts_and_notifies_nothing_twice()
 #[tokio_shared_rt::test(shared)]
 #[ignore = "a replayed follow is dated again; needs the follow's time set only when it is created"]
 async fn a_copied_follow_keeps_its_time() -> Result<()> {
-    let t = MigrationTest::setup().await?;
-    let pair = Neighbours::settle(&t).await?;
-    let before = t.edge_times(&pair.mover, "FOLLOWS").await?;
-    assert_eq!(before.len(), 1);
-
-    t.signup_and_copy(&pair.mover, &t.hs_b, "mover", &pair.device_a)
-        .await?;
-    t.recheck(&pair.mover).await?;
-    t.index_external(&t.hs_b).await?;
-
-    assert_eq!(t.edge_times(&pair.mover, "FOLLOWS").await?, before);
+    let (before, after) = times_around_a_copy("FOLLOWS").await?;
+    assert_eq!(after, before);
     Ok(())
 }
 
@@ -159,16 +150,23 @@ async fn a_copied_follow_keeps_its_time() -> Result<()> {
 #[tokio_shared_rt::test(shared)]
 #[ignore = "a replayed bookmark is dated again; needs the bookmark's time kept when it exists"]
 async fn a_copied_bookmark_keeps_its_time() -> Result<()> {
+    let (before, after) = times_around_a_copy("BOOKMARKED").await?;
+    assert_eq!(after, before);
+    Ok(())
+}
+
+/// When nexus indexed the mover's one relationship of `kind`, before their
+/// copy is read on B and after.
+async fn times_around_a_copy(kind: &str) -> Result<(Vec<(String, i64)>, Vec<(String, i64)>)> {
     let t = MigrationTest::setup().await?;
     let pair = Neighbours::settle(&t).await?;
-    let before = t.edge_times(&pair.mover, "BOOKMARKED").await?;
-    assert_eq!(before.len(), 1);
+    let before = t.edge_times(&pair.mover, kind).await?;
+    ensure!(before.len() == 1, "the mover has one such relationship");
 
     t.signup_and_copy(&pair.mover, &t.hs_b, "mover", &pair.device_a)
         .await?;
     t.recheck(&pair.mover).await?;
     t.index_external(&t.hs_b).await?;
 
-    assert_eq!(t.edge_times(&pair.mover, "BOOKMARKED").await?, before);
-    Ok(())
+    Ok((before, t.edge_times(&pair.mover, kind).await?))
 }

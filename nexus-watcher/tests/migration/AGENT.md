@@ -57,7 +57,8 @@ databases behind. If you must use the shared databases, rerun a failure on
 
 - Users: `device()` is one SDK client with its own pkarr cache, so an old
   device keeps resolving the old homeserver for an hour, as in production.
-  `signup`, `session`, `post`, `follow`, `tag`, `write_profile`,
+  `signup`, `session`, `post`, `follow`, `tag`, `bookmark`, `upload` (a blob
+  and the file record naming it), `write_profile`,
   `delete_profile`, `public_tree` (read through a device), `write_tree` (the
   copy), `delete_tree` (the wipe), `switch_record`,
   `publish_without_homeserver`. Two fixtures bundle the fixed parts of a
@@ -77,7 +78,11 @@ databases behind. If you must use the shared databases, rerun a failure on
   of the retry processor, every entry due).
 - The retry queue is in memory, one per test.
 - What nexus holds: `binding`, `bound_to`, `bound_name`, `cursor`,
-  `bulk_cursor`, `live_posts`, `profile_state`, `notifications`.
+  `bulk_cursor`, `live_posts`, `profile_state`, `notifications`,
+  `notification_times`, `post_times` (each post's place in the timelines),
+  `edge_times` (when a follow, tag or bookmark was indexed), `counts` (what
+  nexus serves for the user and each of their posts), `files` (records in the
+  graph, files on disk).
 
 Assert outcomes, not mechanisms: what is indexed, which homeserver the user is
 bound to, cursors, notification kinds. Never the resolver's internal flags.
