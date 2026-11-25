@@ -206,3 +206,68 @@ async fn test_follow_put_recovers_missing_indexes() -> Result<()> {
 
     Ok(())
 }
+
+/// A follow list is ordered by the time each follow was last indexed, and a PUT
+/// of a follow that already exists (a retry, a replayed batch) indexes it again:
+/// that follow moves to the newest end of the list. This pins the limit the
+/// follow page query documents; it fails once `create_follow` keeps the time of
+/// the first PUT, and that note then goes.
+#[tokio_shared_rt::test(shared)]
+async fn test_follow_put_again_moves_the_follow_to_the_end_of_the_list() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+
+    let user = |name: &str| PubkyAppUser {
+        bio: Some("test_follow_put_again_moves_the_follow".to_string()),
+        image: None,
+        links: None,
+        name: name.to_string(),
+        status: None,
+    };
+    let follower_kp = Keypair::random();
+    let follower_id = test
+        .create_user(&follower_kp, &user("Watcher:PutAgain:Follower"))
+        .await?;
+    let first_kp = Keypair::random();
+    let first_id = test
+        .create_user(&first_kp, &user("Watcher:PutAgain:First"))
+        .await?;
+    let second_kp = Keypair::random();
+    let second_id = test
+        .create_user(&second_kp, &user("Watcher:PutAgain:Second"))
+        .await?;
+
+    // Two follows in different milliseconds, so the order is by time, not by id
+    let apart = std::time::Duration::from_millis(5);
+    test.create_follow(&follower_kp, &first_id).await?;
+    tokio::time::sleep(apart).await;
+    test.create_follow(&follower_kp, &second_id).await?;
+
+    let following = Following::get_by_id(&follower_id, None, None).await?;
+    assert_eq!(
+        following.map(|f| f.0),
+        Some(vec![first_id.clone(), second_id.clone()]),
+        "the oldest follow comes first"
+    );
+
+    // The first follow is PUT again, as a retry would
+    tokio::time::sleep(apart).await;
+    follow::sync_put(
+        PubkyId::from(follower_kp.clone()),
+        PubkyId::from(first_kp.clone()),
+        &default_ingestor_tests(),
+    )
+    .await?;
+
+    let following = Following::get_by_id(&follower_id, None, None).await?;
+    assert_eq!(
+        following.map(|f| f.0),
+        Some(vec![second_id.clone(), first_id.clone()]),
+        "the follow indexed again is now the newest"
+    );
+
+    test.cleanup_user(&follower_kp).await?;
+    test.cleanup_user(&first_kp).await?;
+    test.cleanup_user(&second_kp).await?;
+
+    Ok(())
+}
