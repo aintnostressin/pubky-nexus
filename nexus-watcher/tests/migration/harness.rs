@@ -10,13 +10,15 @@ use anyhow::{anyhow, ensure, Context, Result};
 use nexus_common::config::EventRetryConfig;
 use nexus_common::db::graph::Query;
 use nexus_common::db::{
-    fetch_key_from_graph, fetch_row_from_graph, PubkyClientError, PubkyClientResult, PubkyConnector,
+    fetch_all_rows_from_graph, fetch_key_from_graph, fetch_row_from_graph, PubkyClientError,
+    PubkyClientResult, PubkyConnector,
 };
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::notification::Notification;
+use nexus_common::models::post::PostCounts;
 use nexus_common::models::user::{
     fresh_pkdns_record_of, get_user_homeserver, pkdns_record_of, HomeserverMapping,
-    HomeserverRecheck, PerUserRead, PkdnsHomeserverResolver, PkdnsRecord, StaleMapping,
+    HomeserverRecheck, PerUserRead, PkdnsHomeserverResolver, PkdnsRecord, StaleMapping, UserCounts,
     UserHsCursor, UserIngestor,
 };
 use nexus_common::types::Pagination;
@@ -42,7 +44,8 @@ use pubky::pkarr::SignedPacket;
 use pubky::{ClientId, Keypair, Pubky, PubkyResource, PubkySession, PublicKey};
 use pubky_social_specs::legacy_v0::traits::{HasIdPath, HasPath, HashId, TimestampId};
 use pubky_social_specs::legacy_v0::{
-    post_uri_builder, PubkyAppFollow, PubkyAppPost, PubkyAppPostKind, PubkyAppTag, PubkyAppUser,
+    post_uri_builder, PubkyAppBookmark, PubkyAppFollow, PubkyAppPost, PubkyAppPostKind,
+    PubkyAppTag, PubkyAppUser,
 };
 use pubky_social_specs::PubkyId;
 use pubky_testnet::Testnet;
@@ -439,6 +442,19 @@ impl MigrationTest {
         Ok(())
     }
 
+    pub async fn bookmark(&self, session: &PubkySession, uri: String) -> Result<()> {
+        let bookmark = PubkyAppBookmark {
+            uri,
+            created_at: chrono::Utc::now().timestamp_millis(),
+        };
+        let path = PubkyAppBookmark::create_path(&bookmark.create_id());
+        session
+            .storage()
+            .put(path.as_str(), serde_json::to_vec(&bookmark)?)
+            .await?;
+        Ok(())
+    }
+
     /// Every public `pubky.app` resource of `user` as `source` sees it: the
     /// read goes to whichever homeserver `source`'s cache names. The profile
     /// comes first, as a copy would write it.
@@ -586,6 +602,57 @@ impl MigrationTest {
         .await?
         .ok_or_else(|| anyhow!("user node missing"))?;
         Ok((row.get("deleted")?, row.get("name")?))
+    }
+
+    /// `user`'s posts as nexus holds them, by id: `(id, deleted, indexed_at)`.
+    /// The time is the post's place in every timeline.
+    pub async fn post_times(&self, user: &Keypair) -> Result<Vec<(String, bool, i64)>> {
+        let query = Query::new(
+            "migration_post_times",
+            "MATCH (u:User {id: $id})-[:AUTHORED]->(p:Post)
+             RETURN p.id AS id, coalesce(p.deleted, false) AS deleted, p.indexed_at AS at
+             ORDER BY id",
+        )
+        .param("id", user.public_key().to_z32());
+        let mut posts = Vec::new();
+        for row in fetch_all_rows_from_graph(query).await? {
+            posts.push((row.get("id")?, row.get("deleted")?, row.get("at")?));
+        }
+        Ok(posts)
+    }
+
+    /// What `user` points at with a relationship of `kind` (`FOLLOWS`,
+    /// `TAGGED`, `BOOKMARKED`) and when nexus indexed each, by target. A tag
+    /// is named by its label too.
+    pub async fn edge_times(&self, user: &Keypair, kind: &str) -> Result<Vec<(String, i64)>> {
+        let query = Query::new(
+            "migration_edge_times",
+            "MATCH (u:User {id: $id})-[r]->(n)
+             WHERE type(r) = $kind
+             RETURN coalesce(r.label + ' on ', '') + n.id AS target, r.indexed_at AS at
+             ORDER BY target",
+        )
+        .param("id", user.public_key().to_z32())
+        .param("kind", kind.to_string());
+        let mut edges = Vec::new();
+        for row in fetch_all_rows_from_graph(query).await? {
+            edges.push((row.get("target")?, row.get("at")?));
+        }
+        Ok(edges)
+    }
+
+    /// The counts nexus serves for `user` and for each of their posts.
+    pub async fn counts(&self, user: &Keypair) -> Result<serde_json::Value> {
+        let user_id = user.public_key().to_z32();
+        let mut posts = serde_json::Map::new();
+        for (post_id, _, _) in self.post_times(user).await? {
+            let counts = PostCounts::get_by_id(&user_id, &post_id).await?;
+            posts.insert(post_id, serde_json::to_value(counts)?);
+        }
+        Ok(serde_json::json!({
+            "user": UserCounts::get_by_id(&user_id).await?,
+            "posts": posts,
+        }))
     }
 
     /// How many events are waiting in the retry queue.
