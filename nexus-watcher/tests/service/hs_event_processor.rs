@@ -505,6 +505,37 @@ async fn test_events_of_a_left_user_without_a_mapping_are_processed() -> Result<
     Ok(())
 }
 
+/// The resolver, or another user's event that mentions them, can map a left user while a run
+/// is on, and the per-user read then reads them from its next tick. The run stops applying
+/// their events at their next one, not at its end: the two reads applying the same events at
+/// once could put an older one after a newer one.
+#[tokio_shared_rt::test(shared)]
+async fn test_a_left_user_mapped_during_a_run_is_passed_over_from_their_next_event() -> Result<()> {
+    setup().await?;
+    let store = new_in_memory_store();
+    let handler = create_mock_handler(Ok(()), None);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor_at_cursor(7, store, handler.clone(), shutdown_rx).await?;
+    let hs_id = processor.homeserver.id.to_string();
+    let user_id = random_user_id();
+    PerUserRead::leave(&hs_id, &user_id, 3).await?;
+    let put = |post_id: &str| format!("PUT {}", post_uri_builder(user_id.clone(), post_id.into()));
+
+    processor
+        .process_event_lines(vec![put("before"), "cursor: 9".to_string()])
+        .await?;
+    create_user_hosted_on(&user_id, Some(&hs_id)).await;
+    processor
+        .process_event_lines(vec![put("after"), "cursor: 11".to_string()])
+        .await?;
+
+    assert_eq!(
+        handler.get_handled_uris(),
+        [post_uri_builder(user_id.clone(), "before".into())]
+    );
+    Ok(())
+}
+
 // ============================================================================
 // HOSTED_BY guard: users with no HOSTED_BY edge
 // A missing edge is the common case (e.g. before the resolver has run) and must
