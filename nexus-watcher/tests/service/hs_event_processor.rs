@@ -117,7 +117,7 @@ fn build_processor_with_client(
         client: Arc::new(client),
         shutdown_rx,
         retry_scheduler,
-        hs_mapping_cache: Default::default(),
+        bulk_read_cache: Default::default(),
     })
 }
 
@@ -170,7 +170,7 @@ async fn build_processor_at_cursor_with_client(
         client: Arc::new(client),
         shutdown_rx,
         retry_scheduler,
-        hs_mapping_cache: Default::default(),
+        bulk_read_cache: Default::default(),
     }))
 }
 
@@ -196,7 +196,7 @@ fn processor_with_client(
                 transient_ms: 10_000,
             },
         )),
-        hs_mapping_cache: Default::default(),
+        bulk_read_cache: Default::default(),
     })
 }
 

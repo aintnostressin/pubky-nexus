@@ -184,7 +184,7 @@ pub struct HsEventProcessor {
     /// Entries are deliberately never refreshed within a run: once a user's mapping
     /// is resolved, the same decision is reused for the rest of the batch even if the
     /// resolver realigns the underlying edge mid-run. The cache is dropped when the run ends.
-    pub hs_mapping_cache: Mutex<HashMap<String, BulkRead>>,
+    pub bulk_read_cache: Mutex<HashMap<String, BulkRead>>,
 }
 
 #[async_trait::async_trait]
@@ -283,7 +283,7 @@ impl HsEventProcessor {
     /// Decides and caches how this run reads `user_id`. A user without a `HOSTED_BY` edge is
     /// classified by the homeserver they publish.
     async fn bulk_read(&self, user_id: &PubkyId) -> Result<BulkRead, EventProcessorError> {
-        if let Some(read) = self.hs_mapping_cache.lock().await.get(user_id.as_ref()) {
+        if let Some(read) = self.bulk_read_cache.lock().await.get(user_id.as_ref()) {
             return Ok(read.clone());
         }
 
@@ -298,7 +298,7 @@ impl HsEventProcessor {
             .await?;
         let read = BulkRead { mapping, per_user };
 
-        self.hs_mapping_cache
+        self.bulk_read_cache
             .lock()
             .await
             .insert(user_id.as_ref().to_string(), read.clone());

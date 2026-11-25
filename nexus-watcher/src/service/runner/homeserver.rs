@@ -71,7 +71,7 @@ impl TEventProcessorRunner for HsEventProcessorRunner {
             client: self.client.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
             retry_scheduler: self.retry_scheduler.clone(),
-            hs_mapping_cache: Default::default(),
+            bulk_read_cache: Default::default(),
         }))
     }
 

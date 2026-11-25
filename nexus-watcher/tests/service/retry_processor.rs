@@ -2717,7 +2717,7 @@ async fn primary_runner(
                 transient_ms: TRANSIENT_MS,
             },
         )),
-        hs_mapping_cache: Default::default(),
+        bulk_read_cache: Default::default(),
     }))
 }
 
