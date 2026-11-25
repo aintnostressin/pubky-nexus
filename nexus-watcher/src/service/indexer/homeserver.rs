@@ -199,8 +199,8 @@ pub struct HsEventProcessor {
     /// is resolved, the same decision is reused for the rest of the batch even if the
     /// resolver realigns the underlying edge mid-run. The cache is dropped when the run ends.
     ///
-    /// The one decision replaced is [`AppliedBy::BulkReadUntilMapped`], once the user has
-    /// an edge.
+    /// The one exception is a user decided [`AppliedBy::BulkReadUntilMapped`]: each later
+    /// event of theirs reads their edge, and the decision is made again once they have one.
     pub bulk_read_cache: Mutex<HashMap<String, BulkRead>>,
 }
 
