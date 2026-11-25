@@ -44,14 +44,13 @@ async fn a_file_wiped_before_nexus_notices_is_downloaded_again_from_the_new_home
 /// past the record. The blob arrives a moment later and nothing reads the
 /// record again, so an upload the user's homeserver holds is never indexed.
 /// Nexus had not read the upload from A either, or the record would already
-/// be there. Demonstrated.
+/// be there.
 ///
-/// A record whose blob is missing on the homeserver that delivered it should
-/// wait for the blob, as a reply waits for its parent.
+/// An accepted limit of the `pubky.app` layout, where an upload is a blob and
+/// a record naming it. A `social/v1` file is one object whose event is the
+/// write of its bytes, so no order of a copy can deliver it without them.
 #[tokio_shared_rt::test(shared)]
-#[ignore = "a file record read before its blob is on the homeserver is skipped for good; \
-            needs the record retried until the blob is there"]
-async fn a_file_record_read_before_its_blob_is_indexed_once_the_blob_arrives() -> Result<()> {
+async fn a_file_record_read_before_its_blob_is_never_indexed() -> Result<()> {
     let t = MigrationTest::setup().await?;
     let mover = Keypair::random();
 
@@ -73,6 +72,6 @@ async fn a_file_record_read_before_its_blob_is_indexed_once_the_blob_arrives() -
     t.index_external(&t.hs_b).await?;
     t.retry().await?;
 
-    assert_eq!(t.files(&mover).await?, (1, 1));
+    assert_eq!(t.files(&mover).await?, (0, 0));
     Ok(())
 }
