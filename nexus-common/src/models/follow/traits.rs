@@ -30,6 +30,10 @@ pub trait UserFollows: Sized + RedisOps + AsRef<[String]> + Default {
     /// Redis set is neither read nor written. `None` when the user has no
     /// node; an existing user past the end of the list gets an empty page.
     /// Without a `limit` the page holds at most [`MAX_QUERY_LIMIT`] ids.
+    ///
+    /// The query caps `skip` at 10,000, and the routes refuse a larger one, so
+    /// the follows past that many and one page, the newest of a longer list,
+    /// cannot be reached by paging.
     async fn get_by_id(
         user_id: &str,
         skip: Option<usize>,
