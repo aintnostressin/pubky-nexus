@@ -17,9 +17,13 @@ pub struct ResourceDetails {
 }
 
 impl ResourceDetails {
-    /// The id and address of every Resource whose address starts with `prefix`.
-    pub async fn ids_by_uri_prefix(prefix: &str) -> ModelResult<Vec<(String, String)>> {
-        let rows = fetch_all_rows_from_graph(queries::get::resources_by_uri_prefix(prefix)).await?;
+    /// The id and address of every Resource of `scheme` whose address starts with `prefix`.
+    pub async fn ids_by_uri_prefix(
+        scheme: &str,
+        prefix: &str,
+    ) -> ModelResult<Vec<(String, String)>> {
+        let rows = fetch_all_rows_from_graph(queries::get::resources_by_uri_prefix(scheme, prefix))
+            .await?;
         rows.iter()
             .map(|row| Ok((row.get("resource_id")?, row.get("uri")?)))
             .collect()

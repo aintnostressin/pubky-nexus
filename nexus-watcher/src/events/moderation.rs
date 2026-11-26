@@ -142,7 +142,8 @@ impl Moderation {
     /// Deletes the `Resource`s the tags on a taken-down file's addresses created: those that
     /// [`resource_falls_under`] one of `keys`. A file's key is a prefix of each address it
     /// covers (`…/files/{id}` with a trailing slash or a query, `…/files/{hash}.{ext}` for every
-    /// extension), so the candidates are read by prefix and kept only if they fall under it.
+    /// extension), so the candidates of its scheme are read by prefix and kept only if they fall
+    /// under it.
     /// The `Resource` at `uri`, the address the moderator tagged, goes too, even in a spelling
     /// the prefix read misses (a `:port`).
     async fn remove_file_resources(uri: &str, keys: &[String]) -> Result<(), EventProcessorError> {
@@ -151,8 +152,9 @@ impl Moderation {
             .into_iter()
             .collect();
         for key in keys {
+            let (_, scheme) = normalize_uri(key).map_err(EventProcessorError::generic)?;
             ids.extend(
-                ResourceDetails::ids_by_uri_prefix(key)
+                ResourceDetails::ids_by_uri_prefix(&scheme, key)
                     .await?
                     .into_iter()
                     .filter(|(_, uri)| resource_falls_under(uri, key))

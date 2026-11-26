@@ -95,6 +95,44 @@ async fn test_homeserver_put_resource_tag_external_uri() -> Result<()> {
     Ok(())
 }
 
+/// A `pubky.app` tag caps no URI length, so a tag on a URL longer than the 8 kB a Neo4j RANGE
+/// index key may hold is indexed too: no index is kept on a `Resource`'s address.
+#[tokio_shared_rt::test(shared)]
+async fn test_homeserver_put_resource_tag_on_a_url_over_8_kb() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+
+    let user_kp = Keypair::random();
+    let tagger = PubkyAppUser {
+        bio: Some("test_resource_tag_long_url".to_string()),
+        image: None,
+        links: None,
+        name: "Watcher:ResourceTag:LongUrl".to_string(),
+        status: None,
+    };
+    test.create_user(&user_kp, &tagger).await?;
+
+    let target_uri = format!("https://example.com/search?q={}", "a".repeat(9_000));
+    let tag = PubkyAppTag {
+        uri: target_uri.clone(),
+        label: "longurl".to_string(),
+        created_at: Utc::now().timestamp_millis(),
+    };
+    let tag_path = tag.hs_path();
+    test.put(&user_kp, &tag_path, &tag).await?;
+
+    let resource_id = compute_resource_id(&target_uri);
+    assert!(
+        find_resource_tag(&resource_id, "longurl").await?.is_some(),
+        "the tag on a long URL must be indexed"
+    );
+
+    test.del(&user_kp, &tag_path).await?;
+    TagSearch::del_from_index("longurl").await?;
+    test.cleanup_user(&user_kp).await?;
+
+    Ok(())
+}
+
 /// A retried put finds the edge already written (`Updated`) and adds the label to
 /// the tag search index again, so a lost index write heals.
 #[tokio_shared_rt::test(shared)]
