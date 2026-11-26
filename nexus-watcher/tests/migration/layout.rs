@@ -115,13 +115,19 @@ impl Layout {
 /// Declares each named scenario of the calling module, an
 /// `async fn(Layout) -> Result<()>`, as two tests of its name:
 /// `pubky_app::<name>` and `social_v1::<name>`. A scenario that holds in
-/// `pubky.app` only goes under `#[ignore_in_social_v1 = "what must exist"]`,
-/// which ignores its `social/v1` test for that reason.
+/// neither goes under `#[ignore = "what must exist"]`, one that holds in
+/// `pubky.app` only under `#[ignore_in_social_v1 = "what must exist"]`, which
+/// ignores its `social/v1` test for that reason.
 macro_rules! in_each_layout {
-    ($($(#[ignore_in_social_v1 = $reason:literal])? $scenario:ident),+ $(,)?) => {
+    ($(
+        $(#[ignore = $always:literal])?
+        $(#[ignore_in_social_v1 = $reason:literal])?
+        $scenario:ident
+    ),+ $(,)?) => {
         mod pubky_app {
             $(
                 #[tokio_shared_rt::test(shared)]
+                $(#[ignore = $always])?
                 async fn $scenario() -> anyhow::Result<()> {
                     super::$scenario($crate::layout::Layout::PubkyApp).await
                 }
@@ -131,6 +137,7 @@ macro_rules! in_each_layout {
         mod social_v1 {
             $(
                 #[tokio_shared_rt::test(shared)]
+                $(#[ignore = $always])?
                 $(#[ignore = $reason])?
                 async fn $scenario() -> anyhow::Result<()> {
                     super::$scenario($crate::layout::Layout::SocialV1).await
@@ -145,6 +152,17 @@ fn object(path: String, body: &impl serde::Serialize) -> Result<Object> {
     Ok((path, serde_json::to_vec(body)?))
 }
 
+/// `body` stored under the id just minted for it, at the path `path_of`
+/// gives that id.
+fn minted(
+    id: String,
+    path_of: fn(&str) -> String,
+    body: &impl serde::Serialize,
+) -> Result<(String, Object)> {
+    let stored = object(path_of(&id), body)?;
+    Ok((id, stored))
+}
+
 const BIO: &str = "migration suite";
 
 mod pubky_app {
@@ -155,7 +173,7 @@ mod pubky_app {
         PubkyAppPost, PubkyAppPostKind, PubkyAppTag, PubkyAppUser, APP_PATH, PROTOCOL, PUBLIC_PATH,
     };
 
-    use super::{object, Object, BIO};
+    use super::{minted, object, Object, BIO};
 
     pub fn tree_root(user_id: String) -> String {
         [PROTOCOL, &user_id, PUBLIC_PATH, APP_PATH].concat()
@@ -188,9 +206,7 @@ mod pubky_app {
 
     pub fn post(text: &str, parent: Option<String>) -> Result<(String, Object)> {
         let post = short(text, parent);
-        let id = post.create_id();
-        let stored = object(post_path(&id), &post)?;
-        Ok((id, stored))
+        minted(post.create_id(), post_path, &post)
     }
 
     pub fn post_edit(post_id: &str, text: &str) -> Result<Object> {
@@ -243,7 +259,7 @@ mod social_v1 {
         PubkySocialPostKind, PubkySocialTag, PubkySocialUser, Root,
     };
 
-    use super::{object, Object, BIO};
+    use super::{minted, object, Object, BIO};
 
     pub fn tree_root(user_id: String) -> String {
         list_prefix_builder(user_id)
@@ -272,9 +288,7 @@ mod social_v1 {
 
     pub fn post(text: &str, parent: Option<String>) -> Result<(String, Object)> {
         let post = note(text, parent);
-        let id = post.create_id();
-        let stored = object(post_path(&id), &post)?;
-        Ok((id, stored))
+        minted(post.create_id(), post_path, &post)
     }
 
     /// A later version of the post: its edit id is a timestamp id minted now.

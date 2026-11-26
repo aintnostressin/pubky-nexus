@@ -195,44 +195,26 @@ async fn a_copied_post_that_was_edited_tells_its_repliers_nothing_again(
 /// only when the relationship is new. The influencer rankings count followers
 /// by that time, so after a move everyone the mover follows gains a follower
 /// "today". A tag keeps its time, which is set only when it is created.
-/// Demonstrated.
-#[tokio_shared_rt::test(shared)]
-#[ignore = "a replayed follow is dated again; needs the follow's time set only when it is created"]
-async fn a_copied_follow_keeps_its_time() -> Result<()> {
-    let (before, after) = times_around_a_copy(Layout::PubkyApp, "FOLLOWS").await?;
-    assert_eq!(after, before);
-    Ok(())
-}
-
-/// The same follow written in `social/v1`: it is dated again as well, by the
-/// same handler. Demonstrated.
-#[tokio_shared_rt::test(shared)]
-#[ignore = "a replayed follow is dated again; needs the follow's time set only when it is created"]
-async fn a_copied_social_v1_follow_keeps_its_time() -> Result<()> {
-    let (before, after) = times_around_a_copy(Layout::SocialV1, "FOLLOWS").await?;
-    assert_eq!(after, before);
-    Ok(())
+/// Demonstrated in both layouts, whose follows go through the same handler.
+async fn a_copied_follow_keeps_its_time(layout: Layout) -> Result<()> {
+    a_copy_keeps_the_time_of(layout, "FOLLOWS").await
 }
 
 /// The copied bookmark is the bookmark nexus already holds, but its time
 /// becomes the time of the read: the handler stamps every PUT and writes the
 /// stream's score again. A copy writes bookmarks in path order, which is the
 /// order of their hashes, so after a move the user's bookmark list is dated
-/// today and shuffled. Demonstrated.
+/// today and shuffled. Demonstrated. `pubky.app` only: a `social/v1` bookmark
+/// is private and never reaches nexus.
 #[tokio_shared_rt::test(shared)]
 #[ignore = "a replayed bookmark is dated again; needs the bookmark's time kept when it exists"]
 async fn a_copied_bookmark_keeps_its_time() -> Result<()> {
-    let (before, after) = times_around_a_copy(Layout::PubkyApp, "BOOKMARKED").await?;
-    assert_eq!(after, before);
-    Ok(())
+    a_copy_keeps_the_time_of(Layout::PubkyApp, "BOOKMARKED").await
 }
 
-/// When nexus indexed the mover's one relationship of `kind`, before their
-/// copy is read on B and after.
-async fn times_around_a_copy(
-    layout: Layout,
-    kind: &str,
-) -> Result<(Vec<(String, i64)>, Vec<(String, i64)>)> {
+/// Nexus indexed the mover's one relationship of `kind` once: the read of
+/// their copy on B leaves its time as it was.
+async fn a_copy_keeps_the_time_of(layout: Layout, kind: &str) -> Result<()> {
     let t = MigrationTest::setup_in(layout).await?;
     let pair = Neighbours::settle(&t).await?;
     let before = t.edge_times(&pair.mover, kind).await?;
@@ -243,7 +225,8 @@ async fn times_around_a_copy(
     t.recheck(&pair.mover).await?;
     t.index_external(&t.hs_b).await?;
 
-    Ok((before, t.edge_times(&pair.mover, kind).await?))
+    assert_eq!(t.edge_times(&pair.mover, kind).await?, before);
+    Ok(())
 }
 
 in_each_layout! {
@@ -253,4 +236,7 @@ in_each_layout! {
                              repliers told again; needs only the newest version of a post \
                              applied (ADR 0003, E1)"]
     a_copied_post_that_was_edited_tells_its_repliers_nothing_again,
+    #[ignore = "a replayed follow is dated again; needs the follow's time set only when it is \
+                created"]
+    a_copied_follow_keeps_its_time,
 }

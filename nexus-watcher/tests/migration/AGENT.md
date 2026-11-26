@@ -68,8 +68,9 @@ databases behind. If you must use the shared databases, rerun a failure on
   layout, so a scenario is one `async fn(Layout) -> Result<()>` that reads
   the same for both. `in_each_layout! { scenario, ... }` at the end of a
   file declares each as two tests, `pubky_app::<scenario>` and
-  `social_v1::<scenario>`; put `#[ignore_in_social_v1 = "what must exist"]`
-  on one that holds in `pubky.app` only. `layout.rs` builds the objects,
+  `social_v1::<scenario>`; put `#[ignore = "what must exist"]` on one that
+  holds in neither, `#[ignore_in_social_v1 = "..."]` on one that holds in
+  `pubky.app` only. `layout.rs` builds the objects,
   the `social/v1` ones as `tests/event_processor` does: add a kind of object
   there, for both layouts.
 - Users: `device()` is one SDK client with its own pkarr cache, so an old
