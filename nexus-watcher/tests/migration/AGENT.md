@@ -23,6 +23,12 @@ Your job is to find an order of events where that does not hold.
   skips is left to the primary's per-user read, which the external loop runs
   for those users only and which reads them once they are bound to the
   primary. The bulk stream never takes them back.
+- A user's objects live in one of two layouts: `pubky.app` (legacy) or
+  `social/v1`. Nexus reads a user through `pubky.app` until it has indexed
+  their `social/v1/profile.json`, through `social/v1` from then on, and
+  ignores what they write in the other (ADR 0003). The guarantees are the
+  same for both, so a scenario runs in both unless it is about something only
+  one has.
 
 ## Running
 
@@ -33,6 +39,7 @@ process-wide singleton. Use nextest, never `cargo test` for the whole suite:
 ```
 cargo nextest run -p nexus-watcher --test migration
 cargo nextest run -p nexus-watcher --test migration -E 'test(hazards)' --run-ignored all
+cargo nextest run -p nexus-watcher --test migration -E 'test(social_v1)'
 ```
 
 Run it against a private stack rather than the shared databases, so leftovers
@@ -55,11 +62,27 @@ databases behind. If you must use the shared databases, rerun a failure on
 
 `MigrationTest` (`harness.rs`) gives you both sides.
 
+- Layouts: the users of one test all write one `Layout` (`layout.rs`),
+  `PubkyApp` or `SocialV1`. `MigrationTest::setup_in(layout)` picks it
+  (`setup()` is `pubky.app`), and every user helper below writes that
+  layout, so a scenario is one `async fn(Layout) -> Result<()>` that reads
+  the same for both. `in_each_layout! { scenario, ... }` at the end of a
+  file declares each as two tests, `pubky_app::<scenario>` and
+  `social_v1::<scenario>`; put `#[ignore_in_social_v1 = "what must exist"]`
+  on one that holds in `pubky.app` only. `layout.rs` builds the objects,
+  the `social/v1` ones as `tests/event_processor` does: add a kind of object
+  there, for both layouts.
 - Users: `device()` is one SDK client with its own pkarr cache, so an old
   device keeps resolving the old homeserver for an hour, as in production.
-  `signup`, `session`, `post`, `follow`, `tag`, `bookmark`, `upload` (a blob
-  and the file record naming it), `write_profile`,
-  `delete_profile`, `public_tree` (read through a device), `write_tree` (the
+  `signup`, `open_account` (a signup that writes no profile), `session`,
+  `post`, `edit_post` (the post written over in `pubky.app`, a new version
+  in `social/v1`), `delete_post`, `post_uri` (the address a reply or tag
+  names a post by), `follow`, `tag`, `bookmark` (`pubky.app` only: a
+  `social/v1` bookmark is private and nexus never sees one), `upload` (a
+  blob and the file record naming it in `pubky.app`, one file in
+  `social/v1`), `write_profile`, `delete_profile`, `public_tree` (the
+  layout's tree read through a device, profile first), `in_path_order` (a
+  tree as a copy that walks the folders writes it), `write_tree` (the
   copy), `delete_tree` (the wipe), `switch_record`,
   `publish_without_homeserver`. Two fixtures bundle the fixed parts of a
   migration: `resident` (sign up with posts, ingested and read once) and
@@ -82,7 +105,22 @@ databases behind. If you must use the shared databases, rerun a failure on
   `notification_times`, `post_times` (each post's place in the timelines),
   `edge_times` (when a follow, tag or bookmark was indexed), `counts` (what
   nexus serves for the user and each of their posts), `files` (records in the
-  graph, files on disk).
+  graph, files on disk; `Layout::indexed_uploads(n)` is what it reports for
+  `n` uploads, since a `social/v1` file has no record).
+
+## The scenarios
+
+| File | What it covers | Layouts |
+|---|---|---|
+| `switches.rs` | switches between two external homeservers | both |
+| `primary.rs` | switches to and from the primary | both; the stranger's mirror and the unbound user's wipe `pubky.app` only |
+| `replay.rs` | a copy read again counts, dates and notifies nothing twice | both; bookmarks `pubky.app` only |
+| `wipe.rs` | the old homeserver wiped after the copy | both |
+| `stale.rs` | reads, retries and lookups that started before a switch | both |
+| `files.rs` | uploads across a switch | both; the record read before its blob `pubky.app` only |
+| `profile_order.rs` | a copy that writes objects ahead of the profile | both |
+| `records.rs` | records that name no reachable homeserver | `pubky.app` |
+| `hazards.rs` | races and costs of the recheck and the sweep | `pubky.app` |
 
 Assert outcomes, not mechanisms: what is indexed, which homeserver the user is
 bound to, cursors, notification kinds. Never the resolver's internal flags.
@@ -112,6 +150,11 @@ scenario in both directions, external to external and to or from the primary.
   the user's events from A.
 - Cost: what one call to the recheck makes nexus do on the network and in
   the graph, and how many such calls a stranger can make.
+- In `social/v1`: the order of a copy relative to `profile.json`; posts
+  with several versions, and a wipe of some of them; a user who moves
+  homeserver and layout at once, with a `pubky.app` tree on A and a
+  `social/v1` tree on B (the harness has one layout per test, so this needs
+  a second layout for one user first).
 
 Broken means: an event the user wrote is never indexed; a post, count, edge
 or notification exists twice; the user is bound to a homeserver their record

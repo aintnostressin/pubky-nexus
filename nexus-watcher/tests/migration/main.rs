@@ -16,6 +16,10 @@
 //! notices a switch, so the scenarios vary that moment and check the same
 //! end state.
 //!
+//! A user writes one of two layouts, `pubky.app` or `social/v1`, and the
+//! guarantees are the same for both: a scenario is written once and runs as
+//! `pubky_app::<name>` and `social_v1::<name>` (see `layout.rs`).
+//!
 //! Nexus's Pubky client is a process-wide singleton bound to the first testnet
 //! created in the process, so every test needs its own process: run the suite
 //! with nextest as CI does (`cargo nextest run -p nexus-watcher --test migration`)
