@@ -9,7 +9,7 @@
 
 use super::handlers::file::{blob_of, blob_takedown_key};
 use super::inputs::{Reference, ReferenceTarget, ResourceKey};
-use nexus_common::universal_tag::normalize::normalize_uri;
+use nexus_common::universal_tag::normalize::{normalize_uri, resource_id};
 use pubky_social_specs::legacy_v0::traits::{HasIdPath, HasPath};
 use pubky_social_specs::legacy_v0::{
     self, try_parse_pubky_path, ExtendedParsedUri, PubkyAppBlob, PubkyAppBookmark, PubkyAppFeed,
@@ -135,13 +135,16 @@ pub fn takedown_key(address: &str) -> Result<String, String> {
 
 /// The key a takedown of the `Resource` that a tag on `uri` creates is recorded under and looked
 /// up by. A file's is its [`takedown_key`], so the takedown of a file also holds for the tags on
-/// its addresses. A foreign resource's is its normalized address, the one its `Resource` id is
-/// hashed from. `Err` for an address that does not normalize, or a target a tag never makes a
-/// `Resource` of.
+/// its addresses. A foreign resource's is its `Resource` id, hashed from its normalized address:
+/// it covers every spelling that normalizes alike, and is 32 characters however long the address
+/// is, so it always fits the `Takedown(uri)` index. `Err` for an address that does not normalize,
+/// or a target a tag never makes a `Resource` of.
 pub fn resource_takedown_key(uri: &str, target: &ReferenceTarget) -> Result<String, String> {
     match target {
         ReferenceTarget::File(_) => takedown_key(uri),
-        ReferenceTarget::Foreign => normalize_uri(uri).map(|(normalized, _)| normalized),
+        ReferenceTarget::Foreign => {
+            normalize_uri(uri).map(|(normalized, _)| resource_id(&normalized))
+        }
         ReferenceTarget::Post(_)
         | ReferenceTarget::User(_)
         | ReferenceTarget::Tag { .. }
@@ -633,13 +636,34 @@ mod tests {
         }
     }
 
-    /// A foreign resource falls under its normalized address, whatever fragment it carries,
-    /// and not under a longer address.
+    /// A foreign resource's key is its `Resource` id: 32 hex characters, however long its
+    /// address, shared by every spelling that normalizes alike and by no other address.
     #[test]
-    fn a_foreign_resource_falls_under_its_normalized_address() {
-        let key = "https://example.com/a";
-        assert!(resource_falls_under("https://example.com/a#part", key));
-        assert!(!resource_falls_under("https://example.com/ab", key));
+    fn a_foreign_resource_is_keyed_by_its_resource_id() {
+        let key = |uri: &str| resource_takedown_key(uri, &ReferenceTarget::Foreign);
+        let own = key("https://example.com/a").expect("a URL normalizes");
+        assert_eq!(own, resource_id("https://example.com/a"));
+        assert_eq!(own.len(), 32);
+        assert!(own.bytes().all(|b| b.is_ascii_hexdigit()), "{own}");
+        assert_eq!(key("HTTPS://Example.COM:443/a#part").as_ref(), Ok(&own));
+        assert_ne!(key("https://example.com/ab").as_ref(), Ok(&own));
+
+        let long = format!("https://example.com/{}", "中".repeat(1_000));
+        assert_eq!(key(&long).map(|key| key.len()), Ok(32));
+        assert!(key("not a uri").is_err());
+    }
+
+    /// A foreign resource falls under its key, whatever fragment it carries, and not under a
+    /// longer address's key or its address itself.
+    #[test]
+    fn a_foreign_resource_falls_under_its_resource_id() {
+        let key = resource_id("https://example.com/a");
+        assert!(resource_falls_under("https://example.com/a#part", &key));
+        assert!(!resource_falls_under("https://example.com/ab", &key));
+        assert!(!resource_falls_under(
+            "https://example.com/a",
+            "https://example.com/a"
+        ));
     }
 
     /// Another scheme's address, and a public path under another app's namespace that is not a

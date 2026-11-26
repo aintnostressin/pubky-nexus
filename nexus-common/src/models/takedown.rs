@@ -5,25 +5,29 @@
 //! (a new Nexus reads everyone's history in no particular order), there is nothing to
 //! delete, and the target would land when its own event is read later; remembering the
 //! address drops that event. A foreign resource has no event of its own: remembering its
-//! address drops the tags on it, which would create it again. Profiles aren't remembered:
-//! a moderated user may come back with a new profile at the same address.
+//! `Resource` id drops the tags on it, which would create it again. The id, not the address:
+//! a foreign address may be longer than Neo4j's index on `uri` holds (about 8 kB), and the
+//! id is 32 characters. Profiles aren't remembered: a moderated user may come back with a
+//! new profile at the same address.
 //!
-//! Each takedown is a `:Takedown {uri, tag_uri}` node: the canonical address taken down,
-//! and the address of the moderator tag that took it down. A takedown is permanent for
-//! now: lifting one is not implemented. `tag_uri` is kept so it can be, by matching the
-//! DEL of that moderator tag to its takedown. A `Resource`'s takedown deletes every tag on
-//! it, so lifting one would also have to read those tags again from their homeservers.
+//! Each takedown is a `:Takedown {uri, tag_uri}` node: the canonical address taken down (a
+//! foreign resource's `Resource` id), and the address of the moderator tag that took it
+//! down. A takedown is permanent for now: lifting one is not implemented. `tag_uri` is kept
+//! so it can be, by matching the DEL of that moderator tag to its takedown. A `Resource`'s
+//! takedown deletes every tag on it, so lifting one would also have to read those tags again
+//! from their homeservers.
 
 use crate::db::{exec_single_row, fetch_key_from_graph, queries};
 use crate::models::error::ModelResult;
 
-/// Remembers that the moderator tag at `tag_uri` took down `uri`, a canonical address.
+/// Remembers that the moderator tag at `tag_uri` took down `uri`, a canonical address or a
+/// foreign `Resource`'s id.
 pub async fn record_takedown(uri: &str, tag_uri: &str) -> ModelResult<()> {
     exec_single_row(queries::put::record_takedown(uri, tag_uri)).await?;
     Ok(())
 }
 
-/// Whether the moderator took down `uri`, a canonical address.
+/// Whether the moderator took down `uri`, a canonical address or a foreign `Resource`'s id.
 pub async fn is_taken_down(uri: &str) -> ModelResult<bool> {
     let query = queries::get::is_taken_down(uri);
     Ok(fetch_key_from_graph(query, "taken_down")

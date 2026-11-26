@@ -68,15 +68,16 @@ impl Moderation {
             }
             // A foreign resource is only the `Resource` its tags create, so its takedown is
             // recorded under the key those tags are checked against (see
-            // `handlers::tag::sync_put_resource`) before the `Resource` is deleted.
+            // `handlers::tag::sync_put_resource`), the `Resource`'s id, before the `Resource` is
+            // deleted.
             ReferenceTarget::Foreign => {
-                let Ok(address) = resource_takedown_key(&uri, &ReferenceTarget::Foreign) else {
+                let Ok(id) = resource_takedown_key(&uri, &ReferenceTarget::Foreign) else {
                     warn!("Moderation tag '{label}' on {uri} not applied: not a valid URI");
                     return Ok(());
                 };
-                info!("Moderation tag '{label}' on {uri} detected. Taking down {address}");
-                record_takedown(&address, tag_uri).await?;
-                ResourceDetails::delete(&[resource_id(&address)]).await?;
+                info!("Moderation tag '{label}' on {uri} detected. Taking down Resource {id}");
+                record_takedown(&id, tag_uri).await?;
+                ResourceDetails::delete(&[id]).await?;
                 Ok(())
             }
             // `handle_error` drops a non-retryable error at debug level, so a moderator action

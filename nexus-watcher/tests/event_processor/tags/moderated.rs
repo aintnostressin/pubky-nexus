@@ -1,22 +1,28 @@
 use super::resource_utils::{compute_resource_id, find_resource_tag, resource_exists_in_graph};
 use super::utils::find_post_tag;
 use crate::event_processor::posts::utils::find_post_details;
-use crate::event_processor::users::utils::find_user_counts;
+use crate::event_processor::users::utils::{find_user_counts, set_user_epoch};
 use crate::event_processor::utils::watcher::{
     retrieve_and_handle_event_line, HomeserverHashIdPath, WatcherTest,
 };
 use anyhow::Result;
 use chrono::Utc;
+use nexus_common::db::{exec_single_row, graph::Query};
 use nexus_common::models::tag::search::TagSearch;
 use nexus_common::models::takedown::{is_taken_down, record_takedown};
 use nexus_common::types::Pagination;
+use nexus_common::utils::test_utils::default_ingestor_tests;
 use nexus_watcher::events::handlers::tag::remove_resource_if_taken_down;
 use nexus_watcher::events::inputs::{Reference, ReferenceTarget};
+use nexus_watcher::events::retry::RedisRetryStore;
+use nexus_watcher::events::{DefaultEventHandler, Moderation};
 use pubky::{recovery_file, Keypair};
 use pubky_social_specs::legacy_v0::traits::HashId;
 use pubky_social_specs::legacy_v0::{
     post_uri_builder, tag_uri_builder, PubkyAppPost, PubkyAppTag, PubkyAppUser,
 };
+use pubky_social_specs::{PubkyId, PubkySocialTag};
+use std::sync::Arc;
 use tokio::fs;
 
 const MODERATION_LABEL: &str = "label_to_moderate";
@@ -259,8 +265,8 @@ async fn test_moderation_takes_down_a_foreign_resource_with_every_tag_on_it() ->
         "the Resource goes with every tag on it"
     );
     assert!(
-        is_taken_down(&url).await?,
-        "recorded under the normalized address"
+        is_taken_down(&resource_id).await?,
+        "recorded under the Resource's id"
     );
     assert!(
         find_resource_tag(&compute_resource_id(&kept_url), &label)
@@ -306,12 +312,103 @@ async fn test_moderation_of_a_url_over_the_cap_is_refused() -> Result<()> {
     moderate_tag(&mut test, &moderator_kp, &long_url).await?;
     moderate_tag(&mut test, &moderator_kp, &short_url).await?;
 
-    assert!(!is_taken_down(&long_url).await?, "no takedown is recorded");
     assert!(
-        is_taken_down(&short_url).await?,
+        !is_taken_down(&compute_resource_id(&long_url)).await?,
+        "no takedown is recorded"
+    );
+    assert!(
+        is_taken_down(&compute_resource_id(&short_url)).await?,
         "the moderator's next tag applies"
     );
 
+    Ok(())
+}
+
+/// A `social/v1` moderator tag on a URL of 1,000 CJK characters, which `social/v1` accepts and
+/// which normalizes to over 8 kB, takes down the `Resource` a `social/v1` tag created on it, and
+/// its event processes: the takedown is keyed by the `Resource`'s id, which Neo4j's index on
+/// `Takedown(uri)` holds whatever the URL's length. Read again by a Nexus whose moderator it
+/// isn't, the same tag stays out.
+#[tokio_shared_rt::test(shared)]
+async fn test_social_v1_moderation_of_a_long_cjk_url_takes_its_resource_down() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+    // A moderator of its own, at `v1` so its `social/v1` tag is read: the shared moderator
+    // never flips.
+    let (moderator_kp, moderator_id) = create_tagger(&mut test, "cjk-takedown-moderator").await?;
+    let (tagger_kp, tagger_id) = create_tagger(&mut test, "cjk-takedown").await?;
+    for user_id in [&moderator_id, &tagger_id] {
+        set_user_epoch(user_id, "v1").await?;
+    }
+
+    // Unique per run, in the characters themselves: a prefix would take the URL over the cap.
+    let run = Utc::now().timestamp_millis().to_string();
+    let cjk: String = run
+        .bytes()
+        .map(|digit| char::from_u32(0x4E00 + u32::from(digit - b'0')).expect("a CJK character"))
+        .chain(std::iter::repeat('中'))
+        .take(1_000)
+        .collect();
+    let url = format!("https://example.com/{cjk}");
+    assert!(url.chars().count() <= 1_024, "social/v1 accepts the URL");
+    let resource_id = compute_resource_id(&url);
+
+    let label = format!("cjktd{}", &run[run.len() - 8..]);
+    test.put_v1_tag(&tagger_kp, &PubkySocialTag::new(url.clone(), label.clone()))
+        .await?;
+    assert!(
+        find_resource_tag(&resource_id, &label).await?.is_some(),
+        "the social/v1 tag creates the Resource"
+    );
+
+    // Read only by the handler below, whose moderator is the one above.
+    test.ensure_event_processing = false;
+    let moderator_tag = PubkySocialTag::new(url.clone(), MODERATION_LABEL.to_string());
+    let tag_path = test.put_v1_tag(&moderator_kp, &moderator_tag).await?;
+    let moderation = Arc::new(Moderation {
+        id: PubkyId::try_from(moderator_id.as_str()).expect("a valid user id"),
+        tags: vec![MODERATION_LABEL.to_string()],
+    });
+    let handler = Arc::new(DefaultEventHandler::new(
+        moderation,
+        default_ingestor_tests(),
+        test.event_processor_runner.client.clone(),
+        test.temp_dir.path().to_path_buf(),
+        Arc::new(RedisRetryStore::new()),
+    ));
+    let tag_event = format!("PUT pubky://{moderator_id}{tag_path}");
+    retrieve_and_handle_event_line(&tag_event, &test.homeserver_id, handler)
+        .await
+        .unwrap_or_else(|err| panic!("the moderator's tag should process: {err:?}"));
+
+    assert!(
+        !resource_exists_in_graph(&resource_id).await?,
+        "the Resource goes with every tag on it"
+    );
+    assert!(
+        is_taken_down(&resource_id).await?,
+        "recorded under the Resource's id"
+    );
+
+    // The watcher's own processor reads the same tag as an ordinary one, and drops it.
+    test.ensure_event_processing = true;
+    test.ensure_event_processing_complete().await?;
+    assert!(
+        !resource_exists_in_graph(&resource_id).await?,
+        "the takedown holds against a tag on the URL"
+    );
+
+    let delete = Query::new(
+        "test_delete_takedown",
+        "MATCH (t:Takedown {uri: $uri}) DELETE t",
+    )
+    .param("uri", resource_id);
+    exec_single_row(delete).await?;
+    TagSearch::del_from_index(&label).await?;
+    // Back to `v0`, so the gate lets the `pubky.app` cleanup through.
+    for (user_kp, user_id) in [(&moderator_kp, &moderator_id), (&tagger_kp, &tagger_id)] {
+        set_user_epoch(user_id, "v0").await?;
+        test.cleanup_user(user_kp).await?;
+    }
     Ok(())
 }
 
@@ -350,7 +447,7 @@ async fn test_resource_tagged_after_its_takedown_was_recorded_is_removed() -> Re
 
     // The takedown, recorded by another loop that found nothing to delete yet.
     let tag_uri = tag_uri_builder(tagger_id.clone(), "MODERATORTAG".to_string());
-    record_takedown(&url, &tag_uri).await?;
+    record_takedown(&compute_resource_id(&url), &tag_uri).await?;
 
     let foreign = |uri: &str| Reference {
         uri: uri.to_string(),
@@ -379,7 +476,7 @@ async fn test_a_later_tag_finishes_an_unfinished_resource_takedown() -> Result<(
     put_pubky_app_resource_tag(&mut test, &tagger_kp, &tagger_id, &url, "mod_finish").await?;
     // Recorded, but the `Resource` was never deleted.
     let tag_uri = tag_uri_builder(tagger_id.clone(), "MODERATORTAG".to_string());
-    record_takedown(&url, &tag_uri).await?;
+    record_takedown(&compute_resource_id(&url), &tag_uri).await?;
     assert!(resource_exists_in_graph(&compute_resource_id(&url)).await?);
 
     put_pubky_app_resource_tag(&mut test, &tagger_kp, &tagger_id, &url, "mod_finish_later").await?;
