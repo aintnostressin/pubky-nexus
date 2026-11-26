@@ -7,11 +7,12 @@ use nexus_common::models::user::RecheckOutcome;
 use pubky::{Keypair, Pubky};
 use serde_json::{json, Value};
 
-use crate::harness::MigrationTest;
+use crate::harness::{Layout, MigrationTest};
+use crate::layout::in_each_layout;
 
 /// A mover on A and a scout on the primary who know each other, everything
 /// read once: they follow each other, each has replied to and tagged a post of
-/// the other's, and the mover has bookmarked the scout's post.
+/// the other's, and in `pubky.app` the mover has bookmarked the scout's post.
 struct Neighbours {
     mover: Keypair,
     scout: Keypair,
@@ -37,7 +38,10 @@ impl Neighbours {
             .await?;
         t.tag(&session_a, t.post_uri(&scout, &topic), "nice")
             .await?;
-        t.bookmark(&session_a, t.post_uri(&scout, &topic)).await?;
+        // A `social/v1` bookmark is private: nexus never sees one.
+        if t.layout == Layout::PubkyApp {
+            t.bookmark(&session_a, t.post_uri(&scout, &topic)).await?;
+        }
         t.index_external(&t.hs_a).await?;
 
         t.follow(&session_scout, &mover_id).await?;
@@ -79,9 +83,10 @@ impl Neighbours {
 }
 
 /// External to external. B is read twice: the copy, then nothing new.
-#[tokio_shared_rt::test(shared)]
-async fn a_copy_read_on_the_new_homeserver_counts_and_notifies_nothing_twice() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn a_copy_read_on_the_new_homeserver_counts_and_notifies_nothing_twice(
+    layout: Layout,
+) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let pair = Neighbours::settle(&t).await?;
     let before = pair.derived(&t).await?;
 
@@ -104,9 +109,10 @@ async fn a_copy_read_on_the_new_homeserver_counts_and_notifies_nothing_twice() -
 
 /// External to the primary. The bulk stream passes the copy over, and the
 /// per-user read of the primary reads it after the switch.
-#[tokio_shared_rt::test(shared)]
-async fn a_copy_read_per_user_on_the_primary_counts_and_notifies_nothing_twice() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn a_copy_read_per_user_on_the_primary_counts_and_notifies_nothing_twice(
+    layout: Layout,
+) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let pair = Neighbours::settle(&t).await?;
     let before = pair.derived(&t).await?;
 
@@ -138,7 +144,17 @@ async fn a_copy_read_per_user_on_the_primary_counts_and_notifies_nothing_twice()
 #[tokio_shared_rt::test(shared)]
 #[ignore = "a replayed follow is dated again; needs the follow's time set only when it is created"]
 async fn a_copied_follow_keeps_its_time() -> Result<()> {
-    let (before, after) = times_around_a_copy("FOLLOWS").await?;
+    let (before, after) = times_around_a_copy(Layout::PubkyApp, "FOLLOWS").await?;
+    assert_eq!(after, before);
+    Ok(())
+}
+
+/// The same follow written in `social/v1`: it is dated again as well, by the
+/// same handler. Demonstrated.
+#[tokio_shared_rt::test(shared)]
+#[ignore = "a replayed follow is dated again; needs the follow's time set only when it is created"]
+async fn a_copied_social_v1_follow_keeps_its_time() -> Result<()> {
+    let (before, after) = times_around_a_copy(Layout::SocialV1, "FOLLOWS").await?;
     assert_eq!(after, before);
     Ok(())
 }
@@ -151,15 +167,18 @@ async fn a_copied_follow_keeps_its_time() -> Result<()> {
 #[tokio_shared_rt::test(shared)]
 #[ignore = "a replayed bookmark is dated again; needs the bookmark's time kept when it exists"]
 async fn a_copied_bookmark_keeps_its_time() -> Result<()> {
-    let (before, after) = times_around_a_copy("BOOKMARKED").await?;
+    let (before, after) = times_around_a_copy(Layout::PubkyApp, "BOOKMARKED").await?;
     assert_eq!(after, before);
     Ok(())
 }
 
 /// When nexus indexed the mover's one relationship of `kind`, before their
 /// copy is read on B and after.
-async fn times_around_a_copy(kind: &str) -> Result<(Vec<(String, i64)>, Vec<(String, i64)>)> {
-    let t = MigrationTest::setup().await?;
+async fn times_around_a_copy(
+    layout: Layout,
+    kind: &str,
+) -> Result<(Vec<(String, i64)>, Vec<(String, i64)>)> {
+    let t = MigrationTest::setup_in(layout).await?;
     let pair = Neighbours::settle(&t).await?;
     let before = t.edge_times(&pair.mover, kind).await?;
     ensure!(before.len() == 1, "the mover has one such relationship");
@@ -170,4 +189,9 @@ async fn times_around_a_copy(kind: &str) -> Result<(Vec<(String, i64)>, Vec<(Str
     t.index_external(&t.hs_b).await?;
 
     Ok((before, t.edge_times(&pair.mover, kind).await?))
+}
+
+in_each_layout! {
+    a_copy_read_on_the_new_homeserver_counts_and_notifies_nothing_twice,
+    a_copy_read_per_user_on_the_primary_counts_and_notifies_nothing_twice,
 }
