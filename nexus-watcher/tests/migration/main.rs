@@ -27,6 +27,7 @@ mod harness;
 mod hazards;
 mod layout;
 mod primary;
+mod profile_order;
 mod records;
 mod replay;
 mod stale;

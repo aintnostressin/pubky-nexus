@@ -361,12 +361,23 @@ impl MigrationTest {
         hs: &PubkyId,
         name: &str,
     ) -> Result<PubkySession> {
+        let session = self.open_account(device, user, hs).await?;
+        self.write_profile(&session, name).await?;
+        Ok(session)
+    }
+
+    /// [`Self::signup`] without the profile: an account on `hs`, the record
+    /// naming it and a session, for a copy that writes the profile later.
+    pub async fn open_account(
+        &self,
+        device: &Pubky,
+        user: &Keypair,
+        hs: &PubkyId,
+    ) -> Result<PubkySession> {
         let hs_pk = hs.to_public_key().map_err(anyhow::Error::msg)?;
         let signer = device.signer(user.clone());
         signer.signup(&hs_pk, None).await?;
-        let session = signer.signin(test_client_id()).await?;
-        self.write_profile(&session, name).await?;
-        Ok(session)
+        Ok(signer.signin(test_client_id()).await?)
     }
 
     pub async fn write_profile(&self, session: &PubkySession, name: &str) -> Result<()> {
@@ -482,6 +493,14 @@ impl MigrationTest {
         let profile = self.layout.profile_path();
         tree.sort_by_key(|(path, _)| (!same_path(path, &profile), path.clone()));
         Ok(tree)
+    }
+
+    /// `tree` in the order of its paths, as a copy that walks the folders
+    /// writes it. In `social/v1` that puts files, follows and posts ahead of
+    /// `profile.json` and tags after it; in `pubky.app` only tags come after.
+    pub fn in_path_order(mut tree: Tree) -> Tree {
+        tree.sort();
+        tree
     }
 
     /// Writes `tree` through `session`: the copy step of a migration.
