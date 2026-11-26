@@ -400,6 +400,12 @@ impl MigrationTest {
         Ok(id)
     }
 
+    /// Edits a post that is no reply.
+    pub async fn edit_post(&self, session: &PubkySession, post_id: &str, text: &str) -> Result<()> {
+        self.put(session, self.layout.post_edit(post_id, text)?)
+            .await
+    }
+
     pub async fn delete_post(&self, session: &PubkySession, post_id: &str) -> Result<()> {
         session
             .storage()

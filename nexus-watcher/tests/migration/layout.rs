@@ -52,6 +52,15 @@ impl Layout {
         }
     }
 
+    /// An edit of the post `post_id`, which is no reply: in `pubky.app` the
+    /// post written over, in `social/v1` a new version next to the first.
+    pub fn post_edit(self, post_id: &str, text: &str) -> Result<Object> {
+        match self {
+            Self::PubkyApp => pubky_app::post_edit(post_id, text),
+            Self::SocialV1 => social_v1::post_edit(post_id, text),
+        }
+    }
+
     /// Where the post `post_id` is stored, as [`Self::post`] writes it.
     pub fn post_path(self, post_id: &str) -> String {
         match self {
@@ -105,11 +114,11 @@ impl Layout {
 
 /// Declares each named scenario of the calling module, an
 /// `async fn(Layout) -> Result<()>`, as two tests of its name:
-/// `pubky_app::<name>` and `social_v1::<name>`. A scenario that holds in one
-/// layout only goes after `social_v1(ignore = "what must exist")`, which
-/// ignores its `social/v1` test for that reason.
+/// `pubky_app::<name>` and `social_v1::<name>`. A scenario that holds in
+/// `pubky.app` only goes under `#[ignore_in_social_v1 = "what must exist"]`,
+/// which ignores its `social/v1` test for that reason.
 macro_rules! in_each_layout {
-    ($($(social_v1(ignore = $reason:literal))? $scenario:ident),+ $(,)?) => {
+    ($($(#[ignore_in_social_v1 = $reason:literal])? $scenario:ident),+ $(,)?) => {
         mod pubky_app {
             $(
                 #[tokio_shared_rt::test(shared)]
@@ -167,17 +176,25 @@ mod pubky_app {
         object(profile_path(), &profile)
     }
 
-    pub fn post(text: &str, parent: Option<String>) -> Result<(String, Object)> {
-        let post = PubkyAppPost::new(
+    fn short(text: &str, parent: Option<String>) -> PubkyAppPost {
+        PubkyAppPost::new(
             text.to_string(),
             PubkyAppPostKind::Short,
             parent,
             None,
             None,
-        );
+        )
+    }
+
+    pub fn post(text: &str, parent: Option<String>) -> Result<(String, Object)> {
+        let post = short(text, parent);
         let id = post.create_id();
         let stored = object(post_path(&id), &post)?;
         Ok((id, stored))
+    }
+
+    pub fn post_edit(post_id: &str, text: &str) -> Result<Object> {
+        object(post_path(post_id), &short(text, None))
     }
 
     pub fn post_path(post_id: &str) -> String {
@@ -223,7 +240,7 @@ mod social_v1 {
     use pubky_social_specs::traits::{HasIdPath, HasPath, HashId, TimestampId};
     use pubky_social_specs::{
         list_prefix_builder, post_uri_builder, PubkySocialFile, PubkySocialFollow, PubkySocialPost,
-        PubkySocialPostKind, PubkySocialTag, PubkySocialUser,
+        PubkySocialPostKind, PubkySocialTag, PubkySocialUser, Root,
     };
 
     use super::{object, Object, BIO};
@@ -243,17 +260,28 @@ mod social_v1 {
     }
 
     /// The post's first version, whose edit id is the post id.
-    pub fn post(text: &str, parent: Option<String>) -> Result<(String, Object)> {
-        let post = PubkySocialPost::new(
+    fn note(text: &str, parent: Option<String>) -> PubkySocialPost {
+        PubkySocialPost::new(
             text.to_string(),
             PubkySocialPostKind::Note,
             parent,
             None,
             vec![],
-        );
+        )
+    }
+
+    pub fn post(text: &str, parent: Option<String>) -> Result<(String, Object)> {
+        let post = note(text, parent);
         let id = post.create_id();
         let stored = object(post_path(&id), &post)?;
         Ok((id, stored))
+    }
+
+    /// A later version of the post: its edit id is a timestamp id minted now.
+    pub fn post_edit(post_id: &str, text: &str) -> Result<Object> {
+        let post = note(text, None);
+        let path = PubkySocialPost::create_path_in(Root::Pub, post_id, &post.create_id(), None);
+        object(path, &post)
     }
 
     pub fn post_path(post_id: &str) -> String {

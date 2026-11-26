@@ -135,6 +135,61 @@ async fn a_copy_read_per_user_on_the_primary_counts_and_notifies_nothing_twice(
     Ok(())
 }
 
+/// The scout replied to a post of the mover's, and the mover then edited the
+/// post: nexus read the edit on A and told the scout once. The mover copies to
+/// B and nexus reads the copy. The post keeps its content and its place, and
+/// the scout is told nothing more.
+///
+/// In `pubky.app` the copy holds the post as it is now, which is what nexus
+/// holds. In `social/v1` an edit is a new version next to the first, the copy
+/// holds both, and nexus applies every version it reads as an edit. The post
+/// ends as it was, but the scout's notification of the edit is issued again,
+/// as the newest (demonstrated). Reasoned from the handler: the first version
+/// puts the old content back and tells the scout, the second restores the
+/// content and tells them once more, and a read that ends between the two
+/// serves the content the mover had replaced until the next one.
+async fn a_copied_post_that_was_edited_tells_its_repliers_nothing_again(
+    layout: Layout,
+) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
+    let (mover, scout) = (Keypair::random(), Keypair::random());
+
+    let device_scout = t.device()?;
+    let session_scout = t.signup(&device_scout, &scout, &t.primary, "scout").await?;
+    let (device_a, session_a, posts) = t.resident(&mover, &t.hs_a, "mover", &["first"]).await?;
+    t.post(&session_scout, "hi", Some(t.post_uri(&mover, &posts[0])))
+        .await?;
+    t.index_primary().await?;
+    t.edit_post(&session_a, &posts[0], "first, edited").await?;
+    t.index_external(&t.hs_a).await?;
+    let before = (
+        t.post_content(&mover, &posts[0]).await?,
+        t.post_times(&mover).await?,
+        t.notification_times(&scout).await?,
+    );
+    ensure!(
+        before.0 == "first, edited" && before.2.len() == 1,
+        "the edit was read and the scout told of it"
+    );
+
+    t.signup_and_copy(&mover, &t.hs_b, "mover", &device_a)
+        .await?;
+    assert_eq!(t.recheck(&mover).await?.outcome, RecheckOutcome::Switched);
+    t.index_external(&t.hs_b).await?;
+    t.index_external(&t.hs_b).await?;
+
+    assert_eq!(
+        (
+            t.post_content(&mover, &posts[0]).await?,
+            t.post_times(&mover).await?,
+            t.notification_times(&scout).await?,
+        ),
+        before,
+        "(content, (id, deleted, time) of each post, the scout's notifications)"
+    );
+    Ok(())
+}
+
 /// The copied follow is the follow nexus already holds, but its time becomes
 /// the time of the read: `create_follow` sets `indexed_at` on every PUT, not
 /// only when the relationship is new. The influencer rankings count followers
@@ -194,4 +249,8 @@ async fn times_around_a_copy(
 in_each_layout! {
     a_copy_read_on_the_new_homeserver_counts_and_notifies_nothing_twice,
     a_copy_read_per_user_on_the_primary_counts_and_notifies_nothing_twice,
+    #[ignore_in_social_v1 = "the older versions of a copied post are applied as edits and its \
+                             repliers told again; needs only the newest version of a post \
+                             applied (ADR 0003, E1)"]
+    a_copied_post_that_was_edited_tells_its_repliers_nothing_again,
 }
