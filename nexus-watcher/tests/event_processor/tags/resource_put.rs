@@ -96,8 +96,8 @@ async fn test_homeserver_put_resource_tag_external_uri() -> Result<()> {
 }
 
 /// The v0 reader caps no tag target length, so Nexus refuses a `pubky.app` tag on a URL longer
-/// than a `social/v1` tag's target may be. Neo4j refuses to index a value over 8 kB, and the
-/// refusal is never retried, so the tagger's next tag is still indexed.
+/// than a `social/v1` tag's target may be. The refusal is never retried, so the tagger's next tag
+/// is still indexed.
 #[tokio_shared_rt::test(shared)]
 async fn test_homeserver_resource_tag_on_a_url_over_the_cap_is_refused() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;

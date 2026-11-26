@@ -280,9 +280,11 @@ impl TagInput {
 }
 
 /// Reads a v0 tag and refuses one whose target is longer than a `social/v1` tag's may be
-/// (`reference_uri_max_length` characters). The v0 reader caps no length, and a target is stored
-/// and indexed as written (a `Resource`'s address, a takedown's key), where Neo4j refuses a value
-/// over 8 kB and the write fails. Such a tag also has no `social/v1` form: the migration skips it.
+/// (`reference_uri_max_length` characters). The v0 reader caps no length, and parts of a target
+/// are written under an index, where Neo4j refuses a value over 8 kB and the write fails on every
+/// replay: a foreign target's scheme (`Resource.scheme`), and the takedown key of a `pubky.app`
+/// post or tag address, whose id the v0 reader doesn't bound. Such a tag also has no `social/v1`
+/// form: the migration skips it.
 fn read_tag(bytes: &[u8], tag_id: &str) -> Result<PubkyAppTag, EventProcessorError> {
     let tag = read::<PubkyAppTag>(bytes, tag_id)?;
     let max = pubky_social_specs::VALIDATION_LIMITS.reference_uri_max_length;

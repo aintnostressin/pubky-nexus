@@ -296,8 +296,7 @@ async fn test_moderation_takes_down_a_foreign_resource_with_every_tag_on_it() ->
 }
 
 /// A moderator tag on a URL longer than a `social/v1` tag's target may be is refused like any
-/// such tag, so no takedown is written under a key Neo4j can't index, and the moderator's next
-/// tag still applies.
+/// such tag, so no takedown is recorded, and the moderator's next tag still applies.
 #[tokio_shared_rt::test(shared)]
 async fn test_moderation_of_a_url_over_the_cap_is_refused() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
