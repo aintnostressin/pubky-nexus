@@ -3,14 +3,14 @@
 use anyhow::Result;
 use pubky::Keypair;
 
-use crate::harness::MigrationTest;
+use crate::harness::{Layout, MigrationTest};
+use crate::layout::in_each_layout;
 
 /// Mirror first, switch later, wipe last: the record keeps naming A while the
 /// data is copied to B, so nexus keeps reading A; once the record names B, a
 /// wipe of A is not read at all.
-#[tokio_shared_rt::test(shared)]
-async fn mirror_then_switch_then_wipe_the_old_homeserver() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn mirror_then_switch_then_wipe_the_old_homeserver(layout: Layout) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let mover = Keypair::random();
 
     let (device_a, session_a, _) = t
@@ -52,9 +52,8 @@ async fn mirror_then_switch_then_wipe_the_old_homeserver() -> Result<()> {
 /// Switch, then wipe A before nexus has noticed: the deletes are indexed and
 /// the user tombstoned, the switch is still followed, and the read of B
 /// brings everything back. Counterparts see a delete and a re-create.
-#[tokio_shared_rt::test(shared)]
-async fn wipe_before_nexus_notices_is_healed_by_the_switch() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn wipe_before_nexus_notices_is_healed_by_the_switch(layout: Layout) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
 
     let device_a = t.device()?;
@@ -121,9 +120,10 @@ async fn wipe_before_nexus_notices_is_healed_by_the_switch() -> Result<()> {
 ///
 /// While deleted users were left out of the read list, the tombstoned user
 /// was read nowhere and the copy was never indexed.
-#[tokio_shared_rt::test(shared)]
-async fn returning_to_a_homeserver_wiped_after_leaving_it_replays_the_wipe() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn returning_to_a_homeserver_wiped_after_leaving_it_replays_the_wipe(
+    layout: Layout,
+) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let mover = Keypair::random();
 
     let device_a = t.device()?;
@@ -175,9 +175,8 @@ async fn returning_to_a_homeserver_wiped_after_leaving_it_replays_the_wipe() -> 
 /// tombstone. This is what the two scenarios above come down to: all three
 /// pass because `get_active_users_by_homeserver` keeps deleted users, and
 /// failed while it left them out.
-#[tokio_shared_rt::test(shared)]
-async fn a_profile_deleted_then_written_again_is_read_again() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn a_profile_deleted_then_written_again_is_read_again(layout: Layout) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let user = Keypair::random();
 
     let device = t.device()?;
@@ -197,4 +196,11 @@ async fn a_profile_deleted_then_written_again_is_read_again() -> Result<()> {
         (false, "user, again".to_string())
     );
     Ok(())
+}
+
+in_each_layout! {
+    mirror_then_switch_then_wipe_the_old_homeserver,
+    wipe_before_nexus_notices_is_healed_by_the_switch,
+    returning_to_a_homeserver_wiped_after_leaving_it_replays_the_wipe,
+    a_profile_deleted_then_written_again_is_read_again,
 }
