@@ -25,6 +25,7 @@
 mod files;
 mod harness;
 mod hazards;
+mod layout;
 mod primary;
 mod records;
 mod replay;

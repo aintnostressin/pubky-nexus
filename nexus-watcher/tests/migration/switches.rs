@@ -4,15 +4,15 @@ use anyhow::Result;
 use nexus_common::models::user::RecheckOutcome;
 use pubky::Keypair;
 
-use crate::harness::{post_uri, MigrationTest};
+use crate::harness::{Layout, MigrationTest};
+use crate::layout::in_each_layout;
 
 /// Copy and switch from one external homeserver to another, with nexus
 /// noticing the switch before the copy has even started: the first read of
 /// the new homeserver finds only the profile, later reads pick up the rest.
 /// Nothing is indexed twice and nobody gets a second notification.
-#[tokio_shared_rt::test(shared)]
-async fn copy_and_switch_noticed_before_the_copy() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn copy_and_switch_noticed_before_the_copy(layout: Layout) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
 
     // The mover lives on A with two posts and follows the scout; the scout,
@@ -29,9 +29,9 @@ async fn copy_and_switch_noticed_before_the_copy() -> Result<()> {
     t.index_external(&t.hs_a).await?;
     t.follow(&session_scout, &mover.public_key().to_z32())
         .await?;
-    t.post(&session_scout, "hi", Some(post_uri(&mover, &first)))
+    t.post(&session_scout, "hi", Some(t.post_uri(&mover, &first)))
         .await?;
-    t.tag(&session_scout, post_uri(&mover, &first), "nice")
+    t.tag(&session_scout, t.post_uri(&mover, &first), "nice")
         .await?;
     t.index_primary().await?;
 
@@ -86,9 +86,8 @@ async fn copy_and_switch_noticed_before_the_copy() -> Result<()> {
 /// The same migration with nexus noticing only after the copy is complete,
 /// through the periodic resolver with stale mapping disabled instead of a
 /// recheck.
-#[tokio_shared_rt::test(shared)]
-async fn copy_and_switch_noticed_after_the_copy() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn copy_and_switch_noticed_after_the_copy(layout: Layout) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let mover = Keypair::random();
 
     let (device_a, _, _) = t
@@ -117,9 +116,8 @@ async fn copy_and_switch_noticed_after_the_copy() -> Result<()> {
 
 /// A user switching back and forth keeps a cursor per homeserver, so a
 /// return reads only what is new there.
-#[tokio_shared_rt::test(shared)]
-async fn switching_back_and_forth_keeps_a_cursor_per_homeserver() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn switching_back_and_forth_keeps_a_cursor_per_homeserver(layout: Layout) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let mover = Keypair::random();
 
     let (device_a, session_a, _) = t.resident(&mover, &t.hs_a, "mover", &["first"]).await?;
@@ -161,9 +159,8 @@ async fn switching_back_and_forth_keeps_a_cursor_per_homeserver() -> Result<()> 
 
 /// A user who signs up elsewhere without copying anything: nexus keeps what
 /// it indexed from the old homeserver and follows the new one from there.
-#[tokio_shared_rt::test(shared)]
-async fn fresh_signup_without_a_copy_keeps_the_old_index() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn fresh_signup_without_a_copy_keeps_the_old_index(layout: Layout) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let mover = Keypair::random();
 
     t.resident(&mover, &t.hs_a, "old name", &["first", "second"])
@@ -183,4 +180,11 @@ async fn fresh_signup_without_a_copy_keeps_the_old_index() -> Result<()> {
         (false, "new name".to_string())
     );
     Ok(())
+}
+
+in_each_layout! {
+    copy_and_switch_noticed_before_the_copy,
+    copy_and_switch_noticed_after_the_copy,
+    switching_back_and_forth_keeps_a_cursor_per_homeserver,
+    fresh_signup_without_a_copy_keeps_the_old_index,
 }

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use pubky::Keypair;
 
-use crate::harness::{post_uri, MigrationTest};
+use crate::harness::MigrationTest;
 
 /// Mirror first, switch later, wipe last: the record keeps naming A while the
 /// data is copied to B, so nexus keeps reading A; once the record names B, a
@@ -69,7 +69,7 @@ async fn wipe_before_nexus_notices_is_healed_by_the_switch() -> Result<()> {
     t.index_external(&t.hs_a).await?;
     t.follow(&session_scout, &mover.public_key().to_z32())
         .await?;
-    t.post(&session_scout, "hi", Some(post_uri(&mover, &first)))
+    t.post(&session_scout, "hi", Some(t.post_uri(&mover, &first)))
         .await?;
     t.index_primary().await?;
     assert_eq!(t.live_posts(&mover).await?, 2);

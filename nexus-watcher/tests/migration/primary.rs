@@ -5,7 +5,7 @@ use anyhow::Result;
 use nexus_common::models::user::RecheckOutcome;
 use pubky::Keypair;
 
-use crate::harness::{post_uri, MigrationTest};
+use crate::harness::MigrationTest;
 
 /// External to primary. The bulk stream skips the user's events while the
 /// edge still names the old homeserver, which leaves the user to the primary's
@@ -144,7 +144,7 @@ async fn a_reply_to_a_post_the_bulk_stream_passed_over_waits_for_the_per_user_re
     let only_p = t
         .post(&session_p, "second, only on the primary", None)
         .await?;
-    t.post(&session_scout, "hi", Some(post_uri(&mover, &only_p)))
+    t.post(&session_scout, "hi", Some(t.post_uri(&mover, &only_p)))
         .await?;
     t.index_primary().await?;
     assert_eq!(
@@ -196,7 +196,7 @@ async fn a_copy_the_bulk_stream_reads_after_the_switch_changes_nothing() -> Resu
     let (device_a, session_a, posts) = t
         .resident(&mover, &t.hs_a, "mover", &["first", "second"])
         .await?;
-    t.post(&session_scout, "hi", Some(post_uri(&mover, &posts[0])))
+    t.post(&session_scout, "hi", Some(t.post_uri(&mover, &posts[0])))
         .await?;
     t.index_primary().await?;
     let before = (

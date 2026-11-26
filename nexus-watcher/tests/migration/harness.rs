@@ -42,16 +42,16 @@ use pubky::pkarr::dns::rdata::TXT;
 use pubky::pkarr::dns::Name;
 use pubky::pkarr::SignedPacket;
 use pubky::{ClientId, Keypair, Pubky, PubkyResource, PubkySession, PublicKey};
-use pubky_social_specs::legacy_v0::traits::{HasIdPath, HasPath, HashId, TimestampId};
-use pubky_social_specs::legacy_v0::{
-    blob_uri_builder, post_uri_builder, PubkyAppBlob, PubkyAppBookmark, PubkyAppFile,
-    PubkyAppFollow, PubkyAppPost, PubkyAppPostKind, PubkyAppTag, PubkyAppUser,
-};
+use pubky_social_specs::legacy_v0::traits::{HasIdPath, HashId};
+use pubky_social_specs::legacy_v0::PubkyAppBookmark;
 use pubky_social_specs::PubkyId;
 use pubky_testnet::Testnet;
 use tempfile::TempDir;
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
+
+pub use crate::layout::Layout;
+use crate::layout::Object;
 
 /// Client ID the suite's devices sign in with: since pubky 0.10 a session is a grant issued
 /// to a client.
@@ -60,10 +60,12 @@ fn test_client_id() -> ClientId {
 }
 
 /// A user's public tree: owner-relative paths and their bytes.
-pub type Tree = Vec<(String, Vec<u8>)>;
+pub type Tree = Vec<Object>;
 
 pub struct MigrationTest {
     pub testnet: Testnet,
+    /// The layout every user of this test writes.
+    pub layout: Layout,
     /// Bulk-indexed by nexus.
     pub primary: PubkyId,
     pub hs_a: PubkyId,
@@ -82,7 +84,13 @@ pub struct MigrationTest {
 }
 
 impl MigrationTest {
+    /// A test whose users write `pubky.app`.
     pub async fn setup() -> Result<Self> {
+        Self::setup_in(Layout::PubkyApp).await
+    }
+
+    /// A test whose users write `layout`.
+    pub async fn setup_in(layout: Layout) -> Result<Self> {
         StackManager::setup(&StackConfig::default())
             .await
             .map_err(|e| anyhow!("stack setup failed: {e:?}"))?;
@@ -138,6 +146,7 @@ impl MigrationTest {
 
         Ok(Self {
             testnet,
+            layout,
             primary,
             hs_a,
             hs_b,
@@ -361,27 +370,13 @@ impl MigrationTest {
     }
 
     pub async fn write_profile(&self, session: &PubkySession, name: &str) -> Result<()> {
-        let profile = PubkyAppUser {
-            name: name.to_string(),
-            bio: Some("migration suite".to_string()),
-            image: None,
-            links: None,
-            status: None,
-        };
-        session
-            .storage()
-            .put(
-                PubkyAppUser::create_path().as_str(),
-                serde_json::to_vec(&profile)?,
-            )
-            .await?;
-        Ok(())
+        self.put(session, self.layout.profile(name)?).await
     }
 
     pub async fn delete_profile(&self, session: &PubkySession) -> Result<()> {
         session
             .storage()
-            .delete(PubkyAppUser::create_path().as_str())
+            .delete(self.layout.profile_path().as_str())
             .await?;
         Ok(())
     }
@@ -398,51 +393,41 @@ impl MigrationTest {
         text: &str,
         parent: Option<String>,
     ) -> Result<String> {
-        let post = PubkyAppPost::new(
-            text.to_string(),
-            PubkyAppPostKind::Short,
-            parent,
-            None,
-            None,
-        );
-        let id = post.create_id();
-        session
-            .storage()
-            .put(
-                PubkyAppPost::create_path(&id).as_str(),
-                serde_json::to_vec(&post)?,
-            )
-            .await?;
+        let (id, post) = self.layout.post(text, parent)?;
+        self.put(session, post).await?;
         // Post ids are timestamps: keep consecutive posts distinct.
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         Ok(id)
     }
 
-    pub async fn follow(&self, session: &PubkySession, target: &str) -> Result<()> {
-        let follow = PubkyAppFollow {
-            created_at: chrono::Utc::now().timestamp_millis(),
-        };
+    pub async fn delete_post(&self, session: &PubkySession, post_id: &str) -> Result<()> {
         session
             .storage()
-            .put(
-                PubkyAppFollow::create_path(target).as_str(),
-                serde_json::to_vec(&follow)?,
-            )
+            .delete(self.layout.post_path(post_id).as_str())
             .await?;
         Ok(())
+    }
+
+    /// The address a reply, a tag or a bookmark names `user`'s post by.
+    pub fn post_uri(&self, user: &Keypair, post_id: &str) -> String {
+        self.layout.post_uri(user.public_key().to_z32(), post_id)
+    }
+
+    pub async fn follow(&self, session: &PubkySession, target: &str) -> Result<()> {
+        self.put(session, self.layout.follow(target)?).await
     }
 
     pub async fn tag(&self, session: &PubkySession, uri: String, label: &str) -> Result<()> {
-        let tag = PubkyAppTag::new(uri, label.to_string());
-        let path = PubkyAppTag::create_path(&tag.create_id());
-        session
-            .storage()
-            .put(path.as_str(), serde_json::to_vec(&tag)?)
-            .await?;
-        Ok(())
+        self.put(session, self.layout.tag(uri, label)?).await
     }
 
+    /// `pubky.app` only: a `social/v1` bookmark is private, and nexus reads
+    /// what the event streams carry, which is the public tree.
     pub async fn bookmark(&self, session: &PubkySession, uri: String) -> Result<()> {
+        ensure!(
+            self.layout == Layout::PubkyApp,
+            "a social/v1 bookmark is private: nexus never sees one"
+        );
         let bookmark = PubkyAppBookmark {
             uri,
             created_at: chrono::Utc::now().timestamp_millis(),
@@ -455,35 +440,23 @@ impl MigrationTest {
         Ok(())
     }
 
-    /// Uploads `bytes` as a blob, then writes the file record naming it, as
-    /// the app does.
+    /// Uploads `bytes` as the app does: in `pubky.app` a blob, then the file
+    /// record naming it; in `social/v1` the one file.
     pub async fn upload(&self, session: &PubkySession, user: &Keypair, bytes: &[u8]) -> Result<()> {
-        let blob = PubkyAppBlob::new(bytes.to_vec());
-        let hash = blob.create_id();
-        session
-            .storage()
-            .put(PubkyAppBlob::create_path(&hash).as_str(), blob.0)
-            .await?;
-        let file = PubkyAppFile {
-            name: "picture.png".to_string(),
-            content_type: "image/png".to_string(),
-            src: blob_uri_builder(user.public_key().to_z32(), hash),
-            size: bytes.len(),
-            created_at: chrono::Utc::now().timestamp_millis(),
-        };
-        let path = PubkyAppFile::create_path(&file.create_id());
-        session
-            .storage()
-            .put(path.as_str(), serde_json::to_vec(&file)?)
-            .await?;
+        let upload = self.layout.upload(user.public_key().to_z32(), bytes)?;
+        self.write_tree(session, &upload).await
+    }
+
+    async fn put(&self, session: &PubkySession, (path, bytes): Object) -> Result<()> {
+        session.storage().put(path.as_str(), bytes).await?;
         Ok(())
     }
 
-    /// Every public `pubky.app` resource of `user` as `source` sees it: the
-    /// read goes to whichever homeserver `source`'s cache names. The profile
-    /// comes first, as a copy would write it.
+    /// Every public resource `user` wrote in the test's layout, as `source`
+    /// sees it: the read goes to whichever homeserver `source`'s cache names.
+    /// The profile comes first, as a copy would write it.
     pub async fn public_tree(&self, source: &Pubky, user: &Keypair) -> Result<Tree> {
-        let root = format!("pubky://{}/pub/pubky.app/", user.public_key().to_z32());
+        let root = self.layout.tree_root(user.public_key().to_z32());
         let resources = source
             .public_storage()
             .list(root.as_str())?
@@ -500,7 +473,8 @@ impl MigrationTest {
                 .await?;
             tree.push((resource.path.as_str().to_string(), bytes.to_vec()));
         }
-        tree.sort_by_key(|(path, _)| (!is_profile(path), path.clone()));
+        let profile = self.layout.profile_path();
+        tree.sort_by_key(|(path, _)| (!same_path(path, &profile), path.clone()));
         Ok(tree)
     }
 
@@ -915,10 +889,8 @@ fn stored_files(dir: &std::path::Path) -> Result<usize> {
     Ok(count)
 }
 
-fn is_profile(path: &str) -> bool {
-    path.trim_start_matches('/') == PubkyAppUser::create_path().trim_start_matches('/')
-}
-
-pub fn post_uri(user: &Keypair, post_id: &str) -> String {
-    post_uri_builder(user.public_key().to_z32(), post_id.to_string())
+/// Whether two owner-relative paths name one resource, with or without the
+/// leading slash.
+pub fn same_path(a: &str, b: &str) -> bool {
+    a.trim_start_matches('/') == b.trim_start_matches('/')
 }

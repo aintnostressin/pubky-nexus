@@ -7,7 +7,7 @@ use nexus_common::models::user::RecheckOutcome;
 use pubky::{Keypair, Pubky};
 use serde_json::{json, Value};
 
-use crate::harness::{post_uri, MigrationTest};
+use crate::harness::MigrationTest;
 
 /// A mover on A and a scout on the primary who know each other, everything
 /// read once: they follow each other, each has replied to and tagged a post of
@@ -33,16 +33,17 @@ impl Neighbours {
             .resident(&mover, &t.hs_a, "mover", &["first", "second"])
             .await?;
         t.follow(&session_a, &scout_id).await?;
-        t.post(&session_a, "re", Some(post_uri(&scout, &topic)))
+        t.post(&session_a, "re", Some(t.post_uri(&scout, &topic)))
             .await?;
-        t.tag(&session_a, post_uri(&scout, &topic), "nice").await?;
-        t.bookmark(&session_a, post_uri(&scout, &topic)).await?;
+        t.tag(&session_a, t.post_uri(&scout, &topic), "nice")
+            .await?;
+        t.bookmark(&session_a, t.post_uri(&scout, &topic)).await?;
         t.index_external(&t.hs_a).await?;
 
         t.follow(&session_scout, &mover_id).await?;
-        t.post(&session_scout, "hi", Some(post_uri(&mover, &posts[0])))
+        t.post(&session_scout, "hi", Some(t.post_uri(&mover, &posts[0])))
             .await?;
-        t.tag(&session_scout, post_uri(&mover, &posts[0]), "first")
+        t.tag(&session_scout, t.post_uri(&mover, &posts[0]), "first")
             .await?;
         t.index_primary().await?;
         ensure!(

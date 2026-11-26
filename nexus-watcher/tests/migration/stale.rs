@@ -6,7 +6,7 @@ use anyhow::{ensure, Result};
 use nexus_common::models::user::RecheckOutcome;
 use pubky::{Keypair, Pubky};
 
-use crate::harness::{post_uri, MigrationTest};
+use crate::harness::MigrationTest;
 
 /// A per-user read of A lists its users when it starts and reaches each one
 /// in turn, minutes apart on a homeserver with many users. In between, the
@@ -36,7 +36,7 @@ async fn a_read_of_the_old_homeserver_started_before_the_switch_leaves_the_wipe_
     t.index_primary().await?;
     t.ingest(&mover).await?;
     t.index_external(&t.hs_a).await?;
-    t.post(&session_scout, "hi", Some(post_uri(&mover, &first)))
+    t.post(&session_scout, "hi", Some(t.post_uri(&mover, &first)))
         .await?;
     t.index_primary().await?;
     assert_eq!(t.live_posts(&mover).await?, 2);
@@ -88,7 +88,7 @@ async fn reply_waiting_for_its_parent(
     let device_a = t.device()?;
     let session_a = t.signup(&device_a, mover, &t.hs_a, "mover").await?;
     let reply = t
-        .post(&session_a, "a reply", Some(post_uri(scout, &topic)))
+        .post(&session_a, "a reply", Some(t.post_uri(scout, &topic)))
         .await?;
     t.ingest(mover).await?;
     t.index_external(&t.hs_a).await?;
@@ -242,10 +242,7 @@ async fn a_retry_queued_on_the_old_homeserver_is_dropped_once_the_user_left_it()
     assert_eq!(t.live_posts(&mover).await?, 1);
 
     // The mover deletes the reply on B.
-    session_b
-        .storage()
-        .delete(format!("/pub/pubky.app/posts/{reply}").as_str())
-        .await?;
+    t.delete_post(&session_b, &reply).await?;
     t.index_external(&t.hs_b).await?;
     assert_eq!(t.live_posts(&mover).await?, 0);
     let scout_notifications = t.notifications(&scout).await?;

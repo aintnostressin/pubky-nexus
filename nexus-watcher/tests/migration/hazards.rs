@@ -9,7 +9,7 @@ use nexus_common::models::user::{PubkyConnectorResolver, RecheckOutcome, UserIng
 use pubky::Keypair;
 use pubky_social_specs::PubkyId;
 
-use crate::harness::{post_uri, MigrationTest};
+use crate::harness::MigrationTest;
 
 /// A device whose cache still names the old homeserver keeps writing there
 /// after the switch. Nexus follows the record, so those writes are indexed
@@ -247,7 +247,7 @@ async fn an_edit_on_the_old_homeserver_after_the_copy_is_reverted_by_the_switch(
     t.index_primary().await?;
     t.ingest(&mover).await?;
     t.index_external(&t.hs_a).await?;
-    t.post(&session_scout, "hi", Some(post_uri(&mover, &post)))
+    t.post(&session_scout, "hi", Some(t.post_uri(&mover, &post)))
         .await?;
     t.index_primary().await?;
     let scout_notifications = t.notifications(&scout).await?;
@@ -315,7 +315,7 @@ async fn a_delete_on_the_old_homeserver_after_the_copy_is_undone_by_the_switch()
     let device_scout = t.device()?;
     let session_scout = t.signup(&device_scout, &scout, &t.primary, "scout").await?;
     let (device_a, session_a, posts) = t.resident(&mover, &t.hs_a, "mover", &["first"]).await?;
-    t.post(&session_scout, "hi", Some(post_uri(&mover, &posts[0])))
+    t.post(&session_scout, "hi", Some(t.post_uri(&mover, &posts[0])))
         .await?;
     t.index_primary().await?;
 
