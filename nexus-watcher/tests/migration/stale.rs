@@ -6,7 +6,8 @@ use anyhow::{ensure, Result};
 use nexus_common::models::user::RecheckOutcome;
 use pubky::{Keypair, Pubky};
 
-use crate::harness::MigrationTest;
+use crate::harness::{Layout, MigrationTest};
+use crate::layout::in_each_layout;
 
 /// A per-user read of A lists its users when it starts and reaches each one
 /// in turn, minutes apart on a homeserver with many users. In between, the
@@ -21,10 +22,10 @@ use crate::harness::MigrationTest;
 /// Without that check the wipe was applied: the posts were deleted, the
 /// profile tombstoned, the scout told the post was deleted and, after B's
 /// read restored it, that it was edited.
-#[tokio_shared_rt::test(shared)]
 async fn a_read_of_the_old_homeserver_started_before_the_switch_leaves_the_wipe_unread(
+    layout: Layout,
 ) -> Result<()> {
-    let t = MigrationTest::setup().await?;
+    let t = MigrationTest::setup_in(layout).await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
 
     let device_a = t.device()?;
@@ -102,9 +103,10 @@ async fn reply_waiting_for_its_parent(
 /// address, so it now names B as the homeserver it came from. The parent
 /// arrives, the retry runs for a user bound to B and applies the reply once.
 /// A second retry and a second read of B add nothing.
-#[tokio_shared_rt::test(shared)]
-async fn a_retry_queued_again_on_the_new_homeserver_is_applied_there_once() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn a_retry_queued_again_on_the_new_homeserver_is_applied_there_once(
+    layout: Layout,
+) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
     let (device_a, _) = reply_waiting_for_its_parent(&t, &mover, &scout).await?;
 
@@ -148,9 +150,10 @@ async fn a_retry_queued_again_on_the_new_homeserver_is_applied_there_once() -> R
 /// An accepted limit of the drop, which assumes the user's new homeserver
 /// delivers what it holds. It takes an event still waiting in the retry
 /// queue, a move away and a return to the same homeserver.
-#[tokio_shared_rt::test(shared)]
-async fn a_retry_dropped_while_the_user_was_away_stays_dropped_when_they_return() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn a_retry_dropped_while_the_user_was_away_stays_dropped_when_they_return(
+    layout: Layout,
+) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
     let (device_a, _) = reply_waiting_for_its_parent(&t, &mover, &scout).await?;
     t.index_primary().await?;
@@ -184,10 +187,10 @@ async fn a_retry_dropped_while_the_user_was_away_stays_dropped_when_they_return(
 /// entry now names B. The mover returns to A before the parent arrives. When
 /// the retry runs, the mover is bound to A and the entry came from B, so it
 /// is dropped, and A's cursor is past the reply.
-#[tokio_shared_rt::test(shared)]
 async fn a_retry_queued_again_on_a_homeserver_the_user_left_is_dropped_when_they_return(
+    layout: Layout,
 ) -> Result<()> {
-    let t = MigrationTest::setup().await?;
+    let t = MigrationTest::setup_in(layout).await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
     let (device_a, _) = reply_waiting_for_its_parent(&t, &mover, &scout).await?;
 
@@ -226,9 +229,10 @@ async fn a_retry_queued_again_on_a_homeserver_the_user_left_is_dropped_when_they
 /// and indexed it again: a reply the user deleted was back, and the scout's
 /// reply notification was issued again, as the newest. The window was the
 /// retry backoff, up to an hour between attempts.
-#[tokio_shared_rt::test(shared)]
-async fn a_retry_queued_on_the_old_homeserver_is_dropped_once_the_user_left_it() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn a_retry_queued_on_the_old_homeserver_is_dropped_once_the_user_left_it(
+    layout: Layout,
+) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
     let (device_a, reply) = reply_waiting_for_its_parent(&t, &mover, &scout).await?;
     t.index_primary().await?;
@@ -274,9 +278,10 @@ async fn a_retry_queued_on_the_old_homeserver_is_dropped_once_the_user_left_it()
 /// The sweep does not move a binding on a record older than the one the
 /// binding was set from: the recheck keeps the record's timestamp on the
 /// binding and the sweep ignores anything older (`MappingUpdate::IgnoredOlder`).
-#[tokio_shared_rt::test(shared)]
-async fn the_watchers_sweep_moves_the_user_back_after_a_recheck_through_the_api() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn the_watchers_sweep_moves_the_user_back_after_a_recheck_through_the_api(
+    layout: Layout,
+) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let mover = Keypair::random();
     let watcher = t.device()?;
 
@@ -315,4 +320,13 @@ async fn the_watchers_sweep_moves_the_user_back_after_a_recheck_through_the_api(
         "(binding, live posts, (tombstoned, name))"
     );
     Ok(())
+}
+
+in_each_layout! {
+    a_read_of_the_old_homeserver_started_before_the_switch_leaves_the_wipe_unread,
+    a_retry_queued_again_on_the_new_homeserver_is_applied_there_once,
+    a_retry_dropped_while_the_user_was_away_stays_dropped_when_they_return,
+    a_retry_queued_again_on_a_homeserver_the_user_left_is_dropped_when_they_return,
+    a_retry_queued_on_the_old_homeserver_is_dropped_once_the_user_left_it,
+    the_watchers_sweep_moves_the_user_back_after_a_recheck_through_the_api,
 }
