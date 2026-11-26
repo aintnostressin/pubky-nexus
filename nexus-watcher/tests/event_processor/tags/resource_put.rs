@@ -95,6 +95,60 @@ async fn test_homeserver_put_resource_tag_external_uri() -> Result<()> {
     Ok(())
 }
 
+/// The v0 reader caps no tag target length, so Nexus refuses a `pubky.app` tag on a URL longer
+/// than a `social/v1` tag's target may be. The refusal is never retried, so the tagger's next tag
+/// is still indexed.
+#[tokio_shared_rt::test(shared)]
+async fn test_homeserver_resource_tag_on_a_url_over_the_cap_is_refused() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+
+    let user_kp = Keypair::random();
+    let tagger = PubkyAppUser {
+        bio: Some("test_resource_tag_long_url".to_string()),
+        image: None,
+        links: None,
+        name: "Watcher:ResourceTag:LongUrl".to_string(),
+        status: None,
+    };
+    test.create_user(&user_kp, &tagger).await?;
+
+    let run = Utc::now().timestamp_millis();
+    let long_uri = format!("https://example.com/search/{run}?q={}", "a".repeat(9_000));
+    let short_uri = format!("https://example.com/search/{run}");
+    let mut paths = Vec::new();
+    for uri in [&long_uri, &short_uri] {
+        let tag = PubkyAppTag {
+            uri: uri.clone(),
+            label: "longurl".to_string(),
+            created_at: Utc::now().timestamp_millis(),
+        };
+        let tag_path = tag.hs_path();
+        test.put(&user_kp, &tag_path, &tag).await?;
+        paths.push(tag_path);
+    }
+
+    assert!(
+        find_resource_tag(&compute_resource_id(&long_uri), "longurl")
+            .await?
+            .is_none(),
+        "the tag on a URL over the cap is refused"
+    );
+    assert!(
+        find_resource_tag(&compute_resource_id(&short_uri), "longurl")
+            .await?
+            .is_some(),
+        "the next tag is indexed"
+    );
+
+    for tag_path in paths {
+        test.del(&user_kp, &tag_path).await?;
+    }
+    TagSearch::del_from_index("longurl").await?;
+    test.cleanup_user(&user_kp).await?;
+
+    Ok(())
+}
+
 /// A retried put finds the edge already written (`Updated`) and adds the label to
 /// the tag search index again, so a lost index write heals.
 #[tokio_shared_rt::test(shared)]

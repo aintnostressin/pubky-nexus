@@ -777,6 +777,21 @@ pub fn resource_label_taggers(
     .param("limit", limit as i64)
 }
 
+/// The id and address of every Resource of `scheme` whose address starts with `prefix`.
+///
+/// Read through `resourceSchemeIndex` and filtered by prefix: `uri` has no index, because a
+/// RANGE index rejects a key over 8 kB and would fail the tag write of a long URL.
+pub fn resources_by_uri_prefix(scheme: &str, prefix: &str) -> Query {
+    Query::new(
+        "resources_by_uri_prefix",
+        "MATCH (r:Resource {scheme: $scheme})
+         WHERE r.uri STARTS WITH $prefix
+         RETURN r.id AS resource_id, r.uri AS uri",
+    )
+    .param("scheme", scheme)
+    .param("prefix", prefix)
+}
+
 /// Query a stream of Resources with an optional tag filter.
 ///
 /// Ordering:

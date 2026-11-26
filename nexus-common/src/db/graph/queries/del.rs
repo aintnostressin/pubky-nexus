@@ -90,6 +90,18 @@ pub fn delete_tag(user_id: &str, tag_id: &str) -> Query {
     .param("tag_id", tag_id)
 }
 
+/// Deletes the Resource nodes `resource_ids` names, with every tag on them. An id with no
+/// node is skipped.
+pub fn delete_resources(resource_ids: &[String]) -> Query {
+    Query::new(
+        "delete_resources",
+        "UNWIND $resource_ids AS resource_id
+         MATCH (r:Resource {id: resource_id})
+         DETACH DELETE r",
+    )
+    .param("resource_ids", resource_ids.to_vec())
+}
+
 /// Deletes a file node and all its relationships
 /// # Arguments
 /// * `owner_id` - The unique identifier of the user who owns the file

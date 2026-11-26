@@ -5,6 +5,7 @@
 
 use super::social_v1::{cleanup_v1_user, handler_over_mock, v1_user, V1File};
 use crate::event_processor::posts::utils::test_user;
+use crate::event_processor::tags::resource_utils::{compute_resource_id, resource_exists_in_graph};
 use crate::event_processor::users::utils::set_user_epoch;
 use crate::event_processor::utils::watcher::{
     assert_file_details, retrieve_and_handle_event_line, HomeserverHashIdPath, WatcherTest,
@@ -93,6 +94,22 @@ async fn create_v1_file(
     assert!(main.exists(), "the v1 file's main must be on disk");
     let uri = file.uri(user_id);
     Ok((file, uri, main))
+}
+
+/// `tagger_kp` tags `target_uri`, which Nexus indexes as a `Resource` tag; returns the
+/// `Resource` id.
+async fn tag_resource(
+    test: &mut WatcherTest,
+    tagger_kp: &Keypair,
+    target_uri: &str,
+) -> Result<String> {
+    let tag = PubkyAppTag {
+        uri: target_uri.to_string(),
+        label: "takedown_resource".to_string(),
+        created_at: Utc::now().timestamp_millis(),
+    };
+    test.put(tagger_kp, &tag.hs_path(), tag).await?;
+    Ok(compute_resource_id(target_uri))
 }
 
 /// Whether the owner's `File` node for `file_id` exists.
@@ -252,5 +269,167 @@ async fn test_takedown_of_a_v1_address_leaves_the_legacy_file_alone() -> Result<
     set_user_epoch(&author_id, "v0").await?;
     let v0_path: ResourcePath = PubkyAppFile::create_path(&file_id).parse()?;
     test.cleanup_file(&author_kp, &v0_path).await?;
+    test.cleanup_user(&author_kp).await
+}
+
+/// A takedown of a v1 file takes down the tags on every address of its bytes, whatever the
+/// extension, and a later tag on one of them stays out. Another blob's address keeps its tags.
+#[tokio_shared_rt::test(shared)]
+async fn test_takedown_of_a_v1_file_takes_down_the_tags_on_its_addresses() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+    let moderator_kp = create_moderator(&mut test).await?;
+    let (author_kp, author_id) = v1_user(&mut test, "Watcher:V1File:TagTakedown").await?;
+    let tagger_kp = Keypair::random();
+    test.create_user(&tagger_kp, &test_user("Watcher:V1File:Tagger", "tagger"))
+        .await?;
+    let (file, uri, _) = create_v1_file(
+        &mut test,
+        &author_kp,
+        &author_id,
+        "Watcher:V1File:TagTakedown",
+    )
+    .await?;
+    let as_bin = uri.replace(".png", ".bin");
+    let other_blob =
+        V1File::new(b"Watcher:V1File:TagTakedown:Other".to_vec(), "png").uri(&author_id);
+
+    let on_png = tag_resource(&mut test, &tagger_kp, &uri).await?;
+    let on_bin = tag_resource(&mut test, &tagger_kp, &as_bin).await?;
+    let on_other = tag_resource(&mut test, &tagger_kp, &other_blob).await?;
+    for id in [&on_png, &on_bin, &on_other] {
+        assert!(resource_exists_in_graph(id).await?);
+    }
+
+    moderate(&mut test, &moderator_kp, &uri).await?;
+
+    assert!(
+        !resource_exists_in_graph(&on_png).await?,
+        "the tagged address goes"
+    );
+    assert!(
+        !resource_exists_in_graph(&on_bin).await?,
+        "the same bytes under another extension go"
+    );
+    assert!(
+        resource_exists_in_graph(&on_other).await?,
+        "another blob's tags stay"
+    );
+
+    let as_jpg = tag_resource(&mut test, &tagger_kp, &uri.replace(".png", ".jpg")).await?;
+    assert!(
+        !resource_exists_in_graph(&as_jpg).await?,
+        "a later tag stays out"
+    );
+
+    test.cleanup_user(&tagger_kp).await?;
+    file.del(&mut test, &author_kp).await?;
+    cleanup_v1_user(&mut test, &author_kp, &author_id).await
+}
+
+/// A takedown of a v0 file takes down the tags on its address, in any spelling its reader
+/// accepts (a trailing slash), and on the `social/v1` addresses of its bytes, where the flip
+/// copies it. Another file's address keeps its tags.
+#[tokio_shared_rt::test(shared)]
+async fn test_takedown_of_a_v0_file_takes_down_the_tags_on_its_addresses() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+    let moderator_kp = create_moderator(&mut test).await?;
+    let author_kp = Keypair::random();
+    let author_id = test
+        .create_user(
+            &author_kp,
+            &test_user("Watcher:V0File:TagTakedown", "takedown"),
+        )
+        .await?;
+    let tagger_kp = Keypair::random();
+    test.create_user(&tagger_kp, &test_user("Watcher:V0File:Tagger", "tagger"))
+        .await?;
+    let content = "Watcher:V0File:TagTakedown";
+    let (_, v0_uri, _) = create_v0_file(&mut test, &author_kp, &author_id, content).await?;
+    let (kept_id, kept_uri, _) = create_v0_file(
+        &mut test,
+        &author_kp,
+        &author_id,
+        "Watcher:V0File:TagTakedown:Kept",
+    )
+    .await?;
+    let flip_copy = V1File::new(content.as_bytes().to_vec(), "txt").uri(&author_id);
+
+    let on_v0 = tag_resource(&mut test, &tagger_kp, &v0_uri).await?;
+    let on_slash = tag_resource(&mut test, &tagger_kp, &format!("{v0_uri}/")).await?;
+    let on_copy = tag_resource(&mut test, &tagger_kp, &flip_copy).await?;
+    let on_kept = tag_resource(&mut test, &tagger_kp, &kept_uri).await?;
+    for id in [&on_v0, &on_slash, &on_copy, &on_kept] {
+        assert!(resource_exists_in_graph(id).await?);
+    }
+
+    moderate(&mut test, &moderator_kp, &v0_uri).await?;
+
+    assert!(
+        !resource_exists_in_graph(&on_v0).await?,
+        "the file's address goes"
+    );
+    assert!(
+        !resource_exists_in_graph(&on_slash).await?,
+        "its address with a trailing slash goes"
+    );
+    assert!(
+        !resource_exists_in_graph(&on_copy).await?,
+        "the address of its flip copy goes"
+    );
+    assert!(
+        resource_exists_in_graph(&on_kept).await?,
+        "another file's tags stay"
+    );
+
+    let later = tag_resource(&mut test, &tagger_kp, &v0_uri).await?;
+    assert!(
+        !resource_exists_in_graph(&later).await?,
+        "a later tag stays out"
+    );
+
+    test.cleanup_user(&tagger_kp).await?;
+    let kept_path: ResourcePath = PubkyAppFile::create_path(&kept_id).parse()?;
+    test.cleanup_file(&author_kp, &kept_path).await?;
+    test.cleanup_user(&author_kp).await
+}
+
+/// A moderator tag on a spelling of a v0 file address that its prefix read misses (a `:port`)
+/// still takes down the `Resource` at that spelling.
+#[tokio_shared_rt::test(shared)]
+async fn test_takedown_through_a_spelling_with_a_port_removes_its_resource() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+    let moderator_kp = create_moderator(&mut test).await?;
+    let author_kp = Keypair::random();
+    let author_id = test
+        .create_user(
+            &author_kp,
+            &test_user("Watcher:V0File:PortTakedown", "takedown"),
+        )
+        .await?;
+    let tagger_kp = Keypair::random();
+    test.create_user(
+        &tagger_kp,
+        &test_user("Watcher:V0File:PortTagger", "tagger"),
+    )
+    .await?;
+    let (_, v0_uri, _) = create_v0_file(
+        &mut test,
+        &author_kp,
+        &author_id,
+        "Watcher:V0File:PortTakedown",
+    )
+    .await?;
+    let with_port = v0_uri.replacen(&author_id, &format!("{author_id}:1"), 1);
+
+    let on_port = tag_resource(&mut test, &tagger_kp, &with_port).await?;
+    assert!(resource_exists_in_graph(&on_port).await?);
+
+    moderate(&mut test, &moderator_kp, &with_port).await?;
+
+    assert!(
+        !resource_exists_in_graph(&on_port).await?,
+        "the tagged spelling goes"
+    );
+    test.cleanup_user(&tagger_kp).await?;
     test.cleanup_user(&author_kp).await
 }
