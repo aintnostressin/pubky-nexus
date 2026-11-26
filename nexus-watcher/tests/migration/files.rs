@@ -1,20 +1,24 @@
-//! Uploads across a switch: a file record names a blob, and nexus downloads
-//! the blob from the homeserver that delivered the record.
+//! Uploads across a switch. In `pubky.app` a file record names a blob, and
+//! nexus downloads the blob from the homeserver that delivered the record. In
+//! `social/v1` an upload is one file with no record, downloaded from the
+//! homeserver that delivered its write.
 
 use anyhow::Result;
 use nexus_common::models::user::RecheckOutcome;
 use pubky::Keypair;
 
-use crate::harness::{MigrationTest, Tree};
+use crate::harness::{Layout, MigrationTest, Tree};
+use crate::layout::in_each_layout;
 
 /// The mover wipes A after the copy and nexus reads the wipe before it
 /// notices the switch: the file record and the stored file are removed. The
 /// switch reads B, whose copy brings the record again, and the blob is
-/// downloaded from B. One record, one stored file, before and after.
-#[tokio_shared_rt::test(shared)]
+/// downloaded from B. One record, one stored file, before and after; in
+/// `social/v1` one stored file and never a record.
 async fn a_file_wiped_before_nexus_notices_is_downloaded_again_from_the_new_homeserver(
+    layout: Layout,
 ) -> Result<()> {
-    let t = MigrationTest::setup().await?;
+    let t = MigrationTest::setup_in(layout).await?;
     let mover = Keypair::random();
 
     let device_a = t.device()?;
@@ -22,7 +26,7 @@ async fn a_file_wiped_before_nexus_notices_is_downloaded_again_from_the_new_home
     t.upload(&session_a, &mover, b"pixels").await?;
     t.ingest(&mover).await?;
     t.index_external(&t.hs_a).await?;
-    assert_eq!(t.files(&mover).await?, (1, 1));
+    assert_eq!(t.files(&mover).await?, layout.indexed_uploads(1));
 
     let tree = t.public_tree(&device_a, &mover).await?;
     t.signup_and_copy(&mover, &t.hs_b, "mover", &device_a)
@@ -34,7 +38,7 @@ async fn a_file_wiped_before_nexus_notices_is_downloaded_again_from_the_new_home
     assert_eq!(t.recheck(&mover).await?.outcome, RecheckOutcome::Switched);
     t.index_external(&t.hs_b).await?;
     t.index_external(&t.hs_b).await?;
-    assert_eq!(t.files(&mover).await?, (1, 1));
+    assert_eq!(t.files(&mover).await?, layout.indexed_uploads(1));
     Ok(())
 }
 
@@ -74,4 +78,8 @@ async fn a_file_record_read_before_its_blob_is_never_indexed() -> Result<()> {
 
     assert_eq!(t.files(&mover).await?, (0, 0));
     Ok(())
+}
+
+in_each_layout! {
+    a_file_wiped_before_nexus_notices_is_downloaded_again_from_the_new_homeserver,
 }

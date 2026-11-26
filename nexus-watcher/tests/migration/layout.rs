@@ -91,6 +91,16 @@ impl Layout {
             Self::SocialV1 => Ok(vec![social_v1::file(bytes)]),
         }
     }
+
+    /// What `MigrationTest::files` reports while nexus holds `uploads` of a
+    /// user: a record and a stored file for each in `pubky.app`, only the
+    /// stored file in `social/v1`, where a file has no record.
+    pub fn indexed_uploads(self, uploads: usize) -> (i64, usize) {
+        match self {
+            Self::PubkyApp => (uploads as i64, uploads),
+            Self::SocialV1 => (0, uploads),
+        }
+    }
 }
 
 /// Declares each named scenario of the calling module, an
