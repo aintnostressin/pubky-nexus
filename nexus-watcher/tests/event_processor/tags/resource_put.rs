@@ -95,10 +95,11 @@ async fn test_homeserver_put_resource_tag_external_uri() -> Result<()> {
     Ok(())
 }
 
-/// A `pubky.app` tag caps no URI length, so a tag on a URL longer than the 8 kB a Neo4j RANGE
-/// index key may hold is indexed too: no index is kept on a `Resource`'s address.
+/// The v0 reader caps no tag target length, so Nexus refuses a `pubky.app` tag on a URL longer
+/// than a `social/v1` tag's target may be. Neo4j refuses to index a value over 8 kB, and the
+/// refusal is never retried, so the tagger's next tag is still indexed.
 #[tokio_shared_rt::test(shared)]
-async fn test_homeserver_put_resource_tag_on_a_url_over_8_kb() -> Result<()> {
+async fn test_homeserver_resource_tag_on_a_url_over_the_cap_is_refused() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
@@ -111,22 +112,37 @@ async fn test_homeserver_put_resource_tag_on_a_url_over_8_kb() -> Result<()> {
     };
     test.create_user(&user_kp, &tagger).await?;
 
-    let target_uri = format!("https://example.com/search?q={}", "a".repeat(9_000));
-    let tag = PubkyAppTag {
-        uri: target_uri.clone(),
-        label: "longurl".to_string(),
-        created_at: Utc::now().timestamp_millis(),
-    };
-    let tag_path = tag.hs_path();
-    test.put(&user_kp, &tag_path, &tag).await?;
+    let run = Utc::now().timestamp_millis();
+    let long_uri = format!("https://example.com/search/{run}?q={}", "a".repeat(9_000));
+    let short_uri = format!("https://example.com/search/{run}");
+    let mut paths = Vec::new();
+    for uri in [&long_uri, &short_uri] {
+        let tag = PubkyAppTag {
+            uri: uri.clone(),
+            label: "longurl".to_string(),
+            created_at: Utc::now().timestamp_millis(),
+        };
+        let tag_path = tag.hs_path();
+        test.put(&user_kp, &tag_path, &tag).await?;
+        paths.push(tag_path);
+    }
 
-    let resource_id = compute_resource_id(&target_uri);
     assert!(
-        find_resource_tag(&resource_id, "longurl").await?.is_some(),
-        "the tag on a long URL must be indexed"
+        find_resource_tag(&compute_resource_id(&long_uri), "longurl")
+            .await?
+            .is_none(),
+        "the tag on a URL over the cap is refused"
+    );
+    assert!(
+        find_resource_tag(&compute_resource_id(&short_uri), "longurl")
+            .await?
+            .is_some(),
+        "the next tag is indexed"
     );
 
-    test.del(&user_kp, &tag_path).await?;
+    for tag_path in paths {
+        test.del(&user_kp, &tag_path).await?;
+    }
     TagSearch::del_from_index("longurl").await?;
     test.cleanup_user(&user_kp).await?;
 

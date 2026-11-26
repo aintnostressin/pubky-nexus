@@ -289,6 +289,32 @@ async fn test_moderation_takes_down_a_foreign_resource_with_every_tag_on_it() ->
     Ok(())
 }
 
+/// A moderator tag on a URL longer than a `social/v1` tag's target may be is refused like any
+/// such tag, so no takedown is written under a key Neo4j can't index, and the moderator's next
+/// tag still applies.
+#[tokio_shared_rt::test(shared)]
+async fn test_moderation_of_a_url_over_the_cap_is_refused() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+    let moderator_kp = create_moderator(&mut test).await?;
+
+    let run = Utc::now().timestamp_millis();
+    let long_url = format!(
+        "https://example.com/takedown-long/{run}?q={}",
+        "a".repeat(9_000)
+    );
+    let short_url = format!("https://example.com/takedown-long/{run}");
+    moderate_tag(&mut test, &moderator_kp, &long_url).await?;
+    moderate_tag(&mut test, &moderator_kp, &short_url).await?;
+
+    assert!(!is_taken_down(&long_url).await?, "no takedown is recorded");
+    assert!(
+        is_taken_down(&short_url).await?,
+        "the moderator's next tag applies"
+    );
+
+    Ok(())
+}
+
 /// A takedown of a foreign URI that nobody tagged yet is recorded, so the tags read after it
 /// never create its `Resource`.
 #[tokio_shared_rt::test(shared)]

@@ -26,7 +26,8 @@ use pubky_social_specs::legacy_v0::{
 /// Every error is deterministic and never retried: a resource with no handler is
 /// [`EventProcessorError::InvalidEventLine`], a pipeline bug surfacing as a dropped, logged
 /// event, since parsing skips or rejects those first; bytes the reader rejects, and a file
-/// whose `src` is no v0 blob address, are [`EventProcessorError::SpecValidation`].
+/// whose `src` is no v0 blob address, and a tag whose target is longer than `social/v1` allows
+/// ([`read_tag`]), are [`EventProcessorError::SpecValidation`].
 pub fn translate_put(
     event_uri: &str,
     parsed: &ExtendedParsedUri,
@@ -61,7 +62,7 @@ pub fn translate_put(
             },
         },
         Resource::Tag(tag_id) => TranslatedPut::Tag {
-            tag: TagInput::from_v0(read::<PubkyAppTag>(bytes, tag_id)?, uri),
+            tag: TagInput::from_v0(read_tag(bytes, tag_id)?, uri),
             key: ResourceKey {
                 owner_id: user_id,
                 resource_id: tag_id.clone(),
@@ -276,6 +277,21 @@ impl TagInput {
             label: tag.label,
         }
     }
+}
+
+/// Reads a v0 tag and refuses one whose target is longer than a `social/v1` tag's may be
+/// (`reference_uri_max_length` characters). The v0 reader caps no length, and a target is stored
+/// and indexed as written (a `Resource`'s address, a takedown's key), where Neo4j refuses a value
+/// over 8 kB and the write fails. Such a tag also has no `social/v1` form: the migration skips it.
+fn read_tag(bytes: &[u8], tag_id: &str) -> Result<PubkyAppTag, EventProcessorError> {
+    let tag = read::<PubkyAppTag>(bytes, tag_id)?;
+    let max = pubky_social_specs::VALIDATION_LIMITS.reference_uri_max_length;
+    if tag.uri.chars().count() > max {
+        return Err(EventProcessorError::SpecValidation(format!(
+            "Tag target exceeds maximum length of {max} characters"
+        )));
+    }
+    Ok(tag)
 }
 
 /// Runs the frozen v0 reader for one object type; a rejection is spec validation.
@@ -695,6 +711,24 @@ mod tests {
                 v0_kind.to_string()
             );
         }
+    }
+
+    #[test]
+    fn tag_target_is_capped_at_the_social_v1_length() {
+        let max = pubky_social_specs::VALIDATION_LIMITS.reference_uri_max_length;
+        let base = "https://example.com/";
+        let at_max = format!("{base}{}", "a".repeat(max - base.len()));
+
+        let tag = PubkyAppTag::new(at_max.clone(), "nexus".to_string());
+        assert_eq!(translate_tag(&tag).tagged.uri, at_max);
+
+        let tag = PubkyAppTag::new(format!("{at_max}a"), "nexus".to_string());
+        let path = format!("pubky.app/tags/{}", tag.create_id());
+        assert!(matches!(
+            put_at(&path, &bytes(&tag)),
+            Err(EventProcessorError::SpecValidation(message))
+                if message == format!("Tag target exceeds maximum length of {max} characters")
+        ));
     }
 
     #[test]
