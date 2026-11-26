@@ -5,16 +5,16 @@ use anyhow::Result;
 use nexus_common::models::user::RecheckOutcome;
 use pubky::Keypair;
 
-use crate::harness::MigrationTest;
+use crate::harness::{Layout, MigrationTest};
+use crate::layout::in_each_layout;
 
 /// External to primary. The bulk stream skips the user's events while the
 /// edge still names the old homeserver, which leaves the user to the primary's
 /// per-user read: after the switch it reads their own history on the primary,
 /// and everything they write there later. The bulk stream never takes them
 /// back.
-#[tokio_shared_rt::test(shared)]
-async fn external_to_primary_is_read_per_user_from_then_on() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn external_to_primary_is_read_per_user_from_then_on(layout: Layout) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let mover = Keypair::random();
 
     let (device_a, _, _) = t
@@ -63,9 +63,8 @@ async fn external_to_primary_is_read_per_user_from_then_on() -> Result<()> {
 /// which starts after the cursor the bulk stream had reached: what it applied
 /// before is not read again. The return is read per user from there, and so
 /// is everything they write on the primary afterwards.
-#[tokio_shared_rt::test(shared)]
-async fn primary_to_external_and_back() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn primary_to_external_and_back(layout: Layout) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let mover = Keypair::random();
 
     let device_p = t.device()?;
@@ -129,9 +128,10 @@ async fn primary_to_external_and_back() -> Result<()> {
 /// the scout's reply, whose parent it does not know: the reply waits in the
 /// retry queue. The per-user read indexes the post after the switch and the
 /// retry then applies the reply, once.
-#[tokio_shared_rt::test(shared)]
-async fn a_reply_to_a_post_the_bulk_stream_passed_over_waits_for_the_per_user_read() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn a_reply_to_a_post_the_bulk_stream_passed_over_waits_for_the_per_user_read(
+    layout: Layout,
+) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
 
     let device_scout = t.device()?;
@@ -186,9 +186,10 @@ async fn a_reply_to_a_post_the_bulk_stream_passed_over_waits_for_the_per_user_re
 /// itself and the mover is never left to the per-user read. A read of A that
 /// had listed the mover before the switch reaches them after A was wiped and
 /// leaves the wipe unread. Nothing is counted or notified twice.
-#[tokio_shared_rt::test(shared)]
-async fn a_copy_the_bulk_stream_reads_after_the_switch_changes_nothing() -> Result<()> {
-    let t = MigrationTest::setup().await?;
+async fn a_copy_the_bulk_stream_reads_after_the_switch_changes_nothing(
+    layout: Layout,
+) -> Result<()> {
+    let t = MigrationTest::setup_in(layout).await?;
     let (mover, scout) = (Keypair::random(), Keypair::random());
 
     let device_scout = t.device()?;
@@ -313,4 +314,11 @@ async fn a_wipe_of_the_primary_by_a_user_not_bound_yet_is_left_unread_once_they_
         "the record names A: the wipe is not the primary's to apply"
     );
     Ok(())
+}
+
+in_each_layout! {
+    external_to_primary_is_read_per_user_from_then_on,
+    primary_to_external_and_back,
+    a_reply_to_a_post_the_bulk_stream_passed_over_waits_for_the_per_user_read,
+    a_copy_the_bulk_stream_reads_after_the_switch_changes_nothing,
 }
